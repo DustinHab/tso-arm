@@ -5,6 +5,6 @@ set -e
 R=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p $R/build
 gcc -O2 -static -pthread -o $R/build/mp-x86 $R/litmus/mp.c
-for v in mp vec rep stack lb sb; do
+for v in mp vec rep stack stackflag vecflag repflag vecwait lb sb; do
     taskset -c 2,3 $R/build/mp-x86 $v 1000000 || true
 done

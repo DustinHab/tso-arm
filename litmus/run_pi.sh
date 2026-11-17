@@ -14,7 +14,7 @@ run() {
     label=$1
     tr=$2
     shift 2
-    for v in mp vec rep stack lb sb; do
+    for v in ${VARIANTS:-mp vec rep stack stackflag vecflag repflag vecwait lb sb}; do
         r=$(env "$@" timeout 300 taskset -c 2,3 $tr $T $v $N 2>&1 | tail -n 1)
         printf '%-20s %s\n' "$label" "$r" | tee -a $out
     done

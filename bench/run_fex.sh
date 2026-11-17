@@ -16,7 +16,7 @@ WORKLOADS=${*:-zstd pigz xz 7zz}
 cmd_of() {
     case $1 in
     zstd) echo "$X/zstd -T4 -3 -f -q -c $C/corpus.tar" ;;
-    pigz) echo "$X/pigz -p 4 -c $C/corpus.tar" ;;
+    pigz) echo "$X/pigz -n -p 4 -c $C/corpus.tar" ;;
     xz) echo "$X/xz -T4 -6 --block-size=2MiB -c $C/corpus8.tar" ;;
     7zz) echo "$X/7zz b 1 -mmt4 -md20" ;;
     esac
@@ -51,7 +51,7 @@ done
 vcgencmd get_throttled
 
 # summary: fastest wall time per workload and config, relative to 'off'
-awk '{ k = $1 " " $2; if (!(k in best) || $4 < best[k]) { best[k] = $4; usr[k] = $5 } ; w[$1] = 1; md5[k] = $7 }
+LC_ALL=C awk '{ k = $1 " " $2; if (!(k in best) || $4 < best[k]) { best[k] = $4; usr[k] = $5 } ; w[$1] = 1; md5[k] = $7 }
      END {
        n = split("off default full oracle-full oracle-default", cf, " ");
        printf "%-6s", "";

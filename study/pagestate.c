@@ -16,10 +16,25 @@
 //   fex      plain under FEX's default settings: accesses based on rsp, vector accesses and string
 //            instructions (rep movs/stos) are not ordered, everything else is (not sound, for comparison)
 //
+// Two ways to give ordered instructions their own view of guest memory (-mode):
+//   views   one ordered view per thread: a thread's own private pages are accessible in it (default)
+//   global  one ordered view for all threads, in which private pages are inaccessible: an ordered access by the
+//           owner to its own private page shares the page as if another thread had touched it
+// Atomic (locked) instructions are always ordered and are treated like ordered accesses.
+//
+// Fault accounting for the cost model (each is a fault plus mprotect calls in the real mechanism):
+//   first    first touch of a page (untouched -> private)
+//   share    private -> shared read-only / read-write
+//   upgrade  shared read-only -> shared read-write; 'revokes' counts the plain views that lose the page
+//   lazy     a thread's first plain read of a shared read-only page (mapped into its plain view on demand)
+//   lazy-o   (views mode) a thread's first ordered access to a shared page (mapped into its ordered view)
+//   escal.   instructions retranslated in the ordered form
+//
 // Options: -out PREFIX    results go to PREFIX.APP.PID.txt (default stderr)
 //          -list PREFIX   also write PREFIX.APP.PID.plain: addresses of the executed instructions of the main
 //                         module that never had to be ordered (input for the oracle experiment in FEX)
 //          -page_shift N  page size 2^N (default 12)
+//          -mode views|global
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -44,8 +59,13 @@ static const char *const class_name[NCLASS] = {"load", "vector load", "store", "
 typedef struct {
     uint32_t word;  // state in bits 0-1, owner thread index + 1 above
     uint32_t pad;
+    uint64_t ro_mask;  // threads whose plain view maps this shared read-only page
+    uint64_t o_mask;   // (views mode) threads whose ordered view maps this shared page
     uint64_t n[NCLASS];
 } page_t;
+
+enum { TR_NONE, TR_FIRST, TR_SHARE, TR_UPGRADE };
+static int mode_global;
 
 #define L2_BITS 16
 #define L1_BITS 20
@@ -64,6 +84,7 @@ typedef struct {
     uint32_t idx;
     uint64_t total[NCLASS], sticky[NCLASS], dynamic[NCLASS], fex[NCLASS];
     uint64_t atomics, nontemporal, transitions, escalations;
+    uint64_t f_first, f_share, f_upgrade, f_lazy, f_lazy_o, revokes;
 } tls_t;
 
 static int tls_idx;
@@ -91,23 +112,32 @@ static page_t *page_of(uintptr_t pn) {
     return &chunk[pn & ((1u << L2_BITS) - 1)];
 }
 
-// Applies the transition for an access by thread 'me' (index + 1); returns the page word after it.
-static uint32_t touch(page_t *pg, uint32_t me, int write, int *changed) {
+// Applies the transition for an access by thread 'me' (index + 1); returns the page word after it and the kind of
+// transition in *kind. 'as_foreign': the access cannot reach the thread's own private pages (global ordered view).
+static uint32_t touch(page_t *pg, uint32_t me, int write, int as_foreign, int *kind) {
     uint32_t w = __atomic_load_n(&pg->word, __ATOMIC_ACQUIRE);
     for (;;) {
         uint32_t st = w & 3, nw;
-        if (st == ST_NONE)
-            nw = (me << 2) | ST_PRIV;
-        else if (st == ST_PRIV) {
-            if ((w >> 2) == me) return w;
+        int k;
+        if (st == ST_NONE) {
+            nw = as_foreign ? (write ? ST_SRW : ST_SRO) : ((me << 2) | ST_PRIV);
+            k = TR_FIRST;
+        } else if (st == ST_PRIV) {
+            if ((w >> 2) == me && !as_foreign) return w;
             nw = write ? ST_SRW : ST_SRO;
+            k = TR_SHARE;
         } else if (st == ST_SRO) {
             if (!write) return w;
             nw = ST_SRW;
+            k = TR_UPGRADE;
         } else
             return w;
         if (__atomic_compare_exchange_n(&pg->word, &w, nw, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            *changed = 1;
+            *kind = k;
+            if (k == TR_SHARE && nw == ST_SRO) {
+                // the owner keeps read access in its plain view
+                __atomic_fetch_or(&pg->ro_mask, 1ull << (((w >> 2) - 1) & 63), __ATOMIC_RELAXED);
+            }
             return nw;
         }
     }
@@ -120,15 +150,37 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
     int write = (info & INFO_WRITE) != 0;
     int c = (write ? 2 : 0) + ((info & INFO_VEC) ? 1 : 0);
     uintptr_t first = addr >> page_shift, last = (addr + (size ? size - 1 : 0)) >> page_shift;
-    int ok = 1, changed = 0;
+    uint64_t bit = 1ull << ((me - 1) & 63);
+    int via_ordered = __atomic_load_n(&in->ordered, __ATOMIC_RELAXED) || (info & INFO_ATOMIC);
+    int ok = 1;
     for (uintptr_t pn = first; pn <= last && pn - first < 64; pn++) {
         page_t *pg = page_of(pn);
-        uint32_t w = touch(pg, me, write, &changed);
+        int kind = TR_NONE;
+        uint32_t w = touch(pg, me, write, mode_global && via_ordered, &kind);
         uint32_t st = w & 3;
+        switch (kind) {
+        case TR_FIRST: tl->f_first++; break;
+        case TR_SHARE: tl->f_share++; break;
+        case TR_UPGRADE: {
+            uint64_t m = __atomic_exchange_n(&pg->ro_mask, 0, __ATOMIC_RELAXED);
+            tl->f_upgrade++;
+            tl->revokes += __builtin_popcountll(m);
+            break;
+        }
+        }
+        if (kind != TR_NONE) tl->transitions++;
         if (!((st == ST_PRIV && (w >> 2) == me) || (st == ST_SRO && !write))) ok = 0;
+        if (st == ST_SRO && !write && !via_ordered && !(__atomic_load_n(&pg->ro_mask, __ATOMIC_RELAXED) & bit)) {
+            __atomic_fetch_or(&pg->ro_mask, bit, __ATOMIC_RELAXED);
+            tl->f_lazy++;
+        }
+        if (!mode_global && via_ordered && st >= ST_SRO &&
+            !(__atomic_load_n(&pg->o_mask, __ATOMIC_RELAXED) & bit)) {
+            __atomic_fetch_or(&pg->o_mask, bit, __ATOMIC_RELAXED);
+            tl->f_lazy_o++;
+        }
         if (pn == first && !(info & (INFO_ATOMIC | INFO_NT))) __atomic_fetch_add(&pg->n[c], 1, __ATOMIC_RELAXED);
     }
-    if (changed) tl->transitions++;
     if (info & INFO_ATOMIC) {
         tl->atomics++;
         return;
@@ -265,6 +317,12 @@ static void event_thread_exit(void *dc) {
     sum.nontemporal += tl->nontemporal;
     sum.transitions += tl->transitions;
     sum.escalations += tl->escalations;
+    sum.f_first += tl->f_first;
+    sum.f_share += tl->f_share;
+    sum.f_upgrade += tl->f_upgrade;
+    sum.f_lazy += tl->f_lazy;
+    sum.f_lazy_o += tl->f_lazy_o;
+    sum.revokes += tl->revokes;
     if (tl->idx + 1 > max_threads_seen) max_threads_seen = tl->idx + 1;
     dr_mutex_unlock(merge_lock);
     dr_thread_free(dc, tl, sizeof *tl);
@@ -320,9 +378,15 @@ static void event_exit(void) {
     dr_fprintf(f, "threads %u   page size %d   pages: private %llu, shared read-only %llu, shared read-write %llu\n",
                nthreads, 1 << page_shift, (unsigned long long)pages[ST_PRIV], (unsigned long long)pages[ST_SRO],
                (unsigned long long)pages[ST_SRW]);
-    dr_fprintf(f, "transitions %llu   escalated instructions %llu   locked/xchg %llu   non-temporal %llu\n",
-               (unsigned long long)sum.transitions, (unsigned long long)sum.escalations,
-               (unsigned long long)sum.atomics, (unsigned long long)sum.nontemporal);
+    dr_fprintf(f, "mode %s   transitions %llu   escalated instructions %llu   locked/xchg %llu   non-temporal %llu\n",
+               mode_global ? "global" : "views", (unsigned long long)sum.transitions,
+               (unsigned long long)sum.escalations, (unsigned long long)sum.atomics,
+               (unsigned long long)sum.nontemporal);
+    dr_fprintf(f, "faults: first %llu  share %llu  upgrade %llu (revokes %llu)  lazy %llu  lazy-o %llu  escal. %llu\n",
+               (unsigned long long)sum.f_first, (unsigned long long)sum.f_share,
+               (unsigned long long)sum.f_upgrade, (unsigned long long)sum.revokes,
+               (unsigned long long)sum.f_lazy, (unsigned long long)sum.f_lazy_o,
+               (unsigned long long)sum.escalations);
     dr_fprintf(f, "plain accesses:\n");
     dr_fprintf(f, "%-13s %15s %9s %9s %9s %9s\n", "class", "accesses", "sticky", "dynamic", "page", "fex");
     for (int c = 0; c < NCLASS; c++)
@@ -347,6 +411,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
             list = open_named(argv[++i], "plain");
         else if (strcmp(argv[i], "-page_shift") == 0 && i + 1 < argc)
             page_shift = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-mode") == 0 && i + 1 < argc)
+            mode_global = strcmp(argv[++i], "global") == 0;
     }
     module_data_t *m = dr_get_main_module();
     if (m != NULL) {

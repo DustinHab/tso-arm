@@ -130,6 +130,36 @@ Share of accesses that stay plain under the mechanism ("sticky"), against FEX's 
 Page transitions are the cost side: each one is a fault and at least one `mprotect` in the real mechanism. zstd
 allocates and frees job buffers that wander between threads, hence 47175 transitions in a run of 0.09 s natively.
 
+## 6. Oracle experiment in FEX (2026-11-17)
+
+`fex/oracle_patch.py` (export in `fex/patches/`): `TSO_PLAIN_LIST=FILE` gives FEX a list of guest instruction
+addresses that are translated with plain accesses (`ForceTSO` disabled for them, `rep movs/stos` included); all
+other instructions keep the configured setting. The list is the study's set of executed instructions of the binary
+that never had to be ordered. This is what the mechanism would produce once every instruction has settled, without
+the cost of faults and transitions: an upper bound for it.
+
+Same static binaries as in the study, Pi 5 at a fixed 1.8 GHz, 4 worker threads, wall time, best of 3
+(`bench/run_fex.sh`, raw lines `out/fex_runs.txt` on the test machine). In parentheses: overhead over TSO off.
+
+| Workload | TSO off (wrong) | FEX default (not TSO) | full TSO | full TSO + list | default + list |
+|---|---|---|---|---|---|
+| pigz -p 4, 100 MB | 1.14 s | 1.58 s (+39 %) | 1.64 s (+44 %) | **1.19 s (+4 %)** | 1.15 s (+1 %) |
+| xz -T4 -6, 8 MB | 1.34 s | 1.52 s (+13 %) | 1.56 s (+16 %) | **1.38 s (+3 %)** | 1.37 s (+2 %) |
+| zstd -T4 -3, 100 MB | 0.58 s | 0.68 s (+17 %) | 0.73 s (+26 %) | **0.67 s (+16 %)** | 0.64 s (+10 %) |
+
+User processor time shows the same (pigz: 4.27 s off, 6.02 s default, 6.30 s full, 4.46 s full + list). zstd and xz
+produce the same bytes as natively on x86 in every configuration; pigz's gzip header holds the input file's name and
+time, which differ between the machines, and is identical across the configurations (now run with `pigz -n`).
+
+So for pigz and xz nearly all of the cost of full TSO goes away, and full TSO with the list is faster than FEX's
+unsound default (pigz 1.19 s against 1.58 s). zstd keeps 16 % because it really shares more: its job buffers move
+between threads.
+
+Not yet included: the faults and transitions. With 5 to 11 microseconds per fault on the A76 (`bench/fault_cost.c`)
+the transition counts of section 5 would cost little for pigz (1166) but noticeably for xz (39685) and zstd (47175).
+Most of those are first touches of new pages, which the real mechanism can avoid by assigning pages to the thread
+that maps them; the study now has to model that before the counts mean anything.
+
 Open questions before building it:
 
 1. How much of the time FEX spends on TSO is spent on stores and vector accesses to memory that stays private?
