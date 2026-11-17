@@ -304,3 +304,92 @@ Open questions before building it:
 2. How often do pages change state, and what does a change cost (signal, `mprotect`, TLB shootdown on four cores)?
 3. Address space: the test machine has 39-bit virtual addresses (512 GB), so the number of views times the guest
    window must fit into that.
+
+## 10. Stage 2 in FEX: the page protocol (2026-11-17)
+
+Same patch, now with protection (default with `TSO_VIEWS=1`; `TSO_VIEWS_STAGE1=1` gives stage 1 back):
+
+- Owner table at 2^36, one byte per guest page: 0 nobody, 1..15 private to the thread in that slot, 0xFE shared
+  read-only (bit mask of the plain views that may read), 0xFF shared read-write. Pages of a mapping belong to the
+  thread that maps it, a new thread's stack to that thread from its first instruction (`HandOffStack` in
+  `CreateNewThread`, glibc writes the thread descriptor at the top before `clone`). A leaving thread's pages go
+  back to nobody.
+- Protections: a plain view has its own private pages read-write and shared read-only pages it was granted
+  read-only; everything else is inaccessible. The ordered view has shared pages accessible, private ones not.
+- Faults (`TSOViewMemory::HandleFault`): a plain access to a page nobody owns claims it; to another thread's
+  private page shares it (read-only on a read, read-write and escalation on a write); a plain write to a shared
+  read-only page upgrades it; a plain access to a shared read-write page escalates. An ordered access (or atomic) to
+  a private page shares it.
+- Escalation: the guest instruction is translated ordered from now on (`ForceTSO` per RIP, `AddTSOEscalation`).
+  Ordered instructions check the owner table: the thread's own private page goes through its plain view (the MMU
+  still guards, a stale answer ends in a fault), anything else through the ordered view.
+
+### The faulting access is completed in the handler
+
+The first version repeated the faulting instruction as a single-instruction block, like FEX does for
+self-modifying code. That is not exact, and three bugs came from it, each found by a wrong program result:
+
+1. AVX upper halves live in FEX's register cache until the block ends; a repeated `vmovdqu` stored zeros in the
+   upper 16 bytes (printf output with 16 NUL bytes).
+2. FEX keeps the carry flag inverted inside a block (subtraction convention) and only rectifies it at block
+   boundaries; restarting after an `add` flipped the carry and `jb` went the other way (`pthread_create` returned
+   `EINVAL` in xz and in `tests/sharedstack.c`).
+3. Instructions may change registers before their access faults (the register allocator writes the new stack
+   pointer of `leave` into the guest register first).
+
+Now `LinuxSyscalls/TSOAccess.cpp` decodes the faulting host load or store (single and pair, immediate, unscaled,
+pre/post-index and register offsets, GPR and SIMD, LDAR/STLR/LDAPR, LDAPUR/STLUR, LD1/ST1 lanes, LD1R), performs it
+on the identity mapping between two full barriers, writes back registers and steps over it. The thread continues
+in the old translation.
+
+That old translation is stale, and a loop in it faults on every iteration (a stack slot read in a loop: the same
+address faulted until the loop guard gave up). So after completing the access the handler writes a trap
+(`ldrb wzr, [x24]`, which faults at guest address 0 in every view) over every instruction start of the block that
+has a RIP entry (`TSOTrapBlockBoundaries`), and a thread reaching one goes back to the dispatcher with the RIP of
+that start, where the code is translated again. For that the state at those starts must be exact:
+
+- every register cache entry is written back before each instruction (MMX, DF and the AVX upper halves, not only
+  the static registers),
+- the carry flag is put into its ABI form before each RIP entry,
+- the register allocator merges nothing across an instruction start (it fused the pop of `leave` with the pop of
+  the following `ret` into one `ldp`, so the stack pointer at the start of `ret` was already 8 bytes further).
+
+The trap is written while other threads run the block. A thread that faults on an instruction which is then
+replaced reads the trap instead; the handler reads the instruction once and treats a trap there as an exit (the
+replaced instruction is the first of its guest instruction and has done nothing yet). FEX's own SIGBUS handler for
+unaligned atomics checks for the trap as well. Before this, zstd crashed in the handler (it emulated the trap).
+
+### Tests
+
+- `litmus/run_views.sh 500000`: every variant 0 forbidden outcomes.
+- `tests/sharedstack.c`: the main thread's stack is made shared, then library code runs on it (printf, qsort,
+  memmove, struct copies, deep recursion) and `pthread_create` is called at 80 stack depths; checksum equal to x86.
+- `tests/threads.c`: 12 threads at once, each with its own heap work; correct.
+- zstd, pigz, xz: output identical to x86 in every run.
+
+### Speed (wall time, best of 3, 1.8 GHz, `bench/run_views.sh`)
+
+| Workload | TSO off | FEX default | full TSO | protocol |
+|---|---|---|---|---|
+| xz | 1.37 s | 1.53 s (1.12) | 1.56 s (1.14) | 1.93 s (1.41) |
+| zstd | 0.59 s | 0.69 s (1.17) | 0.74 s (1.25) | 1.89 s (3.20) |
+| pigz | 1.14 s | 1.60 s (1.40) | 1.65 s (1.45) | 1.77 s (1.55) |
+
+Events per run: pigz 1,700 escalations, 500 shares; zstd 5,500 escalations, 17,000 shares, 12,600 upgrades. Every
+escalation completed in the handler, none repeated; about 85 % of them sent a thread back to the dispatcher.
+
+Stage 1 with the exact instruction starts (all plain, no protocol) costs 7 to 9 % user time over TSO off, a few
+points more than before.
+
+So the protocol is correct and slower than full TSO. Where the time goes:
+
+1. Escalated accesses cost more than in full TSO: the owner check is seven instructions and a dependent load on top
+   of the ordered access.
+2. Every escalation recompiles a block, under FEX's code invalidation lock, and the boundary exits start new blocks
+   at each escalated RIP; pigz spends less processor time than full TSO (5.6 s against 6.3 s) and still loses on
+   wall time.
+3. zstd's job buffers move between threads page by page: 30,000 transitions, each with `mprotect` in every view.
+
+Next: an ordered view per thread instead of the owner check (its own private pages and the shared ones accessible;
+two views per thread fit 15 threads into 39 bits), escalation per block instead of per instruction, transitions
+of whole chunks at a time, and the fallback to full TSO.

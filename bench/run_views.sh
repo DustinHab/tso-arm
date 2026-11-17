@@ -1,7 +1,10 @@
 #!/bin/sh
-# Stage 1 check: the workloads under FEX with and without views, all plain (TSO off) and all ordered (full TSO).
+# The workloads under FEX with and without views. Configurations:
+#   off, default, full        upstream FEX: no ordering / its defaults (vectors and memcpy unordered) / everything ordered
+#   views-off, views-full     stage 1: all accesses through the views, all plain / all ordered
+#   protocol                  stage 2: page protocol, plain accesses to thread-private pages, everything else ordered
 # Raw lines: out/views_runs.txt (workload config round wall user sys md5 ok), summary out/views_summary.txt
-#   bench/run_views.sh [workload ...]      (ROUNDS=3, KHZ=1800000)
+#   bench/run_views.sh [workload ...]      (ROUNDS=3, KHZ=1800000, CONFIGS="off default full protocol")
 cd "$(dirname "$0")/.."
 FEX=$HOME/opt/fex/bin/FEX
 FEXV=$HOME/opt/fex-views/bin/FEX
@@ -11,7 +14,7 @@ ROUNDS=${ROUNDS:-3}
 raw=out/views_runs.txt
 mkdir -p out
 WORKLOADS=${*:-zstd pigz xz}
-CONFIGS=${CONFIGS:-off views-off full views-full}
+CONFIGS=${CONFIGS:-off default full protocol}
 
 cmd_of() {
     case $1 in
@@ -26,9 +29,11 @@ run_config() {
     w=$1 cfg=$2 r=$3
     case $cfg in
     off) set -- FEX_TSOENABLED=0 $FEX ;;
+    default) set -- $FEX ;;
     full) set -- FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEX ;;
-    views-off) set -- TSO_VIEWS=1 FEX_TSOENABLED=0 $FEXV ;;
-    views-full) set -- TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    views-off) set -- TSO_VIEWS=1 TSO_VIEWS_STAGE1=1 FEX_TSOENABLED=0 $FEXV ;;
+    views-full) set -- TSO_VIEWS=1 TSO_VIEWS_STAGE1=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    protocol) set -- TSO_VIEWS=1 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     # cost breakdown: identity base (arithmetic, no view), and additionally no rewriting pass (shared memory only)
     views-id) set -- TSO_VIEWS=1 TSO_VIEWS_IDENTITY=1 FEX_TSOENABLED=0 $FEXV ;;
     views-id-nopass) set -- TSO_VIEWS=1 TSO_VIEWS_IDENTITY=1 TSO_VIEWS_NOPASS=1 FEX_TSOENABLED=0 $FEXV ;;
@@ -43,6 +48,7 @@ run_config() {
     [ $w = 7zz ] && sum=-
     echo "$w $cfg $r $(tail -n 1 /dev/shm/tso-time) $sum $ok" | tee -a $raw
     [ "$ok" != ok ] && tail -n 5 /dev/shm/tso-err
+    grep '^tso-arm: claims' /dev/shm/tso-err | sed "s/^tso-arm:/$w $cfg $r:/" | tee -a out/views_stats.txt
 }
 
 trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/tso-out /dev/shm/tso-time /dev/shm/tso-err' EXIT
