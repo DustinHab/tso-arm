@@ -1,4 +1,4 @@
-From f938e9062439286c96d1f0c47d64f3278c95ba0c Mon Sep 17 00:00:00 2001
+From 236ab4aadca087b01748d79ae579ce7f4f12e2df Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm stage 1: guest memory views, plain view register,
@@ -8,12 +8,12 @@ Subject: [PATCH] tso-arm stage 1: guest memory views, plain view register,
  FEXCore/Source/CMakeLists.txt                 |   1 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |  15 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
- .../Source/Interface/Core/JIT/MemoryOps.cpp   | 102 ++++-
+ .../Source/Interface/Core/JIT/MemoryOps.cpp   | 125 ++++-
  .../Interface/Core/OpcodeDispatcher.cpp       |   4 +-
- FEXCore/Source/Interface/IR/IR.json           |  12 +
+ FEXCore/Source/Interface/IR/IR.json           |  16 +-
  FEXCore/Source/Interface/IR/PassManager.cpp   |   6 +
  FEXCore/Source/Interface/IR/Passes.h          |   1 +
- .../Interface/IR/Passes/GuestViewPass.cpp     |  94 ++++
+ .../Interface/IR/Passes/GuestViewPass.cpp     | 220 +++++++++
  FEXCore/include/FEXCore/Core/CoreState.h      |   3 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |  43 ++
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   5 +
@@ -24,7 +24,7 @@ Subject: [PATCH] tso-arm stage 1: guest memory views, plain view register,
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  56 +++
  .../LinuxSyscalls/ThreadManager.cpp           |  14 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
- 19 files changed, 830 insertions(+), 10 deletions(-)
+ 19 files changed, 977 insertions(+), 16 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
@@ -104,7 +104,7 @@ index 02d22e1..a65d037 100644
  constexpr auto VTMP1 = ARMEmitter::VReg::v0;
  constexpr auto VTMP2 = ARMEmitter::VReg::v1;
 diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
-index d7b716c..0488eb1 100644
+index d7b716c..92fd87c 100644
 --- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 @@ -5,6 +5,7 @@ tags: backend|arm64
@@ -115,7 +115,26 @@ index d7b716c..0488eb1 100644
  #include "FEXCore/Core/X86Enums.h"
  #include "FEXCore/Utils/LogManager.h"
  #include "Interface/Context/Context.h"
-@@ -1478,6 +1479,35 @@ DEF_OP(VBroadcastFromMem) {
+@@ -705,8 +706,16 @@ DEF_OP(LoadMem) {
+   const auto Op = IROp->C<IR::IROp_LoadMem>();
+   const auto OpSize = IROp->Size;
+ 
+-  const auto MemReg = GetReg(Op->Addr);
+-  const auto MemSrc = GenerateMemOperand(OpSize, MemReg, Op->Offset, Op->OffsetType, Op->OffsetScale);
++  // tso-arm: a viewed access goes through the thread's plain view: [addr, x24] without an offset, otherwise the
++  // view address is formed in a temporary
++  ARMEmitter::Register MemReg = GetReg(Op->Addr);
++  const bool ViewIndex = Op->Viewed && Op->Offset.IsInvalid() && OpSize != IR::OpSize::i256Bit;
++  if (Op->Viewed && !ViewIndex) {
++    add(ARMEmitter::Size::i64Bit, TMP1, MemReg.X(), REG_VIEW.R());
++    MemReg = TMP1.R();
++  }
++  const auto MemSrc = ViewIndex ? ARMEmitter::ExtendedMemOperand(MemReg.X(), REG_VIEW, ARMEmitter::ExtendedType::SXTX, 0) :
++                                  GenerateMemOperand(OpSize, MemReg, Op->Offset, Op->OffsetType, Op->OffsetScale);
+ 
+   if (Op->Class == IR::RegClass::GPR) {
+     const auto Dst = GetReg(Node);
+@@ -1478,6 +1487,35 @@ DEF_OP(VBroadcastFromMem) {
    }
  }
  
@@ -151,7 +170,7 @@ index d7b716c..0488eb1 100644
  DEF_OP(Push) {
    const auto Op = IROp->C<IR::IROp_Push>();
    const auto ValueSize = IR::OpSizeToSize(Op->ValueSize);
-@@ -1485,6 +1515,20 @@ DEF_OP(Push) {
+@@ -1485,6 +1523,20 @@ DEF_OP(Push) {
    const auto AddrSrc = GetReg(Op->Addr);
    const auto Dst = GetReg(Node);
  
@@ -172,7 +191,7 @@ index d7b716c..0488eb1 100644
    bool NeedsMoveAfterwards = false;
    if (Dst != AddrSrc) {
      if (Dst == Src) {
-@@ -1570,6 +1614,17 @@ DEF_OP(PushTwo) {
+@@ -1570,6 +1622,17 @@ DEF_OP(PushTwo) {
    auto Src2 = GetReg(Op->Value2);
    const auto Dst = GetReg(Op->Addr);
  
@@ -190,7 +209,7 @@ index d7b716c..0488eb1 100644
    switch (ValueSize) {
    case 4: {
      stp<ARMEmitter::IndexType::PRE>(Src1.W(), Src2.W(), Dst, -2 * ValueSize);
-@@ -1594,6 +1649,20 @@ DEF_OP(Pop) {
+@@ -1594,6 +1657,20 @@ DEF_OP(Pop) {
  
    LOGMAN_THROW_A_FMT(Dst != Addr, "Invalid");
  
@@ -211,7 +230,7 @@ index d7b716c..0488eb1 100644
    switch (Size) {
    case 1: {
      ldrb<ARMEmitter::IndexType::POST>(Dst.W(), Addr, Size);
-@@ -1633,6 +1702,17 @@ DEF_OP(PopTwo) {
+@@ -1633,6 +1710,17 @@ DEF_OP(PopTwo) {
    LOGMAN_THROW_A_FMT(Dst1 != Addr && Dst2 != Addr, "Invalid");
    LOGMAN_THROW_A_FMT(Dst1 != Dst2, "Invalid");
  
@@ -229,7 +248,25 @@ index d7b716c..0488eb1 100644
    switch (Size) {
    case 4: {
      ldp<ARMEmitter::IndexType::POST>(Dst1.W(), Dst2.W(), Addr, 2 * Size);
-@@ -1864,7 +1944,8 @@ DEF_OP(StoreMemTSO) {
+@@ -1653,8 +1741,15 @@ DEF_OP(StoreMem) {
+   const auto Op = IROp->C<IR::IROp_StoreMem>();
+   const auto OpSize = IROp->Size;
+ 
+-  const auto MemReg = GetReg(Op->Addr);
+-  const auto MemSrc = GenerateMemOperand(OpSize, MemReg, Op->Offset, Op->OffsetType, Op->OffsetScale);
++  // tso-arm: see LoadMem
++  ARMEmitter::Register MemReg = GetReg(Op->Addr);
++  const bool ViewIndex = Op->Viewed && Op->Offset.IsInvalid() && OpSize != IR::OpSize::i256Bit;
++  if (Op->Viewed && !ViewIndex) {
++    add(ARMEmitter::Size::i64Bit, TMP1, MemReg.X(), REG_VIEW.R());
++    MemReg = TMP1.R();
++  }
++  const auto MemSrc = ViewIndex ? ARMEmitter::ExtendedMemOperand(MemReg.X(), REG_VIEW, ARMEmitter::ExtendedType::SXTX, 0) :
++                                  GenerateMemOperand(OpSize, MemReg, Op->Offset, Op->OffsetType, Op->OffsetScale);
+ 
+   if (Op->Class == IR::RegClass::GPR) {
+     const auto Src = GetZeroableReg(Op->Value);
+@@ -1864,7 +1959,8 @@ DEF_OP(StoreMemTSO) {
  DEF_OP(MemSet) {
    const auto Op = IROp->C<IR::IROp_MemSet>();
  
@@ -239,7 +276,7 @@ index d7b716c..0488eb1 100644
    const auto Size = IR::OpSizeToSize(Op->Size);
    const auto MemReg = GetReg(Op->Addr);
    const auto Value = GetZeroableReg(Op->Value);
-@@ -1895,6 +1976,13 @@ DEF_OP(MemSet) {
+@@ -1895,6 +1991,13 @@ DEF_OP(MemSet) {
      const auto Prefix = GetReg(Op->Prefix);
      add(TMP2, Prefix.X(), MemReg.X());
    }
@@ -253,7 +290,7 @@ index d7b716c..0488eb1 100644
  
    if (!DirectionIsInline) {
      // Backward or forwards implementation depends on flag
-@@ -2099,7 +2187,8 @@ DEF_OP(MemSet) {
+@@ -2099,7 +2202,8 @@ DEF_OP(MemSet) {
  DEF_OP(MemCpy) {
    const auto Op = IROp->C<IR::IROp_MemCpy>();
  
@@ -263,7 +300,7 @@ index d7b716c..0488eb1 100644
    const auto Size = IR::OpSizeToSize(Op->Size);
    const auto MemRegDest = GetReg(Op->Dest);
    const auto MemRegSrc = GetReg(Op->Src);
-@@ -2129,6 +2218,15 @@ DEF_OP(MemCpy) {
+@@ -2129,6 +2233,15 @@ DEF_OP(MemCpy) {
    mov(TMP1, Length.X());
    mov(TMP2, MemRegDest.X());
    mov(TMP3, MemRegSrc.X());
@@ -302,7 +339,7 @@ index 901a922..5443244 100644
      if (DstSegment) {
        Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
 diff --git a/FEXCore/Source/Interface/IR/IR.json b/FEXCore/Source/Interface/IR/IR.json
-index 6c1a345..880afa8 100644
+index 6c1a345..03d4dae 100644
 --- a/FEXCore/Source/Interface/IR/IR.json
 +++ b/FEXCore/Source/Interface/IR/IR.json
 @@ -390,6 +390,18 @@
@@ -324,6 +361,24 @@ index 6c1a345..880afa8 100644
        "SSA = LoadContext OpSize:#ByteSize, RegisterClass:$Class, u32:$Offset": {
          "Desc": ["Loads a value from the context with offset",
                   "Dest = Ctx[Offset]"
+@@ -528,7 +540,7 @@
+         "DestSize": "OpSize::i64Bit"
+       },
+ 
+-      "SSA = LoadMem RegisterClass:$Class, OpSize:#Size, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
++      "SSA = LoadMem RegisterClass:$Class, OpSize:#Size, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale, i1:$Viewed{false}": {
+         "HasSideEffects": true,
+         "Inline": ["", "Mem"],
+         "DestSize": "Size"
+@@ -540,7 +552,7 @@
+         "HasSideEffects": true
+       },
+ 
+-      "StoreMem RegisterClass:$Class, OpSize:#Size, SSA:$Value, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
++      "StoreMem RegisterClass:$Class, OpSize:#Size, SSA:$Value, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale, i1:$Viewed{false}": {
+         "Desc": [ "Stores a value to memory.",
+                   "Zero Extends if value's type is too small",
+                   "Truncates if value's type is too large"
 diff --git a/FEXCore/Source/Interface/IR/PassManager.cpp b/FEXCore/Source/Interface/IR/PassManager.cpp
 index 5d3bcec..99f0b47 100644
 --- a/FEXCore/Source/Interface/IR/PassManager.cpp
@@ -362,10 +417,10 @@ index 213967a..32c490d 100644
    fextl::unique_ptr<Pass> CreateIRValidation();
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 new file mode 100644
-index 0000000..a4f89e5
+index 0000000..b4a4492
 --- /dev/null
 +++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,220 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -383,9 +438,11 @@ index 0000000..a4f89e5
 +#include "Interface/IR/IREmitter.h"
 +#include "Interface/IR/PassManager.h"
 +#include "Interface/IR/Passes.h"
++#include "Interface/IR/RegisterAllocationData.h"
 +
 +#include <FEXCore/IR/IR.h>
 +#include <FEXCore/Utils/Profiler.h>
++#include <FEXCore/fextl/unordered_map.h>
 +
 +namespace FEXCore::IR {
 +namespace {
@@ -440,17 +497,141 @@ index 0000000..a4f89e5
 +    FEXCORE_PROFILE_SCOPED("PassManager::GuestView");
 +
 +    auto CurrentIR = IREmit->ViewIR();
++    // Within a block, accesses through the same address share one view address. The dispatcher loads a guest
++    // register afresh for every access (a new LoadRegister node each time), so addresses that are plain guest
++    // registers are keyed by the register. A write of the register as itself plus a constant (pointer increments)
++    // keeps the view address and records the distance in Delta; any other write drops it.
++    struct RegView {
++      Ref View;
++      int64_t Delta;
++    };
++    fextl::unordered_map<Ref, Ref> Plain, Ordered;
++    fextl::unordered_map<uint32_t, RegView> RegPlain, RegOrdered;
++
++    auto ConstantOf = [&](OrderedNodeWrapper W, int64_t* C) {
++      const auto Op = CurrentIR.GetOp<IROp_Header>(W);
++      if (Op->Op == OP_INLINECONSTANT) {
++        *C = Op->C<IROp_InlineConstant>()->Constant;
++        return true;
++      }
++      if (Op->Op == OP_CONSTANT) {
++        *C = Op->C<IROp_Constant>()->Constant;
++        return true;
++      }
++      return false;
++    };
++    // Immediate offsets LoadMem/StoreMem can encode (Addressing.cpp: ldur simm9, or ldr unsigned scaled)
++    auto EncodableOffset = [](int64_t Off, OpSize Size) {
++      const int64_t S = OpSizeToSize(Size);
++      return (Off >= -256 && Off <= 255) || (Off > 0 && (Off % S) == 0 && Off / S <= 4095);
++    };
++
 +    for (auto [Block, BlockHeader] : CurrentIR.GetBlocks()) {
++      Plain.clear();
++      Ordered.clear();
++      RegPlain.clear();
++      RegOrdered.clear();
 +      for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
++        switch (IROp->Op) {
++        case OP_STOREREGISTER: {
++          const PhysicalRegister R(CodeNode);
++          if (R.AsRegClass() != RegClass::GPRFixed) {
++            continue;
++          }
++          // r = r +/- constant (64-bit): the cached view stays valid at a new distance
++          bool Kept = false;
++          const auto ValOp = CurrentIR.GetOp<IROp_Header>(IROp->Args[0]);
++          int64_t C {};
++          if ((ValOp->Op == OP_ADD || ValOp->Op == OP_SUB) && ValOp->Size == OpSize::i64Bit && ConstantOf(ValOp->Args[1], &C)) {
++            const auto SrcOp = CurrentIR.GetOp<IROp_Header>(ValOp->Args[0]);
++            if (SrcOp->Op == OP_LOADREGISTER && SrcOp->C<IROp_LoadRegister>()->Class == RegClass::GPR &&
++                SrcOp->C<IROp_LoadRegister>()->Reg == R.Reg) {
++              const int64_t D = ValOp->Op == OP_ADD ? C : -C;
++              if (auto It = RegPlain.find(R.Reg); It != RegPlain.end()) {
++                It->second.Delta += D;
++                Kept = true;
++              }
++            }
++          }
++          if (!Kept) {
++            RegPlain.erase(R.Reg);
++          }
++          RegOrdered.erase(R.Reg);
++          continue;
++        }
++        case OP_RMWHANDLE:
++        case OP_PUSH:
++        case OP_PUSHTWO:
++        case OP_POP:
++        case OP_POPTWO:
++        case OP_MEMCPY:
++        case OP_MEMSET:
++          RegPlain.clear();
++          RegOrdered.clear();
++          continue;
++        default: break;
++        }
++
 +        const auto Site = SiteOf(IROp->Op);
 +        if (Site.Index < 0 || IROp->Args[Site.Index].IsInvalid()) {
 +          continue;
 +        }
 +
++        // LoadMem/StoreMem without an offset carry the view in a flag: the backend addresses [addr, x24] at no cost.
++        // With an offset they share one view address per address value and block ([view, #imm]).
++        if (IROp->Op == OP_LOADMEM && IROp->C<IROp_LoadMem>()->Offset.IsInvalid()) {
++          IROp->CW<IROp_LoadMem>()->Viewed = true;
++          continue;
++        }
++        if (IROp->Op == OP_STOREMEM && IROp->C<IROp_StoreMem>()->Offset.IsInvalid()) {
++          IROp->CW<IROp_StoreMem>()->Viewed = true;
++          continue;
++        }
++
 +        Ref Addr = CurrentIR.GetNode(IROp->Args[Site.Index]);
-+        IREmit->SetWriteCursorBefore(CodeNode);
-+        Ref View = Site.Ordered ? IREmit->_ViewOrdered(Addr) : IREmit->_ViewPlain(Addr);
++        const auto AddrOp = CurrentIR.GetOp<IROp_Header>(Addr);
++        const bool IsReg = AddrOp->Op == OP_LOADREGISTER && AddrOp->C<IROp_LoadRegister>()->Class == RegClass::GPR;
++        const uint32_t RegIdx = IsReg ? AddrOp->C<IROp_LoadRegister>()->Reg : 0;
++
++        Ref View {};
++        if (IsReg) {
++          auto& Cache = Site.Ordered ? RegOrdered : RegPlain;
++          if (auto It = Cache.find(RegIdx); It != Cache.end()) {
++            const auto [V, Delta] = It->second;
++            if (Delta == 0) {
++              View = V;
++            } else if (IROp->Op == OP_LOADMEM || IROp->Op == OP_STOREMEM) {
++              // Fold the distance into the immediate offset: [view, #(offset + delta)]
++              const auto OffIdx = IROp->Op == OP_LOADMEM ? IROp_LoadMem::Offset_Index : IROp_StoreMem::Offset_Index;
++              int64_t Off {};
++              if (ConstantOf(IROp->Args[OffIdx], &Off) && EncodableOffset(Off + Delta, IROp->Size)) {
++                IREmit->SetWriteCursorBefore(CodeNode);
++                IREmit->ReplaceNodeArgument(CodeNode, OffIdx, IREmit->_InlineConstant(Off + Delta));
++                View = V;
++              }
++            }
++          }
++        } else {
++          auto& Cache = Site.Ordered ? Ordered : Plain;
++          if (auto It = Cache.find(Addr); It != Cache.end()) {
++            View = It->second;
++          }
++        }
++        if (!View) {
++          IREmit->SetWriteCursorBefore(CodeNode);
++          View = Site.Ordered ? IREmit->_ViewOrdered(Addr) : IREmit->_ViewPlain(Addr);
++          if (IsReg) {
++            (Site.Ordered ? RegOrdered : RegPlain)[RegIdx] = {View, 0};
++          } else {
++            (Site.Ordered ? Ordered : Plain)[Addr] = View;
++          }
++        }
 +        IREmit->ReplaceNodeArgument(CodeNode, Site.Index, View);
++        // A register load that only served as this address is dead now; left in place, register allocation would
++        // turn it into a copy
++        if (IsReg && Addr->GetUses() == 0) {
++          IREmit->Remove(Addr);
++        }
 +      }
 +    }
 +  }

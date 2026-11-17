@@ -276,7 +276,26 @@ of 3, 1.8 GHz):
 | pigz | 1.14 s | 1.26 s (+11 %) | 1.68 s | 1.76 s |
 
 That overhead would eat the gain for xz. The kernel has no transparent huge pages, so shared memory does not lose
-huge pages here; the breakdown follows.
+huge pages here.
+
+Breakdown (switches `TSO_VIEWS_IDENTITY=1`: every thread's view base is 0, `TSO_VIEWS_NOPASS=1`: no rewriting):
+shared memory plus the lost register cost 0 to 6 %, the address arithmetic 5 to 9 %, the views themselves (TLB,
+aliases) nothing measurable. `perf stat` on xz: 15.9 billion instructions without views, 18.8 billion with
+(+18.5 %), cycles +8.7 %.
+
+Reducing the arithmetic, measured on xz and pigz (user-mode cycles over TSO off):
+
+| Step | xz instructions | xz cycles | pigz cycles |
+|---|---|---|---|
+| one `ViewPlain` per access | 18.85 G | +8.7 % | +9.3 % |
+| `LoadMem`/`StoreMem` without offset: flag, `[addr, x24]` | 18.83 G | +8.7 % | +9.3 % |
+| share the view address per guest register and block | 18.56 G | +8.6 % | +9.5 % |
+| remove the register loads that became dead (they turned into copies) | 18.17 G | +7.2 % | +6.3 % |
+| keep the view across `r = r + constant` (offset folded into the immediate) | 18.16 G | +6.8 % | +6.1 % |
+
+The dispatcher loads a guest register anew for every access (`LoadRegister` per use), so sharing has to be keyed by
+the register, and the loads it makes dead have to be removed or register allocation turns them into copies. What
+remains is mostly one addition per block entry and base register, for instance at the top of every loop iteration.
 
 Open questions before building it:
 
