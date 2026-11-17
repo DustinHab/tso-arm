@@ -1,0 +1,10 @@
+process xz   main module instructions with memory accesses: plain 2504, ordered 6197
+threads 5   page size 4096   pages: private 16682, shared read-only 34, shared read-write 21098
+mode global   transitions 21193   escalated instructions 6206   locked/xchg 14068   non-temporal 0
+faults: (free first touches 16780)  share 21132  upgrade 61 (revokes 61)  lazy 44  lazy-o 0  escal. 6206
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load               2389972835     7.74%     7.81%     7.78%    31.98%
+vector load          20795526     0.64%     0.65%     0.62%   100.00%
+store               764448360     2.20%     2.20%     2.19%    58.23%
+vector store         11716772     0.01%     0.01%     0.00%   100.00%

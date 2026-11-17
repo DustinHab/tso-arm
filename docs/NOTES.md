@@ -160,6 +160,44 @@ the transition counts of section 5 would cost little for pigz (1166) but noticea
 Most of those are first touches of new pages, which the real mechanism can avoid by assigning pages to the thread
 that maps them; the study now has to model that before the counts mean anything.
 
+## 7. Plan for the mechanism in FEX
+
+From a survey of FEX be66e03 (file references are to that commit):
+
+- FEX maps guest memory 1:1 (`SyscallsSMCTracking.cpp` GuestMmap/Munmap/Mremap/Mprotect pass the guest address to
+  the host) and has no memory base register. On a 39-bit host it reserves nothing for itself, and the guest stack
+  sits just below 512 GB (`ELFCodeLoader.h`, `StackHint`).
+- Plain `LoadMem`/`StoreMem` accept `[base, Xm, extend]`; `LoadMemTSO`/`StoreMemTSO` only `[base]` or `[base, #imm]`
+  (`ldapr`, `ldapur` with RCPC2) and emit a `nop` next to each ordered access for backpatching.
+- Faults: `SyscallHandler::HandleSegfault` and the SIGBUS path already backpatch JIT code
+  (`Utils/ArchHelpers/Arm64.cpp`), `RestoreRIPFromHostPC` maps a host PC to the guest RIP, the SMC path re-runs a
+  faulting guest instruction as a single-instruction block, and `ForceTSOInstructions` plus code invalidation give
+  a per-instruction retranslation in ordered form.
+
+Layout (39-bit host): the guest gets a window `[0, W)`, W = 16 GB; FEX's guest allocations, stack and brk are placed
+inside it. Above it, at fixed multiples of W: one ordered view (or one per thread, depending on section 8) and one
+plain view per thread, all aliases of the same shared memory (`MAP_SHARED|MAP_ANONYMOUS`, aliased with
+`mremap(old, 0, len, MREMAP_MAYMOVE|MREMAP_FIXED, view)`). The identity mapping stays fully accessible: the kernel
+(system call buffers) and FEX's runtime use it.
+
+Code generation:
+
+- plain view: a reserved register (x18 or x24, taken from the allocatable set, filled and spilled like
+  `REG_CALLRET_SP`) holds the thread's plain-view base; plain accesses become `ldr x, [xview, xaddr]`, with an extra
+  `add` when the guest address has a displacement.
+- ordered view: placed at a single-bit offset (2^37), so `orr xtmp, xaddr, #(1 << 37)` forms the address without a
+  register; then `ldapr`/`stlr`, or `dmb` and a plain vector access.
+- atomics go through the ordered view too, so that they take part in the page protocol.
+
+Fault handling: a SIGSEGV whose address lies in a view is a page-state fault. The handler applies the transition
+(mprotect of the affected views). If the access is now allowed it returns and the instruction repeats. If not (a
+plain access to a page that is shared and written), it performs this one access itself through the ordered view with
+the right ordering, writes the result to the saved registers, steps over the host instruction, and adds the guest
+RIP to the forced-TSO set and invalidates its code, so the next translation orders it.
+
+Not covered at first: `fork` (shared mappings would stay shared with the child), file-backed `MAP_SHARED` memory
+(treated as shared from the start), 32-bit guests.
+
 Open questions before building it:
 
 1. How much of the time FEX spends on TSO is spent on stores and vector accesses to memory that stays private?

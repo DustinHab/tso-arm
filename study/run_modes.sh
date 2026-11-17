@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs all workloads under the page-state client in both modes (views, global) and prints one compact table.
-# Results: study/results/modes-NAME-MODE.txt, table: study/results/modes.txt
+# Results: study/results/modes-NAME-MODE.txt, table: study/results/modes.txt,
+# plain-instruction lists: build/lists/NAME-MODE.plain
 #   wsl.exe -d Ubuntu -- sh /mnt/c/Users/dusti/tso-arm/study/run_modes.sh [NAME ...]
 SRC=$(cd "$(dirname "$0")" && pwd)
 R=$(dirname "$SRC")
@@ -17,7 +18,7 @@ gcc -O2 -pthread -static -no-pie -o $B/patterns $SRC/work/patterns.c
 cmd_of() {
     case $1 in
     zstd) echo "$X/zstd -T4 -3 -f -q -c $D/corpus.tar" ;;
-    pigz) echo "$X/pigz -p 4 -c $D/corpus.tar" ;;
+    pigz) echo "$X/pigz -n -p 4 -c $D/corpus.tar" ;;
     xz) echo "$X/xz -T4 -6 --block-size=2MiB -c $D/corpus8.tar" ;;
     7zz) echo "$X/7zz b 1 -mmt4 -md20" ;;
     table | private | shared | queue) echo "$B/patterns $1" ;;
@@ -26,11 +27,15 @@ cmd_of() {
 
 for name in ${*:-private table shared queue zstd pigz xz 7zz}; do
     for mode in views global; do
-        rm -f $T/r.*
-        timeout 5400 $DR/bin64/drrun -c $B/libpagestate.so -mode $mode -out $T/r -- $(cmd_of $name) >/dev/null 2>&1
+        rm -f $T/r.* $T/l.*
+        timeout 5400 $DR/bin64/drrun -c $B/libpagestate.so -mode $mode -out $T/r -list $T/l -- $(cmd_of $name) \
+            >/dev/null 2>&1
         app=$(cmd_of $name | cut -d' ' -f1 | xargs basename)
         res=$(ls -S $T/r.$app.*.txt 2>/dev/null | head -n 1)
         cp "$res" $SRC/results/modes-$name-$mode.txt
+        lst=$(ls -S $T/l.$app.*.plain 2>/dev/null | head -n 1)
+        mkdir -p $R/build/lists
+        [ -n "$lst" ] && sort "$lst" >$R/build/lists/$name-$mode.plain
         echo "== $name $mode"
         grep -E '^(mode|faults|store |vector store|load )' $SRC/results/modes-$name-$mode.txt
     done

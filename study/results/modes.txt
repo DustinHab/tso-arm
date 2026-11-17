@@ -1,0 +1,84 @@
+== private views
+mode views   transitions 19   escalated instructions 669   locked/xchg 344   non-temporal 0
+faults: (free first touches 2097)  share 15  upgrade 4 (revokes 14)  lazy 34  lazy-o 22  escal. 669
+load                    26923    95.26%    95.94%    92.74%    15.04%
+store                20985735   100.00%   100.00%    99.99%     0.02%
+vector store              884    95.70%    96.27%    76.92%   100.00%
+== private global
+mode global   transitions 2084   escalated instructions 1233   locked/xchg 340   non-temporal 0
+faults: (free first touches 47)  share 2073  upgrade 11 (revokes 15)  lazy 28  lazy-o 0  escal. 1233
+load                    26959    92.89%    92.91%    36.34%    15.09%
+store                20985750     0.06%     0.06%     0.00%     0.02%
+vector store              884    89.93%    89.93%     0.45%   100.00%
+== table views
+mode views   transitions 149   escalated instructions 619   locked/xchg 356   non-temporal 0
+faults: (free first touches 691)  share 144  upgrade 5 (revokes 19)  lazy 554  lazy-o 20  escal. 619
+load                  5269860    99.98%    99.99%    99.96%     0.08%
+store                 5257136    99.99%    99.99%    99.98%     0.09%
+vector store            33654    99.90%    99.94%     2.03%   100.00%
+== table global
+mode global   transitions 679   escalated instructions 1223   locked/xchg 360   non-temporal 0
+faults: (free first touches 48)  share 666  upgrade 13 (revokes 21)  lazy 32  lazy-o 0  escal. 1223
+load                  5269888     0.48%     0.48%     0.19%     0.08%
+store                 5257158     0.25%     0.25%     0.01%     0.09%
+vector store            33654     2.36%     2.36%     0.01%   100.00%
+== shared views
+mode views   transitions 277   escalated instructions 454   locked/xchg 258   non-temporal 0
+faults: (free first touches 48)  share 144  upgrade 133 (revokes 144)  lazy 39  lazy-o 533  escal. 454
+load                  5269367     0.49%     0.49%     0.47%     0.07%
+store                 5256771     0.26%     0.26%     0.25%     0.09%
+vector store              362    92.27%    93.37%    45.86%   100.00%
+== shared global
+mode global   transitions 288   escalated instructions 1042   locked/xchg 258   non-temporal 0
+faults: (free first touches 44)  share 151  upgrade 137 (revokes 142)  lazy 33  lazy-o 0  escal. 1042
+load                  5269367     0.48%     0.48%     0.17%     0.07%
+store                 5256771     0.25%     0.25%     0.01%     0.09%
+vector store              362    78.73%    78.73%     1.10%   100.00%
+== queue views
+mode views   transitions 19   escalated instructions 450   locked/xchg 170   non-temporal 0
+faults: (free first touches 42)  share 14  upgrade 5 (revokes 14)  lazy 21  lazy-o 15  escal. 450
+load                  6583600     0.38%     0.38%     0.37%     0.05%
+store                 3945361     0.33%     0.33%     0.32%     0.11%
+vector store              303    94.39%    94.72%    43.23%   100.00%
+== queue global
+mode global   transitions 29   escalated instructions 1054   locked/xchg 170   non-temporal 0
+faults: (free first touches 40)  share 20  upgrade 9 (revokes 13)  lazy 16  lazy-o 0  escal. 1054
+load                  6629914     0.37%     0.37%     0.15%     0.05%
+store                 3945361     0.32%     0.32%     0.00%     0.11%
+vector store              303    82.84%    82.84%     0.66%   100.00%
+== zstd views
+mode views   transitions 29712   escalated instructions 2889   locked/xchg 60096   non-temporal 0
+faults: (free first touches 17697)  share 16913  upgrade 12799 (revokes 24441)  lazy 12502  lazy-o 35629  escal. 2889
+load                530096945    76.40%    85.28%    94.54%    39.59%
+store               200742986    72.83%    81.37%    73.98%    38.06%
+vector store         10225478    66.59%    78.51%    39.78%   100.00%
+== zstd global
+mode global   transitions 17965   escalated instructions 6956   locked/xchg 60184   non-temporal 0
+faults: (free first touches 562)  share 17879  upgrade 86 (revokes 112)  lazy 80  lazy-o 0  escal. 6956
+load                530097216    13.48%    13.52%    18.02%    39.59%
+store               200743157     5.45%     5.45%     0.00%    38.06%
+vector store         10225478     0.10%     0.10%     0.00%   100.00%
+== pigz views
+mode views   transitions 481   escalated instructions 2409   locked/xchg 121078   non-temporal 0
+faults: (free first touches 382)  share 462  upgrade 19 (revokes 38)  lazy 83  lazy-o 1789  escal. 2409
+load               2814007507    95.77%    98.98%    98.95%     3.62%
+store               939556019    89.13%    97.29%    97.30%    10.86%
+vector store         58157054    93.26%    99.57%    99.99%   100.00%
+== pigz global
+mode global   transitions 816   escalated instructions 3645   locked/xchg 120534   non-temporal 0
+faults: (free first touches 202)  share 734  upgrade 82 (revokes 83)  lazy 74  lazy-o 0  escal. 3645
+load               2814009267     5.16%     5.65%     5.29%     3.62%
+store               939557326     0.05%     0.05%     0.00%    10.86%
+vector store         58157227     0.01%     0.01%     0.00%   100.00%
+== xz views
+mode views   transitions 2381   escalated instructions 1082   locked/xchg 14098   non-temporal 0
+faults: (free first touches 37524)  share 2370  upgrade 11 (revokes 25)  lazy 2114  lazy-o 1139  escal. 1082
+load               2389973128    99.85%    99.89%    99.89%    31.98%
+store               764448516    99.80%    99.85%    99.85%    58.23%
+vector store         11716775    99.67%    99.82%    98.69%   100.00%
+== xz global
+mode global   transitions 21193   escalated instructions 6206   locked/xchg 14068   non-temporal 0
+faults: (free first touches 16780)  share 21132  upgrade 61 (revokes 61)  lazy 44  lazy-o 0  escal. 6206
+load               2389972835     7.74%     7.81%     7.78%    31.98%
+store               764448360     2.20%     2.20%     2.19%    58.23%
+vector store         11716772     0.01%     0.01%     0.00%   100.00%

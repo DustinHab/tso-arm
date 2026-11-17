@@ -1,0 +1,10 @@
+process patterns   main module instructions with memory accesses: plain 2798, ordered 450
+threads 3   page size 4096   pages: private 28, shared read-only 6, shared read-write 8
+mode views   transitions 19   escalated instructions 450   locked/xchg 170   non-temporal 0
+faults: (free first touches 42)  share 14  upgrade 5 (revokes 14)  lazy 21  lazy-o 15  escal. 450
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load                  6583600     0.38%     0.38%     0.37%     0.05%
+vector load               146    91.10%    92.47%    89.73%   100.00%
+store                 3945361     0.33%     0.33%     0.32%     0.11%
+vector store              303    94.39%    94.72%    43.23%   100.00%

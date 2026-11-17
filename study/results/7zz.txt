@@ -1,0 +1,11 @@
+process 7zz   main module instructions with memory accesses: plain 7486, ordered 6867
+threads 43   page size 4096   pages: private 3240, shared read-only 490, shared read-write 9755
+transitions 31090   escalated instructions 6891   locked/xchg 365216   non-temporal 0
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load              42247960961     9.20%    17.47%     8.31%    38.08%
+vector load         335813270    33.33%    39.31%    20.96%   100.00%
+store             18891063002     2.16%    16.28%     2.54%    30.29%
+vector store        344843985    17.38%    22.38%    11.14%   100.00%
+command /mnt/c/Users/dusti/tso-arm/build/x86/7zz b 1 -mmt4 -md20
+native 11.40 s   instrumented 687 s   exit 0

@@ -23,8 +23,8 @@
 // Atomic (locked) instructions are always ordered and are treated like ordered accesses.
 //
 // Fault accounting for the cost model (each is a fault plus mprotect calls in the real mechanism):
-//   first    first touch of a page (untouched -> private)
-//   share    private -> shared read-only / read-write
+//   first    first touch of a page by the thread that mapped it: free (shown for information only)
+//   share    private -> shared read-only / read-write, including the first touch by a thread that did not map it
 //   upgrade  shared read-only -> shared read-write; 'revokes' counts the plain views that lose the page
 //   lazy     a thread's first plain read of a shared read-only page (mapped into its plain view on demand)
 //   lazy-o   (views mode) a thread's first ordered access to a shared page (mapped into its ordered view)
@@ -65,7 +65,9 @@ typedef struct {
 } page_t;
 
 enum { TR_NONE, TR_FIRST, TR_SHARE, TR_UPGRADE };
-static int mode_global;
+enum { MODE_VIEWS, MODE_GLOBAL, MODE_CHECK };
+static const char *const mode_name[] = {"views", "global", "check"};
+static int mode;
 
 #define L2_BITS 16
 #define L1_BITS 20
@@ -84,7 +86,9 @@ typedef struct {
     uint32_t idx;
     uint64_t total[NCLASS], sticky[NCLASS], dynamic[NCLASS], fex[NCLASS];
     uint64_t atomics, nontemporal, transitions, escalations;
-    uint64_t f_first, f_share, f_upgrade, f_lazy, f_lazy_o, revokes;
+    uint64_t f_first, f_share, f_upgrade, f_lazy, f_lazy_o, revokes, checked;
+    int sc;           // system call in flight and its parameters (saved before the call)
+    uintptr_t p[5];
 } tls_t;
 
 static int tls_idx;
@@ -96,6 +100,78 @@ static uint32_t max_threads_seen;
 static file_t out = INVALID_FILE;
 static file_t list = INVALID_FILE;
 static app_pc main_start, main_end;
+
+// ---- Memory regions and who created them. Pages of a region start private to the thread that mapped it (mmap,
+// brk), so that its own first touch costs no fault; a thread's stack belongs to the thread from its start. munmap
+// returns pages to the untouched state. Unknown memory (the binary's data, the first stack) belongs to the first
+// thread.
+typedef struct {
+    uintptr_t start, end;
+    uint32_t creator;
+} region_t;
+#define MAX_REGIONS 65536
+static region_t *regions;
+static int nregions;
+static void *region_lock;
+static uintptr_t cur_brk;
+
+static void carve(uintptr_t s, uintptr_t e) {
+    for (int i = 0; i < nregions; i++) {
+        region_t *r = &regions[i];
+        if (r->end <= s || r->start >= e) continue;
+        if (r->start < s && r->end > e) {
+            if (nregions < MAX_REGIONS) regions[nregions++] = (region_t){e, r->end, r->creator};
+            r->end = s;
+        } else if (r->start < s) {
+            r->end = s;
+        } else if (r->end > e) {
+            r->start = e;
+        } else {
+            regions[i] = regions[--nregions];
+            i--;
+        }
+    }
+}
+
+static void add_region(uintptr_t s, uintptr_t e, uint32_t creator) {
+    dr_mutex_lock(region_lock);
+    carve(s, e);
+    if (nregions < MAX_REGIONS) regions[nregions++] = (region_t){s, e, creator};
+    dr_mutex_unlock(region_lock);
+}
+
+static uint32_t creator_of(uintptr_t a, uintptr_t *s, uintptr_t *e) {
+    uint32_t c = 1;
+    dr_mutex_lock(region_lock);
+    for (int i = 0; i < nregions; i++)
+        if (a >= regions[i].start && a < regions[i].end) {
+            c = regions[i].creator;
+            if (s) *s = regions[i].start;
+            if (e) *e = regions[i].end;
+            break;
+        }
+    dr_mutex_unlock(region_lock);
+    return c;
+}
+
+static page_t *page_of(uintptr_t pn);
+
+// Sets the pages of [s, e) back to untouched; only_private: only pages that are private to some thread.
+static void reset_pages(uintptr_t s, uintptr_t e, int only_private) {
+    if (e <= s) return;
+    for (uintptr_t pn = s >> page_shift; pn <= (e - 1) >> page_shift; pn++) {
+        size_t i1 = (pn >> 16) & ((1u << 20) - 1);
+        if (__atomic_load_n(&l1[i1], __ATOMIC_ACQUIRE) == NULL) {
+            pn |= (1u << 16) - 1;  // whole chunk untouched
+            continue;
+        }
+        page_t *pg = page_of(pn);
+        uint32_t w = __atomic_load_n(&pg->word, __ATOMIC_ACQUIRE);
+        if (only_private && (w & 3) != ST_PRIV) continue;
+        __atomic_store_n(&pg->word, 0, __ATOMIC_RELEASE);
+        pg->ro_mask = pg->o_mask = 0;
+    }
+}
 
 static page_t *page_of(uintptr_t pn) {
     size_t i1 = (pn >> L2_BITS) & ((1u << L1_BITS) - 1);
@@ -114,14 +190,27 @@ static page_t *page_of(uintptr_t pn) {
 
 // Applies the transition for an access by thread 'me' (index + 1); returns the page word after it and the kind of
 // transition in *kind. 'as_foreign': the access cannot reach the thread's own private pages (global ordered view).
-static uint32_t touch(page_t *pg, uint32_t me, int write, int as_foreign, int *kind) {
+static uint32_t touch(page_t *pg, uintptr_t pn, uint32_t me, int write, int as_foreign, int *kind) {
     uint32_t w = __atomic_load_n(&pg->word, __ATOMIC_ACQUIRE);
     for (;;) {
         uint32_t st = w & 3, nw;
         int k;
         if (st == ST_NONE) {
-            nw = as_foreign ? (write ? ST_SRW : ST_SRO) : ((me << 2) | ST_PRIV);
-            k = TR_FIRST;
+            // the page was assigned to its region's creator when it was mapped
+            uint32_t c = creator_of(pn << page_shift, NULL, NULL);
+            if (c == me && !as_foreign) {
+                nw = (me << 2) | ST_PRIV;
+                k = TR_FIRST;  // free: mapped for this thread from the start
+            } else {
+                nw = write ? ST_SRW : ST_SRO;
+                k = TR_SHARE;
+                if (nw == ST_SRO) __atomic_fetch_or(&pg->ro_mask, 1ull << ((c - 1) & 63), __ATOMIC_RELAXED);
+            }
+            if (__atomic_compare_exchange_n(&pg->word, &w, nw, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                *kind = k;
+                return nw;
+            }
+            continue;
         } else if (st == ST_PRIV) {
             if ((w >> 2) == me && !as_foreign) return w;
             nw = write ? ST_SRW : ST_SRO;
@@ -152,11 +241,11 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
     uintptr_t first = addr >> page_shift, last = (addr + (size ? size - 1 : 0)) >> page_shift;
     uint64_t bit = 1ull << ((me - 1) & 63);
     int via_ordered = __atomic_load_n(&in->ordered, __ATOMIC_RELAXED) || (info & INFO_ATOMIC);
-    int ok = 1;
+    int ok = 1, own = 1;
     for (uintptr_t pn = first; pn <= last && pn - first < 64; pn++) {
         page_t *pg = page_of(pn);
         int kind = TR_NONE;
-        uint32_t w = touch(pg, me, write, mode_global && via_ordered, &kind);
+        uint32_t w = touch(pg, pn, me, write, mode == MODE_GLOBAL && via_ordered, &kind);
         uint32_t st = w & 3;
         switch (kind) {
         case TR_FIRST: tl->f_first++; break;
@@ -168,13 +257,14 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
             break;
         }
         }
-        if (kind != TR_NONE) tl->transitions++;
+        if (kind != TR_NONE && kind != TR_FIRST) tl->transitions++;
         if (!((st == ST_PRIV && (w >> 2) == me) || (st == ST_SRO && !write))) ok = 0;
+        if (!(st == ST_PRIV && (w >> 2) == me)) own = 0;
         if (st == ST_SRO && !write && !via_ordered && !(__atomic_load_n(&pg->ro_mask, __ATOMIC_RELAXED) & bit)) {
             __atomic_fetch_or(&pg->ro_mask, bit, __ATOMIC_RELAXED);
             tl->f_lazy++;
         }
-        if (!mode_global && via_ordered && st >= ST_SRO &&
+        if (mode == MODE_VIEWS && via_ordered && st >= ST_SRO &&
             !(__atomic_load_n(&pg->o_mask, __ATOMIC_RELAXED) & bit)) {
             __atomic_fetch_or(&pg->o_mask, bit, __ATOMIC_RELAXED);
             tl->f_lazy_o++;
@@ -199,7 +289,13 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
         tl->escalations++;
         ord = 1;
     }
-    if (!ord) tl->sticky[c]++;
+    if (!ord) {
+        tl->sticky[c]++;
+    } else if (mode == MODE_CHECK && own) {
+        // escalated, but the owner check sends accesses to the thread's own private pages down the plain path
+        tl->sticky[c]++;
+        tl->checked++;
+    }
 }
 
 static bool has_simd_reg(instr_t *instr) {
@@ -302,6 +398,77 @@ static void event_thread_init(void *dc) {
     memset(tl, 0, sizeof *tl);
     tl->idx = __atomic_fetch_add(&nthreads, 1, __ATOMIC_RELAXED);
     drmgr_set_tls_field(dc, tls_idx, tl);
+    // A new thread's stack was mapped by its parent; it belongs to the new thread from its first instruction
+    // (the clone call orders the parent's writes, e.g. glibc's thread descriptor at the top, before it).
+    dr_mcontext_t mc;
+    mc.size = sizeof mc;
+    mc.flags = DR_MC_CONTROL;
+    if (tl->idx > 0 && dr_get_mcontext(dc, &mc)) {
+        uintptr_t s = 0, e = 0;
+        creator_of((uintptr_t)mc.xsp, &s, &e);
+        if (e > s) {
+            reset_pages(s, e, 1);
+            add_region(s, e, tl->idx + 1);
+        }
+    }
+}
+
+static bool event_filter_syscall(void *dc, int sysnum) {
+    (void)dc;
+    return sysnum == 9 || sysnum == 11 || sysnum == 12 || sysnum == 25;  // mmap munmap brk mremap
+}
+
+static bool event_pre_syscall(void *dc, int sysnum) {
+    tls_t *tl = drmgr_get_tls_field(dc, tls_idx);
+    tl->sc = sysnum;
+    for (int i = 0; i < 5; i++) tl->p[i] = (uintptr_t)dr_syscall_get_param(dc, i);
+    return true;
+}
+
+static void event_post_syscall(void *dc, int sysnum) {
+    tls_t *tl = drmgr_get_tls_field(dc, tls_idx);
+    if (tl->sc != sysnum) return;
+    tl->sc = -1;
+    ptr_int_t res = (ptr_int_t)dr_syscall_get_result(dc);
+    if (res < 0 && res > -4096) return;
+    uint32_t me = tl->idx + 1;
+    uintptr_t pg = (uintptr_t)1 << page_shift, r = (uintptr_t)res;
+#define PAGE_UP(x) (((x) + pg - 1) & ~(pg - 1))
+    switch (sysnum) {
+    case 9:  // mmap(addr, len, ...)
+        reset_pages(r, r + PAGE_UP(tl->p[1]), 0);
+        add_region(r, r + PAGE_UP(tl->p[1]), me);
+        break;
+    case 11:  // munmap(addr, len)
+        reset_pages(tl->p[0], tl->p[0] + PAGE_UP(tl->p[1]), 0);
+        dr_mutex_lock(region_lock);
+        carve(tl->p[0], tl->p[0] + PAGE_UP(tl->p[1]));
+        dr_mutex_unlock(region_lock);
+        break;
+    case 25:  // mremap(old, old_size, new_size, flags, new)
+        reset_pages(tl->p[0], tl->p[0] + PAGE_UP(tl->p[1]), 0);
+        dr_mutex_lock(region_lock);
+        carve(tl->p[0], tl->p[0] + PAGE_UP(tl->p[1]));
+        dr_mutex_unlock(region_lock);
+        reset_pages(r, r + PAGE_UP(tl->p[2]), 0);
+        add_region(r, r + PAGE_UP(tl->p[2]), me);
+        break;
+    case 12:  // brk
+        if (cur_brk == 0) {
+            cur_brk = r;
+        } else if (r > cur_brk) {
+            add_region(PAGE_UP(cur_brk), PAGE_UP(r), me);
+            cur_brk = r;
+        } else if (r < cur_brk) {
+            reset_pages(PAGE_UP(r), PAGE_UP(cur_brk), 0);
+            dr_mutex_lock(region_lock);
+            carve(PAGE_UP(r), PAGE_UP(cur_brk));
+            dr_mutex_unlock(region_lock);
+            cur_brk = r;
+        }
+        break;
+    }
+#undef PAGE_UP
 }
 
 static void event_thread_exit(void *dc) {
@@ -323,6 +490,7 @@ static void event_thread_exit(void *dc) {
     sum.f_lazy += tl->f_lazy;
     sum.f_lazy_o += tl->f_lazy_o;
     sum.revokes += tl->revokes;
+    sum.checked += tl->checked;
     if (tl->idx + 1 > max_threads_seen) max_threads_seen = tl->idx + 1;
     dr_mutex_unlock(merge_lock);
     dr_thread_free(dc, tl, sizeof *tl);
@@ -379,14 +547,18 @@ static void event_exit(void) {
                nthreads, 1 << page_shift, (unsigned long long)pages[ST_PRIV], (unsigned long long)pages[ST_SRO],
                (unsigned long long)pages[ST_SRW]);
     dr_fprintf(f, "mode %s   transitions %llu   escalated instructions %llu   locked/xchg %llu   non-temporal %llu\n",
-               mode_global ? "global" : "views", (unsigned long long)sum.transitions,
+               mode_name[mode], (unsigned long long)sum.transitions,
                (unsigned long long)sum.escalations, (unsigned long long)sum.atomics,
                (unsigned long long)sum.nontemporal);
-    dr_fprintf(f, "faults: first %llu  share %llu  upgrade %llu (revokes %llu)  lazy %llu  lazy-o %llu  escal. %llu\n",
+    dr_fprintf(f, "faults: (free first touches %llu)  share %llu  upgrade %llu (revokes %llu)  lazy %llu  lazy-o %llu  "
+                  "escal. %llu\n",
                (unsigned long long)sum.f_first, (unsigned long long)sum.f_share,
                (unsigned long long)sum.f_upgrade, (unsigned long long)sum.revokes,
                (unsigned long long)sum.f_lazy, (unsigned long long)sum.f_lazy_o,
                (unsigned long long)sum.escalations);
+    if (mode == MODE_CHECK)
+        dr_fprintf(f, "accesses of escalated instructions sent down the plain path by the owner check: %llu\n",
+                   (unsigned long long)sum.checked);
     dr_fprintf(f, "plain accesses:\n");
     dr_fprintf(f, "%-13s %15s %9s %9s %9s %9s\n", "class", "accesses", "sticky", "dynamic", "page", "fex");
     for (int c = 0; c < NCLASS; c++)
@@ -412,7 +584,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
         else if (strcmp(argv[i], "-page_shift") == 0 && i + 1 < argc)
             page_shift = atoi(argv[++i]);
         else if (strcmp(argv[i], "-mode") == 0 && i + 1 < argc)
-            mode_global = strcmp(argv[++i], "global") == 0;
+        {
+            i++;
+            mode = strcmp(argv[i], "global") == 0 ? MODE_GLOBAL : strcmp(argv[i], "check") == 0 ? MODE_CHECK : MODE_VIEWS;
+        }
     }
     module_data_t *m = dr_get_main_module();
     if (m != NULL) {
@@ -425,6 +600,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
     // not synchronized internally: insn_record() holds the table lock across lookup and add
     hashtable_init_ex(&insns, 16, HASH_INTPTR, false, false, NULL, NULL, NULL);
     merge_lock = dr_mutex_create();
+    region_lock = dr_mutex_create();
+    regions = dr_global_alloc(MAX_REGIONS * sizeof(region_t));
+    drmgr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_pre_syscall_event(event_pre_syscall);
+    drmgr_register_post_syscall_event(event_post_syscall);
     tls_idx = drmgr_register_tls_field();
     drmgr_register_thread_init_event(event_thread_init);
     drmgr_register_thread_exit_event(event_thread_exit);
