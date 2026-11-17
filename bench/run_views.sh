@@ -36,6 +36,10 @@ run_config() {
     protocol) set -- TSO_VIEWS=1 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     # escalation of the whole block instead of the single instruction
     protocol-block) set -- TSO_VIEWS=1 TSO_VIEWS_ESC=block TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    # first run without a profile; the same with migratory ownership (TSO_VIEWS_MIGRATE=1); without the fallback
+    protocol-cold) set -- TSO_VIEWS=1 TSO_VIEWS_PROFILE=none TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    protocol-mig) set -- TSO_VIEWS=1 TSO_VIEWS_PROFILE=none TSO_VIEWS_MIGRATE=1 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    protocol-nofb) set -- TSO_VIEWS=1 TSO_VIEWS_PROFILE=none TSO_VIEWS_BUDGET=0 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     # pages change state one at a time, no chunks
     protocol-nochunk) set -- TSO_VIEWS=1 TSO_VIEWS_CHUNK=0 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     # cost breakdown: identity base (arithmetic, no view), and additionally no rewriting pass (shared memory only)

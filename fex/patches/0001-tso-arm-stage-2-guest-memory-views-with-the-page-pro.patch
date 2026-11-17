@@ -1,4 +1,4 @@
-From 1aaf1dbf72b847fd20fc2867339831ea29f312c7 Mon Sep 17 00:00:00 2001
+From 764687070447afefc91a75506893d539f094d78c Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
@@ -28,11 +28,11 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../LinuxSyscalls/Syscalls/Thread.cpp         |    8 +
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  175 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |  422 +++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1036 +++++++++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  145 +++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1108 +++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  153 +++
  .../LinuxSyscalls/ThreadManager.cpp           |   18 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |    5 +
- 28 files changed, 2626 insertions(+), 29 deletions(-)
+ 28 files changed, 2706 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -2103,10 +2103,10 @@ index 0000000..277cd3f
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 new file mode 100644
-index 0000000..8f4caee
+index 0000000..76be33d
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -0,0 +1,1036 @@
+@@ -0,0 +1,1108 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -2199,17 +2199,17 @@ index 0000000..8f4caee
 +  } while (0)
 +
 +  struct Counters {
-+    uint64_t Claims, Shares, Upgrades, Lazy, Escalations, Stale, Emulated, Repeated, BoundaryExits, Collapsed;
++    uint64_t Claims, Shares, Upgrades, Lazy, Escalations, Stale, Emulated, Repeated, BoundaryExits, Collapsed, Migrations;
 +  } Count;
 +  bool PrintStats;
 +  uint64_t FallbackAt; // nanoseconds from the start to the fallback
 +  void DumpStats() {
 +    fprintf(stderr,
 +            "tso-arm: claims %lu, shares %lu, upgrades %lu, lazy %lu, escalations %lu, stale %lu, completed in the handler %lu, "
-+            "repeated %lu, boundary exits %lu, pages moved with their chunk %lu\n",
++            "repeated %lu, boundary exits %lu, pages moved with their chunk %lu, migrations %lu\n",
 +            (unsigned long)Count.Claims, (unsigned long)Count.Shares, (unsigned long)Count.Upgrades, (unsigned long)Count.Lazy,
 +            (unsigned long)Count.Escalations, (unsigned long)Count.Stale, (unsigned long)Count.Emulated, (unsigned long)Count.Repeated,
-+            (unsigned long)Count.BoundaryExits, (unsigned long)Count.Collapsed);
++            (unsigned long)Count.BoundaryExits, (unsigned long)Count.Collapsed, (unsigned long)Count.Migrations);
 +    const auto& S = FEXCore::TSOViews::Spent;
 +    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)", (unsigned long)S.Faults,
 +            S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9);
@@ -2247,6 +2247,22 @@ index 0000000..8f4caee
 +    return false;
 +  }
 +  ROMask = static_cast<uint16_t*>(M);
++  auto L = ::mmap(nullptr, Pages * sizeof(uint32_t), PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
++  auto Q = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
++  if (L == MAP_FAILED || Q == MAP_FAILED) {
++    return false;
++  }
++  LastChange = static_cast<uint32_t*>(L);
++  Quick = static_cast<uint8_t*>(Q);
++  // Off by default: on the A76 a change of hands (fault, mprotect in every view under the address space lock)
++  // costs more than the ordered accesses it saves (notes, section 13)
++  MigrateOn = getenv("TSO_VIEWS_MIGRATE") && getenv("TSO_VIEWS_MIGRATE")[0] == '1';
++  if (const char* E = getenv("TSO_VIEWS_QUICK")) {
++    QuickUs = uint32_t(strtoul(E, nullptr, 10));
++  }
++  if (const char* E = getenv("TSO_VIEWS_STRIKES")) {
++    QuickAllowed = uint8_t(strtoul(E, nullptr, 10));
++  }
 +  if (!(getenv("TSO_VIEWS_CHUNK") && getenv("TSO_VIEWS_CHUNK")[0] == '0')) {
 +    auto C = ::mmap(nullptr, Window >> ChunkShift, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
 +    if (C == MAP_FAILED) {
@@ -2975,14 +2991,33 @@ index 0000000..8f4caee
 +  return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
 +}
 +
++bool TSOViewMemory::MayMigrate(uint64_t Page) {
++  // Three changes of hands in a row, each within QuickUs of the one before: the page is used by two threads at
++  // once, and moving it back and forth would cost a fault each time
++  const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
++  const uint32_t Since = Now - LastChange[Page];
++  LastChange[Page] = Now;
++  if (Since < QuickUs) {
++    if (Quick[Page] >= QuickAllowed) {
++      return false;
++    }
++    ++Quick[Page];
++  } else {
++    Quick[Page] = 0;
++  }
++  return true;
++}
++
 +void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
 +  const uint64_t First = Chunk << (ChunkShift - PageShift);
 +  const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
++  const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
 +  uint64_t Moved = 0;
 +  for (uint64_t P = First; P < Last; ++P) {
 +    if (Owner[P] == From) {
 +      Owner[P] = To;
 +      ROMask[P] = ToMask;
++      LastChange[P] = Now; // a page that is really shared comes back quickly and is caught by MayMigrate
 +      ++Moved;
 +    }
 +  }
@@ -3023,7 +3058,7 @@ index 0000000..8f4caee
 +  // The same address faulting over and over means the protocol is stuck: hand it to the normal fault path
 +  // (an atomic reported as a read first becomes shared read-only, then faults again as a write and is upgraded)
 +  if (LastFault == FaultAddress) {
-+    if (++LastFaultCount > 8) {
++    if (++LastFaultCount > 64) {
 +      LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
 +      return Fault::NotOurs;
 +    }
@@ -3037,6 +3072,18 @@ index 0000000..8f4caee
 +  const uint16_t Mask = ROMask[Page];
 +  Fault Result = Fault::Retry;
 +
++  // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
++  // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
++  // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
++  // of buffers handed from one thread to the next. Pages that really are used by two threads at once (locks,
++  // flags, counters) still become shared, and their plain writers are escalated. No migration in the fallback.
++  const bool Migrating = MigrateOn && !FallbackActive.load(std::memory_order_relaxed);
++  auto MoveHere = [&] {
++    Owner[Page] = uint8_t(Slot);
++    ROMask[Page] = 0;
++    ++Count.Migrations;
++  };
++
 +  if (Ordered) {
 +    // An ordered access (or an atomic) through this thread's ordered view. Its own pages are accessible there,
 +    // so this is a page nobody owns, another thread's page, or a shared right not given to this view yet.
@@ -3046,18 +3093,25 @@ index 0000000..8f4caee
 +    } else if (St == Slot) {
 +      // stale protection; re-applied below
 +    } else if (IsOwnerSlot(St)) {
-+      if (Write) {
++      if (Write && Migrating && MayMigrate(Page)) {
++        MoveHere();
++      } else if (Write) {
 +        Owner[Page] = SharedRW;
 +        ROMask[Page] = 0;
++        ++Count.Shares;
 +      } else {
 +        Owner[Page] = SharedRO;
 +        ROMask[Page] = uint16_t(1U << St); // the owner keeps reading plainly
++        ++Count.Shares;
 +      }
-+      ++Count.Shares;
 +    } else if (St == SharedRO && Write) {
-+      Owner[Page] = SharedRW;
-+      ROMask[Page] = 0;
-+      ++Count.Upgrades;
++      if (Migrating && MayMigrate(Page)) {
++        MoveHere();
++      } else {
++        Owner[Page] = SharedRW;
++        ROMask[Page] = 0;
++        ++Count.Upgrades;
++      }
 +    } else {
 +      ++Count.Lazy; // the right exists, this view gets it now
 +    }
@@ -3067,17 +3121,22 @@ index 0000000..8f4caee
 +  } else if (St == Slot) {
 +    // stale protection; re-applied below
 +  } else if (IsOwnerSlot(St)) {
-+    if (Write) {
++    if (Write && Migrating && MayMigrate(Page)) {
++      MoveHere();
++    } else if (Write) {
 +      Owner[Page] = SharedRW;
 +      ROMask[Page] = 0;
 +      Result = Fault::Escalate;
++      ++Count.Shares;
 +    } else {
 +      Owner[Page] = SharedRO;
 +      ROMask[Page] = uint16_t((1U << St) | (1U << Slot));
++      ++Count.Shares;
 +    }
-+    ++Count.Shares;
 +  } else if (St == SharedRO) {
-+    if (Write) {
++    if (Write && Migrating && MayMigrate(Page)) {
++      MoveHere();
++    } else if (Write) {
 +      Owner[Page] = SharedRW;
 +      ROMask[Page] = 0;
 +      Result = Fault::Escalate;
@@ -3085,6 +3144,15 @@ index 0000000..8f4caee
 +    } else {
 +      ROMask[Page] |= uint16_t(1U << Slot);
 +      ++Count.Lazy;
++    }
++  } else if (Migrating && MayMigrate(Page)) {
++    // Shared read-write, but quiet for a while: a writer takes it, a reader makes it read-only for everyone
++    if (Write) {
++      MoveHere();
++    } else {
++      Owner[Page] = SharedRO;
++      ROMask[Page] = uint16_t(1U << Slot);
++      ++Count.Migrations;
 +    }
 +  } else {
 +    Result = Fault::Escalate; // shared read-write: plain accesses are not allowed
@@ -3118,8 +3186,12 @@ index 0000000..8f4caee
 +  // Buffers that move between threads move page by page, one fault each. After a few private pages of one chunk
 +  // were shared, the owner's remaining pages of the chunk follow at once (taking a page from its owner early is
 +  // always allowed; it only costs ordering on that page).
-+  // The same holds for shared read-only pages that become read-write.
-+  if ((IsOwnerSlot(St) || St == SharedRO) && Owner[Page] != St && ChunkShares) {
++  // The same holds for shared read-only pages that become read-write, and for pages that move to another thread.
++  // (TSO_VIEWS_CHUNKMIG=0: migrations move single pages only)
++  static const bool ChunkMigrations = !(getenv("TSO_VIEWS_CHUNKMIG") && getenv("TSO_VIEWS_CHUNKMIG")[0] == '0');
++  const bool Moved = Owner[Page] != St && (IsOwnerSlot(St) || St == SharedRO || (St == SharedRW && Result != Fault::Escalate)) &&
++                     (ChunkMigrations || !IsOwnerSlot(Owner[Page]));
++  if (Moved && ChunkShares) {
 +    const uint64_t Chunk = G >> ChunkShift;
 +    if (++ChunkShares[Chunk] >= CollapseAfter) {
 +      CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
@@ -3145,10 +3217,10 @@ index 0000000..8f4caee
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 new file mode 100644
-index 0000000..8fe0582
+index 0000000..cf5fc2b
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,153 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: guest memory as shared memory, mapped again in an ordered view and in one plain view per thread, with a
 +// page protocol that leaves accesses to memory only one thread uses unordered.
@@ -3260,6 +3332,14 @@ index 0000000..8fe0582
 +  bool SlotUsed[FEXCore::TSOViews::Slots] {};
 +  bool SlotUsable[FEXCore::TSOViews::Slots] {};
 +  bool AnyAttached {};
++  // Migratory ownership: false if the page changed hands quickly three times in a row (it is really shared)
++  bool MayMigrate(uint64_t Page);
++  uint32_t* LastChange {}; // per page: microseconds from the start to its last change of hands
++  uint8_t* Quick {};       // per page: quick changes of hands in a row
++  bool MigrateOn {false};  // TSO_VIEWS_MIGRATE=1: on
++  uint32_t QuickUs {1000}; // TSO_VIEWS_QUICK: a change of hands within this many microseconds counts as quick
++  uint8_t QuickAllowed {2}; // TSO_VIEWS_STRIKES: quick changes of hands in a row that still migrate
++
 +  // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
 +  void CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask);
 +  // Process-wide fallback to full ordering (FEXCore::TSOViews::FallbackActive), under Mutex

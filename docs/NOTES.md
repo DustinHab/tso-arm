@@ -477,3 +477,35 @@ Next: **migratory ownership**. A page (or a chunk) that changes hands should mov
 becoming shared: the old owner loses it by `mprotect`, which also makes its stores visible, and both threads keep
 plain accesses. Only pages used by two threads at once (detected by ping-pong) become shared. That is the case of
 zstd's, pigz's and xz's buffers.
+
+## 13. Migratory ownership: built, measured, off by default (2026-11-17)
+
+Section 12 ended with zstd's input buffer: filled by one thread, compressed by another, reused, and therefore shared
+read-write for good, with the compressing loop escalated. Migratory ownership (`TSO_VIEWS_MIGRATE=1`) moves a page
+to the thread that writes it instead of sharing it: the old owner loses it through `mprotect` (which also completes
+its earlier plain stores), both threads keep plain accesses. A reader of another thread's page still shares it
+read-only; a quiet shared read-write page goes to its next writer, or read-only to its next reader. A page that
+changes hands quickly several times in a row (`TSO_VIEWS_QUICK` microseconds, `TSO_VIEWS_STRIKES` times) is really
+used by two threads at once and is shared as before, its plain writers escalated. No migration in the fallback.
+Litmus tests: 0 forbidden outcomes with it on.
+
+It does what it should: zstd's escalations drop from 2,636 to 535 to 635. It does not pay. First runs, best of 2
+(`bench/migrate_sweep.sh`):
+
+| Setting | pigz | xz | zstd |
+|---|---|---|---|
+| no migration | **1.47 s** | 1.62 s | 0.99 s |
+| migration, quick = 1 ms, 2 strikes, chunks follow | 1.87 s | **1.59 s** | 0.97 s |
+| migration, quick = 20 ms, no strike, chunks follow | 1.54 s | 1.67 s | 0.97 s |
+| the same, single pages only | 1.56 s | 1.63 s | 0.97 s |
+
+Every change of hands is a fault plus `mprotect` in every view of every thread, taken under the address space lock
+that every other thread's page faults also need: 100 to 150 microseconds on average under load, and pigz's
+buffers change hands thousands of times (2,165 migrations, 30,000 to 250,000 pages moved with their chunks). An
+escalated instruction pays nothing like that: loads become `ldapr`, which the A76 executes at the cost of a
+plain load. On this machine ordering shared data is cheaper than moving it. It would be worth another look on a
+host with a cheaper way to change per-thread rights (memory protection keys or Arm's permission overlays, which
+change rights by a register write instead of page table updates).
+
+zstd stays at about 0.9 to 1.0 s against 0.72 s with FEX's full TSO; its gap is the ordered stack in the fallback
+(section 12) and its large escalated hot loop.
