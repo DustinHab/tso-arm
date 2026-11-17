@@ -1,4 +1,4 @@
-From 6af84ae06402e57a5a9db89cba89961ac463a63d Mon Sep 17 00:00:00 2001
+From c358fd949f5c05613abc1d9bb266a4e3f574c2ac Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
@@ -10,29 +10,29 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
  FEXCore/Source/Interface/Core/Core.cpp        |  81 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |   2 +
- .../Source/Interface/Core/JIT/MemoryOps.cpp   | 163 +++-
+ .../Source/Interface/Core/JIT/MemoryOps.cpp   | 146 ++-
  .../Interface/Core/OpcodeDispatcher.cpp       |   8 +-
  .../Source/Interface/Core/OpcodeDispatcher.h  |  56 +-
  FEXCore/Source/Interface/IR/IR.json           |  18 +-
  FEXCore/Source/Interface/IR/PassManager.cpp   |   6 +
  FEXCore/Source/Interface/IR/Passes.h          |   4 +
- .../Interface/IR/Passes/GuestViewPass.cpp     | 262 ++++++
+ .../Interface/IR/Passes/GuestViewPass.cpp     | 265 ++++++
  .../IR/Passes/RegisterAllocationPass.cpp      |  10 +-
  FEXCore/include/FEXCore/Core/Context.h        |  21 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   3 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |  73 ++
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  71 ++
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   5 +
  Source/Tools/LinuxEmulation/CMakeLists.txt    |   2 +
  .../LinuxSyscalls/SignalDelegator.cpp         |  10 +
  .../LinuxSyscalls/Syscalls/Memory.cpp         |   9 +
  .../LinuxSyscalls/Syscalls/Thread.cpp         |   8 +
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 149 +++-
- .../LinuxSyscalls/TSOAccess.cpp               | 422 ++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 793 ++++++++++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 103 +++
+ .../LinuxSyscalls/TSOAccess.cpp               | 422 +++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 838 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 105 +++
  .../LinuxSyscalls/ThreadManager.cpp           |  14 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
- 28 files changed, 2231 insertions(+), 29 deletions(-)
+ 28 files changed, 2262 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -281,7 +281,7 @@ index 980a832..3a754ae 100644
                                                      IR::MemOffsetType OffsetType, uint8_t OffsetScale);
  
 diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
-index d7b716c..7466eed 100644
+index d7b716c..a9bff44 100644
 --- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 @@ -5,6 +5,7 @@ tags: backend|arm64
@@ -311,11 +311,11 @@ index d7b716c..7466eed 100644
  
    if (Op->Class == IR::RegClass::GPR) {
      const auto Dst = GetReg(Node);
-@@ -1478,6 +1487,59 @@ DEF_OP(VBroadcastFromMem) {
+@@ -1478,6 +1487,44 @@ DEF_OP(VBroadcastFromMem) {
    }
  }
  
-+// tso-arm: guest address -> plain view (+ REG_VIEW) or ordered view (| OrderedBase)
++// tso-arm: guest address -> plain view (+ REG_VIEW) or ordered view (+ REG_VIEW, | OrderedBit)
 +DEF_OP(ViewPlain) {
 +  const auto Op = IROp->C<IR::IROp_ViewPlain>();
 +  const auto Dst = GetReg(Node);
@@ -342,25 +342,10 @@ index d7b716c..7466eed 100644
 +}
 +
 +void Arm64JITCore::EmitOrderedViewAddress(ARMEmitter::Register Dst, ARMEmitter::Register Addr) {
-+  if (FEXCore::TSOViews::Stage1()) {
-+    orr(ARMEmitter::Size::i64Bit, Dst, Addr, FEXCore::TSOViews::OrderedBase);
-+    return;
-+  }
-+  // Owner check: the thread's own private pages are reached through its plain view (no ordering is observable
-+  // there and the ordered view does not map them); everything else through the ordered view. The table only picks
-+  // the path, the page protections stay the guard.
-+  //   entry = OwnerTable | (addr >> 12); slot = x24 >> 34
-+  // NZCV holds guest flags here, so no compare: eor and cbnz.
-+  lsr(ARMEmitter::Size::i64Bit, TMP1, Addr, 12);
-+  orr(ARMEmitter::Size::i64Bit, TMP1, TMP1, FEXCore::TSOViews::OwnerTable);
-+  ldrb(TMP1.R(), ARMEmitter::ExtendedMemOperand(TMP1, ARMEmitter::IndexType::OFFSET, 0));
-+  eor(ARMEmitter::Size::i64Bit, TMP1, TMP1, REG_VIEW.R(), ARMEmitter::ShiftType::LSR, FEXCore::TSOViews::WindowBits);
-+  add(ARMEmitter::Size::i64Bit, TMP2, Addr, REG_VIEW.R());
-+  orr(ARMEmitter::Size::i64Bit, Dst, Addr, FEXCore::TSOViews::OrderedBase);
-+  ARMEmitter::ForwardLabel NotOwn {};
-+  (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &NotOwn);
-+  mov(ARMEmitter::Size::i64Bit, Dst, TMP2.R());
-+  (void)Bind(&NotOwn);
++  // The thread's ordered view: its own private pages and the shared ones are accessible there, other threads'
++  // private pages are not (an access shares them first)
++  add(ARMEmitter::Size::i64Bit, Dst, Addr, REG_VIEW.R());
++  orr(ARMEmitter::Size::i64Bit, Dst, Dst, FEXCore::TSOViews::OrderedBit);
 +}
 +
 +// Views on for this (64-bit) guest: stack and string operations address guest memory through them.
@@ -371,7 +356,7 @@ index d7b716c..7466eed 100644
  DEF_OP(Push) {
    const auto Op = IROp->C<IR::IROp_Push>();
    const auto ValueSize = IR::OpSizeToSize(Op->ValueSize);
-@@ -1485,6 +1547,34 @@ DEF_OP(Push) {
+@@ -1485,6 +1532,34 @@ DEF_OP(Push) {
    const auto AddrSrc = GetReg(Op->Addr);
    const auto Dst = GetReg(Node);
  
@@ -406,7 +391,7 @@ index d7b716c..7466eed 100644
    bool NeedsMoveAfterwards = false;
    if (Dst != AddrSrc) {
      if (Dst == Src) {
-@@ -1570,6 +1660,17 @@ DEF_OP(PushTwo) {
+@@ -1570,6 +1645,17 @@ DEF_OP(PushTwo) {
    auto Src2 = GetReg(Op->Value2);
    const auto Dst = GetReg(Op->Addr);
  
@@ -424,7 +409,7 @@ index d7b716c..7466eed 100644
    switch (ValueSize) {
    case 4: {
      stp<ARMEmitter::IndexType::PRE>(Src1.W(), Src2.W(), Dst, -2 * ValueSize);
-@@ -1594,6 +1695,20 @@ DEF_OP(Pop) {
+@@ -1594,6 +1680,20 @@ DEF_OP(Pop) {
  
    LOGMAN_THROW_A_FMT(Dst != Addr, "Invalid");
  
@@ -445,7 +430,7 @@ index d7b716c..7466eed 100644
    switch (Size) {
    case 1: {
      ldrb<ARMEmitter::IndexType::POST>(Dst.W(), Addr, Size);
-@@ -1633,6 +1748,17 @@ DEF_OP(PopTwo) {
+@@ -1633,6 +1733,17 @@ DEF_OP(PopTwo) {
    LOGMAN_THROW_A_FMT(Dst1 != Addr && Dst2 != Addr, "Invalid");
    LOGMAN_THROW_A_FMT(Dst1 != Dst2, "Invalid");
  
@@ -463,7 +448,7 @@ index d7b716c..7466eed 100644
    switch (Size) {
    case 4: {
      ldp<ARMEmitter::IndexType::POST>(Dst1.W(), Dst2.W(), Addr, 2 * Size);
-@@ -1653,8 +1779,15 @@ DEF_OP(StoreMem) {
+@@ -1653,8 +1764,15 @@ DEF_OP(StoreMem) {
    const auto Op = IROp->C<IR::IROp_StoreMem>();
    const auto OpSize = IROp->Size;
  
@@ -481,7 +466,7 @@ index d7b716c..7466eed 100644
  
    if (Op->Class == IR::RegClass::GPR) {
      const auto Src = GetZeroableReg(Op->Value);
-@@ -1864,7 +1997,8 @@ DEF_OP(StoreMemTSO) {
+@@ -1864,7 +1982,8 @@ DEF_OP(StoreMemTSO) {
  DEF_OP(MemSet) {
    const auto Op = IROp->C<IR::IROp_MemSet>();
  
@@ -491,21 +476,20 @@ index d7b716c..7466eed 100644
    const auto Size = IR::OpSizeToSize(Op->Size);
    const auto MemReg = GetReg(Op->Addr);
    const auto Value = GetZeroableReg(Op->Value);
-@@ -1895,6 +2029,13 @@ DEF_OP(MemSet) {
+@@ -1895,6 +2014,12 @@ DEF_OP(MemSet) {
      const auto Prefix = GetReg(Op->Prefix);
      add(TMP2, Prefix.X(), MemReg.X());
    }
 +  if (ViewsOn(CTX)) {
++    add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
 +    if (IsAtomic) {
-+      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBase);
-+    } else {
-+      add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
++      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
 +    }
 +  }
  
    if (!DirectionIsInline) {
      // Backward or forwards implementation depends on flag
-@@ -2099,7 +2240,8 @@ DEF_OP(MemSet) {
+@@ -2099,7 +2224,8 @@ DEF_OP(MemSet) {
  DEF_OP(MemCpy) {
    const auto Op = IROp->C<IR::IROp_MemCpy>();
  
@@ -515,17 +499,16 @@ index d7b716c..7466eed 100644
    const auto Size = IR::OpSizeToSize(Op->Size);
    const auto MemRegDest = GetReg(Op->Dest);
    const auto MemRegSrc = GetReg(Op->Src);
-@@ -2129,6 +2271,15 @@ DEF_OP(MemCpy) {
+@@ -2129,6 +2255,14 @@ DEF_OP(MemCpy) {
    mov(TMP1, Length.X());
    mov(TMP2, MemRegDest.X());
    mov(TMP3, MemRegSrc.X());
 +  if (ViewsOn(CTX)) {
++    add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
++    add(ARMEmitter::Size::i64Bit, TMP3, TMP3, REG_VIEW.R());
 +    if (IsAtomic) {
-+      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBase);
-+      orr(ARMEmitter::Size::i64Bit, TMP3, TMP3, FEXCore::TSOViews::OrderedBase);
-+    } else {
-+      add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
-+      add(ARMEmitter::Size::i64Bit, TMP3, TMP3, REG_VIEW.R());
++      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
++      orr(ARMEmitter::Size::i64Bit, TMP3, TMP3, FEXCore::TSOViews::OrderedBit);
 +    }
 +  }
  
@@ -791,10 +774,10 @@ index 213967a..8011bcc 100644
    fextl::unique_ptr<Pass> CreateIRValidation();
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 new file mode 100644
-index 0000000..6f6af80
+index 0000000..19e8e3f
 --- /dev/null
 +++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,265 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -932,7 +915,8 @@ index 0000000..6f6af80
 +          if (R.AsRegClass() != RegClass::GPRFixed) {
 +            continue;
 +          }
-+          // r = r +/- constant (64-bit): the cached plain view stays valid at a new distance
++          // r = r +/- constant (64-bit): the cached views stay valid at a new distance (both views map every
++          // page of the window, so any distance is fine)
 +          bool Kept = false;
 +          const auto ValOp = CurrentIR.GetOp<IROp_Header>(IROp->Args[0]);
 +          int64_t C {};
@@ -941,16 +925,18 @@ index 0000000..6f6af80
 +            if (SrcOp->Op == OP_LOADREGISTER && SrcOp->C<IROp_LoadRegister>()->Class == RegClass::GPR &&
 +                SrcOp->C<IROp_LoadRegister>()->Reg == R.Reg) {
 +              const int64_t D = ValOp->Op == OP_ADD ? C : -C;
-+              if (auto It = RegPlain.find(R.Reg); It != RegPlain.end()) {
-+                It->second.Delta += D;
-+                Kept = true;
++              for (auto* Cache : {&RegPlain, &RegOrdered}) {
++                if (auto It = Cache->find(R.Reg); It != Cache->end()) {
++                  It->second.Delta += D;
++                }
 +              }
++              Kept = true;
 +            }
 +          }
 +          if (!Kept) {
 +            RegPlain.erase(R.Reg);
++            RegOrdered.erase(R.Reg);
 +          }
-+          RegOrdered.erase(R.Reg);
 +          continue;
 +        }
 +        case OP_PUSH:
@@ -1147,16 +1133,16 @@ index 2112073..19ae82f 100644
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
 new file mode 100644
-index 0000000..3f15a3d
+index 0000000..9ac170c
 --- /dev/null
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,71 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: layout of the guest memory views used to elide TSO ordering for memory that only one thread uses.
 +//
-+// Guest memory lives in [0, Window). Every guest mapping is shared memory and is mapped again
-+// - in the ordered view at OrderedBase + guest address,
-+// - in one plain view per thread at Slot * Window + guest address.
++// Guest memory lives in [0, Window). Every guest mapping is shared memory and is mapped again, for each thread,
++// - in its plain view at Slot * Window + guest address (plain accesses),
++// - in its ordered view at (Slot * Window | OrderedBit) + guest address (ordered accesses and atomics).
 +// Translated code reaches guest memory only through the views; the identity mapping stays for the kernel and the
 +// runtime. Since every view base is a multiple of Window, (view address & (Window - 1)) is the guest address.
 +#pragma once
@@ -1167,14 +1153,12 @@ index 0000000..3f15a3d
 +namespace FEXCore::TSOViews {
 +constexpr uint64_t WindowBits = 34;
 +constexpr uint64_t Window = 1ULL << WindowBits;  // 16 GB
-+constexpr uint64_t OrderedBase = 1ULL << 37;     // slot 8; a single bit, so `orr` forms ordered addresses
 +constexpr uint64_t AllocLow = 1ULL << 32;        // non-fixed guest mappings are placed in [4 GB, Window)
-+constexpr int Slots = 16;                         // slots 1..15 except OrderedSlot and TableSlot
-+constexpr int OrderedSlot = OrderedBase / Window;
-+// Page owner table: one byte per guest page of the window, at a single-bit address so that `orr` forms the entry
-+// address. 1..15: private to the thread in that slot; 0: nobody yet; SharedRO / SharedRW.
-+constexpr uint64_t OwnerTable = 1ULL << 36;      // slot 4
-+constexpr int TableSlot = OwnerTable / Window;
++constexpr int Slots = 16;                         // thread slots 1..15 (slot 0 is guest memory itself)
++// A thread's ordered view lies at its plain view base with this bit set: `add` then `orr` form the address
++constexpr uint64_t OrderedBit = uint64_t(Slots) * Window; // 2^38
++static_assert((OrderedBit & (OrderedBit - 1)) == 0, "single bit");
++// Page states, one byte per guest page: 1..15 private to the thread in that slot; 0 nobody yet; shared
 +constexpr uint8_t SharedRO = 0xFE;
 +constexpr uint8_t SharedRW = 0xFF;
 +// `ldrb wzr, [x24]`: written over the instruction starts of a block that must not run on; it faults at the
@@ -1990,10 +1974,10 @@ index 0000000..277cd3f
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 new file mode 100644
-index 0000000..dda8202
+index 0000000..6653ea8
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -0,0 +1,793 @@
+@@ -0,0 +1,838 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -2002,14 +1986,17 @@ index 0000000..dda8202
 +$end_info$
 +*/
 +
-+// Page states (one byte per guest page in the owner table at FEXCore::TSOViews::OwnerTable):
-+//   0          nobody's yet: inaccessible in every view, the first thread to touch it through its plain view gets it
-+//   1..15      private to the thread in that view slot: read/write in that thread's plain view only
-+//   SharedRO   read-only in the ordered view and in the plain views of the threads in ROMask (lazily added)
-+//   SharedRW   read/write in the ordered view only
++// Every thread has a plain view (plain accesses) and an ordered view (ordered accesses and atomics).
++// Page states (one byte per guest page in the owner table):
++//   0          nobody's yet: inaccessible in every view, the first thread to touch it gets it
++//   1..15      private to the thread in that slot: read/write in that thread's two views only
++//   SharedRO   read-only in the ordered views, and in the plain views of the threads in ROMask
++//   SharedRW   read/write in the ordered views only
 +// Transitions happen in HandleFault, under Mutex, with mprotect of the affected views. An mprotect that takes a
 +// page away from a thread completes only after its earlier accesses through the old mapping are complete (TLB
 +// invalidation), so the plain stores of the previous owner are visible before anyone else reaches the page.
++// Rights are taken away at once in every view; rights a transition gives to threads other than the faulting one
++// are given lazily, by their own fault on first use.
 +
 +#include "LinuxSyscalls/TSOViews.h"
 +
@@ -2037,6 +2024,26 @@ index 0000000..dda8202
 +  }
 +  uint64_t SlotBase(int Slot) {
 +    return uint64_t(Slot) * Window;
++  }
++  uint64_t OrderedViewBase(int Slot) {
++    return SlotBase(Slot) | OrderedBit;
++  }
++  void Protect(uint64_t Addr, uint64_t Length, int Prot) {
++    if (::mprotect(reinterpret_cast<void*>(Addr), Length, Prot) != 0) {
++      // A view keeping rights it must lose would break the protocol silently
++      LogMan::Msg::EFmt("tso-arm: mprotect({:#x}, {:#x}, {}) failed: {}", Addr, Length, Prot, strerror(errno));
++      abort();
++    }
++  }
++  bool ReserveAt(uint64_t Base) {
++    auto P = ::mmap(reinterpret_cast<void*>(Base), Window, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
++    if (P == reinterpret_cast<void*>(Base)) {
++      return true;
++    }
++    if (P != MAP_FAILED) {
++      ::munmap(P, Window);
++    }
++    return false;
 +  }
 +  bool IsOwnerSlot(uint8_t S) {
 +    return S >= 1 && S < Slots;
@@ -2093,12 +2100,8 @@ index 0000000..dda8202
 +}
 +
 +bool TSOViewMemory::Init() {
-+  auto R = ::mmap(reinterpret_cast<void*>(OrderedBase), Window, PROT_NONE, ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
-+  if (R != reinterpret_cast<void*>(OrderedBase)) {
-+    return false;
-+  }
-+  auto T = ::mmap(reinterpret_cast<void*>(OwnerTable), Pages, PROT_READ | PROT_WRITE, ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
-+  if (T != reinterpret_cast<void*>(OwnerTable)) {
++  auto T = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
++  if (T == MAP_FAILED) {
 +    return false;
 +  }
 +  Owner = static_cast<uint8_t*>(T);
@@ -2108,25 +2111,33 @@ index 0000000..dda8202
 +  }
 +  ROMask = static_cast<uint16_t*>(M);
 +
++  // A slot needs both its views; the host's own mappings take some of the address space
 +  int Usable = 0;
 +  for (int S = 1; S < Slots; ++S) {
-+    if (S == OrderedSlot || S == TableSlot) {
++    if (!ReserveAt(SlotBase(S))) {
 +      continue;
 +    }
-+    auto P = ::mmap(reinterpret_cast<void*>(SlotBase(S)), Window, PROT_NONE, ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
-+    SlotUsable[S] = P == reinterpret_cast<void*>(SlotBase(S));
-+    if (!SlotUsable[S] && P != MAP_FAILED) {
-+      ::munmap(P, Window);
++    if (!ReserveAt(OrderedViewBase(S))) {
++      ::munmap(reinterpret_cast<void*>(SlotBase(S)), Window);
++      continue;
 +    }
-+    Usable += SlotUsable[S];
++    SlotUsable[S] = true;
++    ++Usable;
++  }
++  if (IdentityBase()) {
++    // Measurement mode: every thread uses slot 0, plain accesses go to guest memory itself
++    if (!ReserveAt(OrderedViewBase(0))) {
++      return false;
++    }
++    SlotUsed[0] = true;
 +  }
 +  if (Knob("TSO_VIEWS_STATS")) {
 +    PrintStats = true;
 +    atexit(DumpStats);
 +  }
 +
-+  LogMan::Msg::IFmt("tso-arm: views on, window {:#x}, ordered view {:#x}, owner table {:#x}, {} thread slots{}", Window,
-+                    OrderedBase, OwnerTable, Usable, Stage1() ? ", stage 1 (no page protocol)" : "");
++  LogMan::Msg::IFmt("tso-arm: views on, window {:#x}, ordered views at plain view | {:#x}, {} thread slots{}", Window, OrderedBit,
++                    Usable, Stage1() ? ", stage 1 (no page protocol)" : "");
 +  return Usable > 0;
 +}
 +
@@ -2152,8 +2163,8 @@ index 0000000..dda8202
 +  }
 +}
 +
-+uint64_t TSOViewMemory::ViewBase(int Slot) const {
-+  return Slot == OrderedSlot ? OrderedBase : SlotBase(Slot);
++uint64_t TSOViewMemory::ViewBase(int Slot, bool Ordered) {
++  return Ordered ? OrderedViewBase(Slot) : SlotBase(Slot);
 +}
 +
 +// ---------------------------------------------------------------------------------------------------------------
@@ -2241,10 +2252,12 @@ index 0000000..dda8202
 +}
 +
 +void TSOViewMemory::AliasAll(uint64_t Addr, uint64_t Length) {
-+  AliasNone(Addr, Length, OrderedBase);
-+  for (int S = 1; S < Slots; ++S) {
++  for (int S = 0; S < Slots; ++S) {
 +    if (SlotUsed[S]) {
-+      AliasNone(Addr, Length, SlotBase(S));
++      if (S != 0) {
++        AliasNone(Addr, Length, SlotBase(S));
++      }
++      AliasNone(Addr, Length, OrderedViewBase(S));
 +    }
 +  }
 +}
@@ -2254,10 +2267,12 @@ index 0000000..dda8202
 +    return;
 +  }
 +  Length = std::min(Length, Window - Addr);
-+  Reserve(OrderedBase + Addr, Length);
-+  for (int S = 1; S < Slots; ++S) {
++  for (int S = 0; S < Slots; ++S) {
 +    if (SlotUsed[S]) {
-+      Reserve(SlotBase(S) + Addr, Length);
++      if (S != 0) {
++        Reserve(SlotBase(S) + Addr, Length);
++      }
++      Reserve(OrderedViewBase(S) + Addr, Length);
 +    }
 +  }
 +}
@@ -2271,22 +2286,22 @@ index 0000000..dda8202
 +  memset(ROMask + (Addr >> PageShift), 0, ((End - Addr) >> PageShift) * sizeof(uint16_t));
 +}
 +
-+int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int ViewSlot, int GuestProt) const {
++int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered, int GuestProt) const {
 +  const int RW = GuestProt & (PROT_READ | PROT_WRITE); // nothing executes through the views
 +  const int RO = RW & PROT_READ;
-+  if (Stage1()) {
++  if (Stage1() || Slot == 0) {
 +    return RW;
 +  }
 +  if (State == 0) {
 +    return PROT_NONE;
 +  }
 +  if (State == SharedRW) {
-+    return ViewSlot == OrderedSlot ? RW : PROT_NONE;
++    return Ordered ? RW : PROT_NONE;
 +  }
 +  if (State == SharedRO) {
-+    return (ViewSlot == OrderedSlot || ((Mask >> ViewSlot) & 1)) ? RO : PROT_NONE;
++    return (Ordered || ((Mask >> Slot) & 1)) ? RO : PROT_NONE;
 +  }
-+  return ViewSlot == State ? RW : PROT_NONE;
++  return State == Slot ? RW : PROT_NONE;
 +}
 +
 +void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
@@ -2305,37 +2320,42 @@ index 0000000..dda8202
 +      continue;
 +    }
 +    const int GP = It->second.Prot;
-+    for (int V = 1; V < Slots; ++V) {
-+      if (V != OrderedSlot && !SlotUsed[V]) {
++    for (int Sl = 0; Sl < Slots; ++Sl) {
++      if (!SlotUsed[Sl]) {
 +        continue;
 +      }
-+      const uint64_t Base = ViewBase(V);
-+      uint64_t RunStart = S;
-+      int RunProt = ViewProt(Owner[S >> PageShift], ROMask[S >> PageShift], V, GP);
-+      for (uint64_t P = S + (1ULL << PageShift); P < E; P += (1ULL << PageShift)) {
-+        const int Prot = ViewProt(Owner[P >> PageShift], ROMask[P >> PageShift], V, GP);
-+        if (Prot != RunProt) {
-+          ::mprotect(reinterpret_cast<void*>(Base + RunStart), P - RunStart, RunProt);
-+          RunStart = P;
-+          RunProt = Prot;
++      for (int Ord = Sl == 0 ? 1 : 0; Ord < 2; ++Ord) {
++        const uint64_t Base = ViewBase(Sl, Ord);
++        uint64_t RunStart = S;
++        int RunProt = ViewProt(Owner[S >> PageShift], ROMask[S >> PageShift], Sl, Ord, GP);
++        for (uint64_t P = S + (1ULL << PageShift); P < E; P += (1ULL << PageShift)) {
++          const int Prot = ViewProt(Owner[P >> PageShift], ROMask[P >> PageShift], Sl, Ord, GP);
++          if (Prot != RunProt) {
++            Protect(Base + RunStart, P - RunStart, RunProt);
++            RunStart = P;
++            RunProt = Prot;
++          }
 +        }
++        Protect(Base + RunStart, E - RunStart, RunProt);
 +      }
-+      ::mprotect(reinterpret_cast<void*>(Base + RunStart), E - RunStart, RunProt);
 +    }
 +  }
 +}
 +
-+void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask, int GuestProt) {
++void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask, int GuestProt, int FaultSlot) {
 +  const uint8_t NewState = Owner[Page];
 +  const uint16_t NewMask = ROMask[Page];
-+  for (int V = 1; V < Slots; ++V) {
-+    if (V != OrderedSlot && !SlotUsed[V]) {
++  for (int Sl = 1; Sl < Slots; ++Sl) {
++    if (!SlotUsed[Sl]) {
 +      continue;
 +    }
-+    const int O = ViewProt(OldState, OldMask, V, GuestProt);
-+    const int N = ViewProt(NewState, NewMask, V, GuestProt);
-+    if (O != N) {
-+      ::mprotect(reinterpret_cast<void*>(ViewBase(V) + (Page << PageShift)), 1ULL << PageShift, N);
++    for (int Ord = 0; Ord < 2; ++Ord) {
++      const int O = ViewProt(OldState, OldMask, Sl, Ord, GuestProt);
++      const int N = ViewProt(NewState, NewMask, Sl, Ord, GuestProt);
++      // A view may hold less than O (a right given lazily and not used yet), never more
++      if (O != N && ((O & ~N) != 0 || Sl == FaultSlot)) {
++        Protect(ViewBase(Sl, Ord) + (Page << PageShift), 1ULL << PageShift, N);
++      }
 +    }
 +  }
 +  ++Stats.Transitions;
@@ -2609,6 +2629,7 @@ index 0000000..dda8202
 +  for (auto& [Start, R] : Ranges) {
 +    if (R.Prot != PROT_NONE || R.K != Kind::SharedFile) {
 +      AliasNone(Start, R.End - Start, SlotBase(S));
++      AliasNone(Start, R.End - Start, OrderedViewBase(S));
 +    }
 +  }
 +
@@ -2672,7 +2693,8 @@ index 0000000..dda8202
 +    }
 +    ROMask[P] &= ~Bit;
 +  }
-+  Reserve(Base, Window);
++  Reserve(SlotBase(S), Window);
++  Reserve(OrderedViewBase(S), Window);
 +  SlotUsed[S] = false;
 +}
 +
@@ -2691,7 +2713,8 @@ index 0000000..dda8202
 +    return NotOurs("not a view address");
 +  }
 +  const int View = FaultAddress / Window;
-+  if (View >= Slots || (View != OrderedSlot && View != Slot)) {
++  const bool Ordered = View >= Slots;
++  if (View >= 2 * Slots || Slot == 0 || (Ordered ? View - Slots : View) != Slot) {
 +    return NotOurs("another thread's view");
 +  }
 +  std::lock_guard lk(Mutex);
@@ -2722,23 +2745,29 @@ index 0000000..dda8202
 +  const uint16_t Mask = ROMask[Page];
 +  Fault Result = Fault::Retry;
 +
-+  if (View == OrderedSlot) {
-+    // An ordered access (or an atomic) to a page that is not shared read-write yet
-+    if (St == SharedRO) {
-+      if (Write) {
-+        Owner[Page] = SharedRW;
-+        ROMask[Page] = 0;
-+        ++Count.Upgrades;
-+      }
-+    } else if (St != SharedRW) {
++  if (Ordered) {
++    // An ordered access (or an atomic) through this thread's ordered view. Its own pages are accessible there,
++    // so this is a page nobody owns, another thread's page, or a shared right not given to this view yet.
++    if (St == 0) {
++      Owner[Page] = uint8_t(Slot);
++      ++Count.Claims;
++    } else if (St == Slot) {
++      // stale protection; re-applied below
++    } else if (IsOwnerSlot(St)) {
 +      if (Write) {
 +        Owner[Page] = SharedRW;
 +        ROMask[Page] = 0;
 +      } else {
 +        Owner[Page] = SharedRO;
-+        ROMask[Page] = IsOwnerSlot(St) ? uint16_t(1U << St) : 0;
++        ROMask[Page] = uint16_t(1U << St); // the owner keeps reading plainly
 +      }
 +      ++Count.Shares;
++    } else if (St == SharedRO && Write) {
++      Owner[Page] = SharedRW;
++      ROMask[Page] = 0;
++      ++Count.Upgrades;
++    } else {
++      ++Count.Lazy; // the right exists, this view gets it now
 +    }
 +  } else if (St == 0) {
 +    Owner[Page] = uint8_t(Slot);
@@ -2777,9 +2806,9 @@ index 0000000..dda8202
 +  if (Owner[Page] == St && ROMask[Page] == Mask) {
 +    // No state change (stale protection, or a race with another thread's transition): set this view right
 +    ++Count.Stale;
-+    ::mprotect(reinterpret_cast<void*>(FaultAddress & ~PageMask), 1ULL << PageShift, ViewProt(St, Mask, View, GP));
++    Protect(FaultAddress & ~PageMask, 1ULL << PageShift, ViewProt(St, Mask, Slot, Ordered, GP));
 +  } else {
-+    ApplyPage(Page, St, Mask, GP);
++    ApplyPage(Page, St, Mask, GP, Slot);
 +  }
 +  if (Result == Fault::Escalate) {
 +    ++Count.Escalations;
@@ -2789,10 +2818,10 @@ index 0000000..dda8202
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 new file mode 100644
-index 0000000..3f44094
+index 0000000..5628edb
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,105 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: guest memory as shared memory, mapped again in an ordered view and in one plain view per thread, with a
 +// page protocol that leaves accesses to memory only one thread uses unordered.
@@ -2873,23 +2902,25 @@ index 0000000..3f44094
 +
 +  // Page states
 +  void SetState(uint64_t Addr, uint64_t End, uint8_t State);
-+  int ViewProt(uint8_t State, uint16_t Mask, int ViewSlot, int GuestProt) const;
++  // Protection of a page in the plain or ordered view of a slot
++  int ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered, int GuestProt) const;
 +  // Recomputes the protection of [Addr, End) in every view from the page states (runs of equal protection)
 +  void Apply(uint64_t Addr, uint64_t End);
-+  // One page changed from (OldState, OldMask) to the current state: protect the views whose protection changed
-+  void ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask, int GuestProt);
++  // One page changed from (OldState, OldMask) to the current state: take rights away in every view at once, give
++  // new ones to the faulting slot only (the others get them by their own fault)
++  void ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask, int GuestProt, int FaultSlot);
 +  void AliasNone(uint64_t Addr, uint64_t Length, uint64_t Base);
 +  void AliasAll(uint64_t Addr, uint64_t Length);
 +  void ReserveEverywhere(uint64_t Addr, uint64_t Length);
 +  static void Reserve(uint64_t Base, uint64_t Length);
-+  uint64_t ViewBase(int Slot) const;
++  static uint64_t ViewBase(int Slot, bool Ordered);
 +
 +  std::recursive_mutex Mutex;
 +  std::map<uint64_t, Range> Ranges; // guest mappings by start address, split where the protection differs
 +  bool SlotUsed[FEXCore::TSOViews::Slots] {};
 +  bool SlotUsable[FEXCore::TSOViews::Slots] {};
 +  bool AnyAttached {};
-+  uint8_t* Owner {};    // FEXCore::TSOViews::OwnerTable, one byte per page
++  uint8_t* Owner {};    // page states, one byte per guest page
 +  uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page
 +  struct {
 +    uint64_t Transitions {};
