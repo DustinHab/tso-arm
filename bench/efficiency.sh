@@ -47,7 +47,18 @@ run_config() {
 
 trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/eff-out /dev/shm/eff-time /dev/shm/eff-err' EXIT
 sh tools/freq.sh fix $KHZ >/dev/null
+# The test machine has no fan: start every round below COOL degrees (at most two minutes of waiting)
+cooldown() {
+    i=0
+    while [ $i -lt 24 ]; do
+        t=$(vcgencmd measure_temp | sed 's/[^0-9.]//g' | cut -d. -f1)
+        [ "$t" -lt ${COOL:-65} ] && return
+        sleep 5
+        i=$((i + 1))
+    done
+}
 for r in $(seq 1 $ROUNDS); do
+    cooldown
     for w in $WORKLOADS; do
         for cfg in $CONFIGS; do
             run_config $w $cfg $r

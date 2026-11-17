@@ -1,14 +1,14 @@
-From c358fd949f5c05613abc1d9bb266a4e3f574c2ac Mon Sep 17 00:00:00 2001
+From 63db0c7031b627725d2f81c65071752738344d40 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
 
 ---
  FEXCore/Source/CMakeLists.txt                 |   1 +
- FEXCore/Source/Interface/Context/Context.h    |  14 +
+ FEXCore/Source/Interface/Context/Context.h    |  16 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |  15 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
- FEXCore/Source/Interface/Core/Core.cpp        |  81 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  85 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |   2 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   | 146 ++-
  .../Interface/Core/OpcodeDispatcher.cpp       |   8 +-
@@ -26,13 +26,13 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../LinuxSyscalls/SignalDelegator.cpp         |  10 +
  .../LinuxSyscalls/Syscalls/Memory.cpp         |   9 +
  .../LinuxSyscalls/Syscalls/Thread.cpp         |   8 +
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 149 +++-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 163 +++-
  .../LinuxSyscalls/TSOAccess.cpp               | 422 +++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 838 ++++++++++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 105 +++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 879 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 111 +++
  .../LinuxSyscalls/ThreadManager.cpp           |  14 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
- 28 files changed, 2262 insertions(+), 29 deletions(-)
+ 28 files changed, 2329 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -52,31 +52,33 @@ index 61385d2..f07180d 100644
    Interface/IR/Passes/x87StackOptimizationPass.cpp
    Utils/LongJump.cpp
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 9b91055..cd82b50 100644
+index 9b91055..dc85492 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
-@@ -243,6 +243,15 @@ public:
+@@ -243,6 +243,16 @@ public:
  
    void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) override;
  
-+  void AddTSOEscalation(uint64_t Start, uint64_t End) override;
++  bool AddTSOEscalation(uint64_t Start, uint64_t End) override;
 +  bool GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t* Start, uint64_t* End) override;
 +  bool TSOTrapBlockBoundaries(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) override;
 +  uint64_t TSOTrapRIP(uint64_t HostPC) override;
 +  // Under CodeInvalidationMutex (shared while compiling)
 +  bool IsTSOEscalated(uint64_t RIP) const {
++    std::shared_lock lk(TSOEscalatedMutex);
 +    return TSOEscalated.Query(RIP).Enclosed;
 +  }
 +
    void MarkMonoDetected() override {
      MonoDetected = true;
    }
-@@ -510,6 +519,11 @@ private:
+@@ -510,6 +520,12 @@ private:
      void* Data;
    };
    fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
 +  // tso-arm: guest instructions translated ordered (all others plain) when views are on; under CodeInvalidationMutex
 +  IntervalList<uint64_t> TSOEscalated;
++  mutable std::shared_mutex TSOEscalatedMutex; // own lock: escalations are recorded without invalidating code
 +  // tso-arm: trapped instruction starts of left-behind blocks, host PC -> guest RIP
 +  std::mutex TSOTrapMutex;
 +  fextl::unordered_map<uint64_t, uint64_t> TSOTrapRIPs;
@@ -145,7 +147,7 @@ index 02d22e1..a65d037 100644
  constexpr auto VTMP1 = ARMEmitter::VReg::v0;
  constexpr auto VTMP2 = ARMEmitter::VReg::v1;
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index 1946dc9..4ab7a29 100644
+index 1946dc9..b9d1b0e 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -37,6 +37,7 @@ $end_info$
@@ -180,7 +182,7 @@ index 1946dc9..4ab7a29 100644
 +          // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
 +          // thread writes; the page protections make that sound
 +          if (FEXCore::TSOViews::Enabled() && Config.Is64BitMode && !FEXCore::TSOViews::Stage1()) {
-+            ForceTSO = TSOEscalated.Query(InstAddress).Enclosed ? IR::ForceTSOMode::ForceEnabled : IR::ForceTSOMode::ForceDisabled;
++            ForceTSO = IsTSOEscalated(InstAddress) ? IR::ForceTSOMode::ForceEnabled : IR::ForceTSOMode::ForceDisabled;
 +          }
  
            Thread->OpDispatcher->SetForceTSO(ForceTSO);
@@ -203,13 +205,17 @@ index 1946dc9..4ab7a29 100644
    auto CodePtr = CompiledCode.EntryPoints[GuestRIP];
    if (CodePtr == nullptr) {
      return 0;
-@@ -1153,6 +1175,63 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
+@@ -1153,6 +1175,67 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
    ForceTSOInstructions.merge(std::move(Instructions));
  }
  
-+void ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
-+  LogMan::Throw::AFmt(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
++bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
++  std::unique_lock lk(TSOEscalatedMutex);
++  if (TSOEscalated.Contains({Start, End})) {
++    return false;
++  }
 +  TSOEscalated.Insert({Start, End});
++  return true;
 +}
 +
 +bool ContextImpl::GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t* Start, uint64_t* End) {
@@ -1086,7 +1092,7 @@ index 0f0a9c8..bcfc8af 100644
        }
  
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index 8aa448e..af838da 100644
+index 8aa448e..ddec229 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
 @@ -192,6 +192,27 @@ public:
@@ -1095,9 +1101,9 @@ index 8aa448e..af838da 100644
  
 +  /**
 +   * @brief tso-arm: guest code in [Start, End) touched memory another thread writes; translate it ordered from now on.
-+   * CodeInvalidationMutex must be unique_locked; the caller invalidates that code.
++   * Code translated before stays until the caller invalidates it. Returns false if the range was escalated already.
 +   */
-+  FEX_DEFAULT_VISIBILITY virtual void AddTSOEscalation(uint64_t Start, uint64_t End) = 0;
++  FEX_DEFAULT_VISIBILITY virtual bool AddTSOEscalation(uint64_t Start, uint64_t End) = 0;
 +  /**
 +   * @brief tso-arm: guest code range [Start, End) of the block this thread runs, if HostPC lies in it.
 +   */
@@ -1336,7 +1342,7 @@ index 4ea460a..76c7e6b 100644
      syscall(SYSCALL_DEF(exit_group), status);
      // This will never be reached
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 94bdd37..dfb4398 100644
+index 94bdd37..3f7c2fa 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -12,6 +12,7 @@ $end_info$
@@ -1390,7 +1396,7 @@ index 94bdd37..dfb4398 100644
  // Handles segfaults from:
  // - call-ret shadow stack overflow
  // - guest-side self-modifying code (SMC)
-@@ -57,6 +87,92 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -57,6 +87,106 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      return true;
    }
  
@@ -1435,25 +1441,39 @@ index 94bdd37..dfb4398 100644
 +                (unsigned long)HostPC, (unsigned long)FaultAddress, TSOSlotOf(Thread), (unsigned long)BS, (unsigned long)BE,
 +                (unsigned long)Thread->CurrentFrame->State.InlineJITBlockHeader);
 +      }
-+      // By default the whole block is translated ordered (one recompilation instead of one per instruction that
-+      // meets shared memory); TSO_VIEWS_ESC=rip escalates the single instruction.
-+      static const bool PerInstruction = getenv("TSO_VIEWS_ESC") && !strcmp(getenv("TSO_VIEWS_ESC"), "rip");
++      // The single instruction is escalated; TSO_VIEWS_ESC=block escalates the whole block it runs in (fewer
++      // recompilations, more ordered code).
++      static const bool WholeBlock = getenv("TSO_VIEWS_ESC") && !strcmp(getenv("TSO_VIEWS_ESC"), "block");
 +      uint64_t EscStart = RIP, EscEnd = RIP + 1;
-+      if (!PerInstruction) {
++      if (WholeBlock) {
 +        uint64_t BlockStart, BlockEnd;
 +        if (CTX->GetCurrentBlockGuestRange(Thread, HostPC, &BlockStart, &BlockEnd) && BlockStart <= RIP && RIP < BlockEnd) {
 +          EscStart = BlockStart;
 +          EscEnd = BlockEnd;
 +        }
 +      }
-+      _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart,
-+                                                   [CTX, EscStart, EscEnd](uint64_t, uint64_t) { CTX->AddTSOEscalation(EscStart, EscEnd); });
++      // The first fault only records the escalation; the old translation goes on (its plain accesses to shared
++      // pages keep faulting and are completed here, so it stays correct). When an instruction that is escalated
++      // already faults again, the code it runs in is translated anew, with everything recorded until then:
++      // one recompilation for all the instructions of a block that met shared memory in one pass.
++      // TSO_VIEWS_DEFER=0 invalidates at the first fault.
++      static const bool Defer = !(getenv("TSO_VIEWS_DEFER") && getenv("TSO_VIEWS_DEFER")[0] == '0');
++      const bool New = CTX->AddTSOEscalation(EscStart, EscEnd);
++      const bool Refresh = !New || !Defer;
++      if (Refresh) {
++        _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart);
++      }
 +      const bool Emulated = TSOViewMemory::EmulateAccess(ucontext, Insn);
 +      TSOViewMemory::NoteAccess(Emulated);
 +      if (Emulated) {
-+        // The rest of this block is stale: every thread in it leaves at its next instruction start
-+        CTX->TSOTrapBlockBoundaries(Thread, HostPC);
++        if (Refresh) {
++          // The rest of this block is stale: every thread in it leaves at its next instruction start
++          CTX->TSOTrapBlockBoundaries(Thread, HostPC);
++        }
 +        return Handled();
++      }
++      if (!Refresh) {
++        _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart);
 +      }
 +      ThreadObject->SignalInfo.Delegator->SpillSRA(Thread, ucontext, Thread->CurrentFrame->InSyscallInfo & 0xFFFF);
 +      const auto& Config = ThreadObject->SignalInfo.Delegator->GetConfig();
@@ -1483,7 +1503,7 @@ index 94bdd37..dfb4398 100644
    {
      // Can't use the deferred signal lock in the SIGSEGV handler.
      auto lk = FEXCore::MaskSignalsAndLockMutex<std::shared_lock>(_SyscallHandler->VMATracking.Mutex);
-@@ -326,6 +442,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -326,6 +456,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
          return reinterpret_cast<void*>(Result);
        }
        LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
@@ -1495,7 +1515,7 @@ index 94bdd37..dfb4398 100644
      } else {
        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
        if (Result == ~0ULL) {
-@@ -366,7 +487,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -366,7 +501,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
      // To be more optimal the frontend should provide this code with a valid Thread object earlier.
      auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
  
@@ -1509,7 +1529,7 @@ index 94bdd37..dfb4398 100644
        Result = Get32BitAllocator()->Munmap(addr, length);
        if (FEX::HLE::HasSyscallError(Result)) {
          return Result;
-@@ -396,7 +522,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -396,7 +536,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -1524,7 +1544,7 @@ index 94bdd37..dfb4398 100644
        Result = reinterpret_cast<uint64_t>(::mremap(old_address, old_size, new_size, flags, new_address));
        if (Result == -1) {
          return -errno;
-@@ -473,9 +605,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+@@ -473,9 +619,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -1974,10 +1994,10 @@ index 0000000..277cd3f
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 new file mode 100644
-index 0000000..6653ea8
+index 0000000..03a0545
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -0,0 +1,838 @@
+@@ -0,0 +1,879 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -2067,16 +2087,16 @@ index 0000000..6653ea8
 +  } while (0)
 +
 +  struct Counters {
-+    uint64_t Claims, Shares, Upgrades, Lazy, Escalations, Stale, Emulated, Repeated, BoundaryExits;
++    uint64_t Claims, Shares, Upgrades, Lazy, Escalations, Stale, Emulated, Repeated, BoundaryExits, Collapsed;
 +  } Count;
 +  bool PrintStats;
 +  void DumpStats() {
 +    fprintf(stderr,
 +            "tso-arm: claims %lu, shares %lu, upgrades %lu, lazy %lu, escalations %lu, stale %lu, completed in the handler %lu, "
-+            "repeated %lu, boundary exits %lu\n",
++            "repeated %lu, boundary exits %lu, pages moved with their chunk %lu\n",
 +            (unsigned long)Count.Claims, (unsigned long)Count.Shares, (unsigned long)Count.Upgrades, (unsigned long)Count.Lazy,
 +            (unsigned long)Count.Escalations, (unsigned long)Count.Stale, (unsigned long)Count.Emulated, (unsigned long)Count.Repeated,
-+            (unsigned long)Count.BoundaryExits);
++            (unsigned long)Count.BoundaryExits, (unsigned long)Count.Collapsed);
 +    const auto& S = FEXCore::TSOViews::Spent;
 +    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)\n", (unsigned long)S.Faults,
 +            S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9);
@@ -2110,6 +2130,13 @@ index 0000000..6653ea8
 +    return false;
 +  }
 +  ROMask = static_cast<uint16_t*>(M);
++  if (!(getenv("TSO_VIEWS_CHUNK") && getenv("TSO_VIEWS_CHUNK")[0] == '0')) {
++    auto C = ::mmap(nullptr, Window >> ChunkShift, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
++    if (C == MAP_FAILED) {
++      return false;
++    }
++    ChunkShares = static_cast<uint8_t*>(C);
++  }
 +
 +  // A slot needs both its views; the host's own mappings take some of the address space
 +  int Usable = 0;
@@ -2701,6 +2728,24 @@ index 0000000..6653ea8
 +// ---------------------------------------------------------------------------------------------------------------
 +// Faults
 +
++void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
++  const uint64_t First = Chunk << (ChunkShift - PageShift);
++  const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
++  uint64_t Moved = 0;
++  for (uint64_t P = First; P < Last; ++P) {
++    if (Owner[P] == From) {
++      Owner[P] = To;
++      ROMask[P] = ToMask;
++      ++Moved;
++    }
++  }
++  // Every view at once, the other threads' new rights included: they would fault for each page otherwise
++  Apply(First << PageShift, Last << PageShift);
++  ChunkShares[Chunk] = 0;
++  Count.Collapsed += Moved;
++  ++Stats.Transitions;
++}
++
 +TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
 +  static const bool Log = Knob("TSO_VIEWS_LOG");
 +  auto NotOurs = [&](const char* Why) {
@@ -2803,6 +2848,22 @@ index 0000000..6653ea8
 +            (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
 +            Result == Fault::Escalate ? "escalate" : "retry");
 +  }
++
++  // Buffers that move between threads move page by page, one fault each. After a few private pages of one chunk
++  // were shared, the owner's remaining pages of the chunk follow at once (taking a page from its owner early is
++  // always allowed; it only costs ordering on that page).
++  // The same holds for shared read-only pages that become read-write.
++  if ((IsOwnerSlot(St) || St == SharedRO) && Owner[Page] != St && ChunkShares) {
++    const uint64_t Chunk = G >> ChunkShift;
++    if (++ChunkShares[Chunk] >= CollapseAfter) {
++      CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
++      if (Result == Fault::Escalate) {
++        ++Count.Escalations;
++      }
++      return Result;
++    }
++  }
++
 +  if (Owner[Page] == St && ROMask[Page] == Mask) {
 +    // No state change (stale protection, or a race with another thread's transition): set this view right
 +    ++Count.Stale;
@@ -2818,10 +2879,10 @@ index 0000000..6653ea8
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 new file mode 100644
-index 0000000..5628edb
+index 0000000..bfa3f69
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,111 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: guest memory as shared memory, mapped again in an ordered view and in one plain view per thread, with a
 +// page protocol that leaves accesses to memory only one thread uses unordered.
@@ -2920,7 +2981,13 @@ index 0000000..5628edb
 +  bool SlotUsed[FEXCore::TSOViews::Slots] {};
 +  bool SlotUsable[FEXCore::TSOViews::Slots] {};
 +  bool AnyAttached {};
++  // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
++  void CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask);
++  static constexpr uint64_t ChunkShift = 21; // 2 MB
++  static constexpr uint8_t CollapseAfter = 4; // private pages shared in a chunk before the rest follows
++
 +  uint8_t* Owner {};    // page states, one byte per guest page
++  uint8_t* ChunkShares {}; // per chunk: private pages shared since the last collapse (nullptr: no chunks)
 +  uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page
 +  struct {
 +    uint64_t Transitions {};

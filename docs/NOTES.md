@@ -393,3 +393,49 @@ So the protocol is correct and slower than full TSO. Where the time goes:
 Next: an ordered view per thread instead of the owner check (its own private pages and the shared ones accessible;
 two views per thread fit 15 threads into 39 bits), escalation per block instead of per instruction, transitions
 of whole chunks at a time, and the fallback to full TSO.
+
+## 11. Efficiency against native Arm, and what moved it (2026-11-17)
+
+Reference from here on: the same programs built natively for AArch64 from the same sources and options
+(`bench/build_native.sh`), efficiency = native time / time (`bench/efficiency.sh`, table in the README).
+FEX without any ordering reaches 83 % (geometric mean of pigz, xz, zstd), FEX with full TSO 66 %. So whatever
+the ordering costs, the rest of the translation already leaves 17 %; the protocol can at best close the gap
+between 66 % and 83 %.
+
+| Step | pigz | xz | zstd | mean |
+|---|---|---|---|---|
+| owner check, escalation per instruction (section 10) | 26 % | 51 % | 38 % | 37 % |
+| ordered view per thread instead of the owner check, escalation per block | 53 % | 59 % | 42 % | 51 % |
+| escalation per instruction, recorded first, recompiled on the second fault | 67 % | 63 % | 41 % | (one round) |
+| chunks: a few shared pages of a 2 MB chunk take the owner's other pages along | 68 % | 65 % | 41 % | 57 % |
+
+What each step fixed:
+
+- **Ordered view per thread** (plain view base | 2^38): a thread's own private pages and the shared ones are
+  accessible in it, other threads' private pages are not. Ordered accesses cost `add` + `orr` instead of the
+  seven-instruction owner check with a table load. The owner check also had a real defect: the rewriting pass
+  shared one check per base register across offsets, and `[rdi + 0x60]` could lie on the next page, so the access
+  went through the wrong view, faulted, and the block was recompiled, in a loop (memcpy in pigz: 5,424 faults
+  for the same three instructions). Rights are taken away at once in every view; rights a transition gives to
+  other threads are given by their own first fault.
+- **Block escalation** made pigz worse: whole functions went ordered, user time above full TSO. Escalation per
+  instruction is the default again (`TSO_VIEWS_ESC=block` for the other).
+- **Recorded first, recompiled later**: the first fault of an instruction only records it and completes the access
+  in the handler; the old translation goes on (its plain accesses to shared pages keep faulting, so it stays
+  correct). The second fault of a recorded instruction recompiles the code once, with everything recorded since.
+  pigz: fault handling 0.55 s -> 0.20 s, compilation 0.63 s -> 0.28 s (processor time of all threads).
+- **Chunks**: zstd's buffers move between threads page by page. After four pages of a 2 MB chunk changed state,
+  the owner's other pages in it follow in one step. zstd faults 44,600 -> 23,000, but its time stays: it now
+  spends 0.6 s handling faults and 0.9 s compiling (4,800 escalations), against 0.15 s that full TSO costs it.
+- A boundary trap bug on the way: guest instruction offsets in FEX's IR are 32-bit, relative to the block entry,
+  and negative for a loop head before the entry; the rewriting pass read them unsigned and treated escalated
+  instructions as plain.
+
+Where the remaining time goes, for the next steps:
+
+1. The views cost 7 to 9 % of processor time even with nothing ordered (address arithmetic). For xz that is most of
+   the gap: protocol 5.56 s user time, stage 1 without ordering 5.40 s, TSO off 4.95 s.
+2. zstd needs the fallback of section 8: past a budget of faults and recompilations, the whole process goes to
+   full ordering (every page shared read-write, every instruction ordered).
+3. Each recompilation costs 200 to 340 microseconds (whole multiblocks), and FEX takes its code invalidation lock
+   exclusively for it.

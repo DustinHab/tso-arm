@@ -34,8 +34,10 @@ run_config() {
     views-off) set -- TSO_VIEWS=1 TSO_VIEWS_STAGE1=1 FEX_TSOENABLED=0 $FEXV ;;
     views-full) set -- TSO_VIEWS=1 TSO_VIEWS_STAGE1=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     protocol) set -- TSO_VIEWS=1 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
-    # escalation of the single instruction instead of the whole block
-    protocol-rip) set -- TSO_VIEWS=1 TSO_VIEWS_ESC=rip TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    # escalation of the whole block instead of the single instruction
+    protocol-block) set -- TSO_VIEWS=1 TSO_VIEWS_ESC=block TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
+    # pages change state one at a time, no chunks
+    protocol-nochunk) set -- TSO_VIEWS=1 TSO_VIEWS_CHUNK=0 TSO_VIEWS_STATS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV ;;
     # cost breakdown: identity base (arithmetic, no view), and additionally no rewriting pass (shared memory only)
     views-id) set -- TSO_VIEWS=1 TSO_VIEWS_IDENTITY=1 FEX_TSOENABLED=0 $FEXV ;;
     views-id-nopass) set -- TSO_VIEWS=1 TSO_VIEWS_IDENTITY=1 TSO_VIEWS_NOPASS=1 FEX_TSOENABLED=0 $FEXV ;;

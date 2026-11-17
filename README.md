@@ -19,13 +19,15 @@ options (`bench/build_native.sh`, `bench/efficiency.sh`). The protocol is the pa
 change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-17T14:18, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-17T14:43, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.08 s, 100 % | 0.50 s, 100 % | 100 % |
-| FEX full TSO | yes | 1.64 s, 61 % | 1.56 s, 69 % | 0.74 s, 68 % | 66 % |
-| tso-arm protocol | yes | 1.88 s, 53 % | 1.83 s, 59 % | 1.19 s, 42 % | 51 % |
+| native Arm | - | 1.00 s, 100 % | 1.08 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.15 s, 87 % | 1.37 s, 79 % | 0.59 s, 83 % | 83 % |
+| FEX default | no | 1.57 s, 64 % | 1.54 s, 70 % | 0.69 s, 71 % | 68 % |
+| FEX full TSO | yes | 1.64 s, 61 % | 1.55 s, 70 % | 0.74 s, 66 % | 66 % |
+| tso-arm protocol | yes | 1.47 s, 68 % | 1.66 s, 65 % | 1.20 s, 41 % | 57 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 <!-- efficiency:end -->
@@ -45,3 +47,9 @@ Efficiency = native time / time; 100 % is native speed. Throttling flags after t
 
 Raspberry Pi 5: Cortex-A76 (4 cores, 2.4 GHz), 16 GB, Debian 13, kernel 6.18 with 4 KB pages and 39-bit virtual
 addresses. The A76 has LSE atomics and FEAT_LRCPC (`ldapr`), but not FEAT_LRCPC2 (`ldapur`), FEAT_LRCPC3 or FEAT_LSE2.
+
+## License
+
+MIT, see `LICENSE`: use, change and redistribute freely, keeping the copyright notice. The patch in `fex/patches/`
+changes [FEX](https://github.com/FEX-Emu/FEX), which is MIT-licensed as well (copyright the FEX-Emu contributors);
+the patched files keep FEX's notices.
