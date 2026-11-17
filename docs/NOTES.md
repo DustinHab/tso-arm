@@ -78,6 +78,58 @@ US 11,379,195 uses compiler metadata about volatile accesses (Prism uses it for 
 US 11,449,339 elides barriers when the communicating threads share a core; TEMPO (MICRO 2026) proposes hardware.
 None detects private memory at run time through page protection.
 
+## 3. What FEX does today (FEX be66e03, 2026-11-16)
+
+Defaults: `TSOEnabled` true, `VectorTSOEnabled` false, `MemcpySetTSOEnabled` false, `HalfBarrierTSOEnabled` true.
+In addition, accesses whose base or index register is `rsp` are never ordered (`IsNonTSOReg`). So by default FEX
+orders scalar accesses not based on `rsp`, and nothing else. This is a heuristic: it is not TSO.
+
+It is less unsound than it looks. Leaving data accesses plain is harmless as long as the accesses that synchronise
+are ordered: an `stlr` flag store orders all earlier plain stores before it, an `ldapr` flag load all later plain
+loads after it. FEX's default breaks when the synchronising access itself is one of the unordered kinds: a flag in
+the writer's stack frame written through `rsp`, a flag or lock word written by a vector store, a `rep stos` that
+writes the flag. `litmus/mp.c` gets variants for exactly these next.
+
+FEX already has the per-instruction override needed for experiments: `ForceTSO` (used for Windows volatile
+metadata) can force an instruction ordered or plain.
+
+## 4. Litmus tests on the A76 (`litmus/mp.c`, 2 million iterations, threads on cores 2 and 3)
+
+Message passing with the data written by `mov`, `movdqu`, `rep stosq`, or `mov` through `rsp`; load buffering; store
+buffering. Natively on x86 (WSL): no forbidden outcome, store buffering seen in 8.5 % of iterations.
+
+| FEX setting | mp | vec | rep | stack | lb | sb (allowed) |
+|---|---|---|---|---|---|---|
+| default | 0 | 0 | 0 | 0 | 0 | 1436 |
+| TSO off | 0 | 0 | 0 | **21304** | 0 | 11 |
+| full (vector + memcpy) | 0 | 0 | 0 | 0 | 0 | 1195 |
+
+With TSO off the stack variant fails 21304 times: the A76 does reorder. The other message-passing variants did not
+fail even with TSO off, so this harness is not yet sensitive enough to show load-load reordering in general; the
+reader should pull the data line into its cache before waiting for the flag. Box64 refuses static binaries
+("not an executable file"); it needs dynamic test binaries.
+
+## 5. How much could stay plain (`study/pagestate.c`, DynamoRIO 11.91, x86-64 in WSL)
+
+The client replays the page-state protocol of section 2 on every access, per x86 instruction (if one operand of an
+instruction needs ordering, the whole instruction is ordered, as a translator decides it). Workloads are static
+non-PIE builds from official sources (`study/build_static.sh`), so the same file runs here and under FEX.
+
+Share of accesses that stay plain under the mechanism ("sticky"), against FEX's default:
+
+| Workload | Threads | Stores: mechanism | Stores: FEX default | Vector stores: mechanism | Loads: mechanism | Page transitions |
+|---|---|---|---|---|---|---|
+| zstd -T4 -3, 100 MB | 7 | 85.4 % | 38.1 % | 86.2 % | 83.7 % | 47175 |
+| pigz -p 4, 100 MB | 6 | 99.95 % | 10.9 % | 93.4 % | 99.4 % | 1166 |
+| xz -T4 -6, 8 MB, 2 MB blocks | 5 | 99.80 % | 58.2 % | 99.7 % | 99.9 % | 39685 |
+
+(FEX's default leaves all vector accesses plain, unsoundly; the mechanism's figures are sound.) Raw results in
+`study/results/`. The test patterns behave as constructed: private buffers and a table shared read-only stay plain
+(above 99.9 %), racy shared counters and a queue between threads are ordered (above 99.5 %).
+
+Page transitions are the cost side: each one is a fault and at least one `mprotect` in the real mechanism. zstd
+allocates and frees job buffers that wander between threads, hence 47175 transitions in a run of 0.09 s natively.
+
 Open questions before building it:
 
 1. How much of the time FEX spends on TSO is spent on stores and vector accesses to memory that stays private?

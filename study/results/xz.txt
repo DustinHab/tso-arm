@@ -1,0 +1,11 @@
+process xz   main module instructions with memory accesses: plain 7220, ordered 1481
+threads 5   page size 4096   pages: private 35444, shared read-only 2356, shared read-write 15
+transitions 39685   escalated instructions 1481   locked/xchg 14022   non-temporal 0
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load               2389972405    99.85%    99.85%    99.85%    31.98%
+vector load          20795526    99.89%    99.99%    99.99%   100.00%
+store               764448115    99.80%    99.81%    99.80%    58.23%
+vector store         11716768    99.68%    99.98%    98.69%   100.00%
+command /mnt/c/Users/dusti/tso-arm/build/x86/xz -T4 -6 --block-size=2MiB -c /root/study/data/corpus8.tar
+native 0.35 s   instrumented 32 s   exit 0

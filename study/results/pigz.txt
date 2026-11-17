@@ -1,0 +1,11 @@
+process pigz   main module instructions with memory accesses: plain 4216, ordered 1814
+threads 6   page size 4096   pages: private 312, shared read-only 369, shared read-write 79
+transitions 1166   escalated instructions 1814   locked/xchg 120226   non-temporal 0
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load               2814006385    99.38%    99.85%    99.84%     3.62%
+vector load          56363518    93.44%    99.97%    99.97%   100.00%
+store               939555912    99.95%    99.97%    99.96%    10.86%
+vector store         58157166    93.36%    99.58%    99.56%   100.00%
+command /mnt/c/Users/dusti/tso-arm/build/x86/pigz -p 4 -c /root/study/data/corpus.tar
+native 0.36 s   instrumented 36 s   exit 0

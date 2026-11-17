@@ -1,0 +1,7 @@
+threads 5   page size 4096   pages: private 29, shared read-only 7, shared read-write 137
+transitions 450   escalated instructions 497   locked/xchg 258   non-temporal 0
+class                accesses    sticky   dynamic      page
+load                  5269356     0.48%     0.49%     0.47%
+vector load               181    88.40%    88.95%    87.29%
+store                 5256764     0.25%     0.26%     0.25%
+vector store              362    91.16%    91.16%    45.86%

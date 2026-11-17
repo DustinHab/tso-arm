@@ -1,0 +1,11 @@
+process zstd   main module instructions with memory accesses: plain 6663, ordered 2856
+threads 7   page size 4096   pages: private 1468, shared read-only 3640, shared read-write 12815
+transitions 47175   escalated instructions 2858   locked/xchg 60112   non-temporal 0
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load                530096955    83.68%    90.28%    79.07%    39.59%
+vector load          13286451    65.34%    82.61%    65.61%   100.00%
+store               200743013    85.43%    90.39%    84.94%    38.06%
+vector store         10225477    86.22%    92.16%    82.83%   100.00%
+command /mnt/c/Users/dusti/tso-arm/build/x86/zstd -T4 -3 -f -q -c /root/study/data/corpus.tar
+native 0.09 s   instrumented 8 s   exit 0
