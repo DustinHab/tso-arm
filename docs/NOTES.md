@@ -439,3 +439,41 @@ Where the remaining time goes, for the next steps:
    full ordering (every page shared read-write, every instruction ordered).
 3. Each recompilation costs 200 to 340 microseconds (whole multiblocks), and FEX takes its code invalidation lock
    exclusively for it.
+
+## 12. Fallback, cheaper view addresses, profiles (2026-11-17)
+
+Efficiency (geometric mean over pigz, xz, zstd; README table): 57 % -> **61 % on a first run, 67 % with the
+profile of earlier runs**, against 66 % for FEX's full TSO. FEX's full TSO is not quite TSO either: it leaves
+accesses through RSP (and pushes, pops) unordered, treating the stack as private to its thread; the protocol orders
+them once a stack page is really shared.
+
+- **Fallback** (section 8's plan): past 5000 faults per second over a window of 1000 faults (after 300 ms), every
+  page becomes shared read-write, all translated code is dropped and translated again fully ordered, addressing
+  guest memory directly. Old translations still running keep working through the views. zstd 1.20 s -> 1.00 s.
+  An earlier fallback (50 to 150 ms) gains zstd little and makes pigz fall back by mistake (its start-up burst).
+- **Base cost of the views** (`bench/perf_views.sh`, xz cycles over FEX without ordering): shared memory 0, exact
+  instruction starts 1 to 2 %, address arithmetic 6 %. `bench/dump_block.sh` showed where in the hottest block
+  (lzma_lzma_optimum_normal, 80 % of xz's cycles): FEX turns `0x2cc(%r15,%r8,4)` into `tmp = r15 + r8 << 2` and an
+  immediate; the pass added the view to `tmp`, one more `add` per access. Now the view goes onto the base
+  register (shared within the block) and the index is added to it. Pushes and pops are accesses at an offset from
+  the stack pointer, so consecutive ones share its view. xz: +8.0 % -> +5.6 % cycles. What remains is one view
+  addition per basic block and base register (332 in that block, 118 of them for RSP).
+- **Profile**: the escalated ranges and the fallback decision are written at exit
+  (`~/.cache/tso-arm/<program>-<hash>.prof`) and loaded before the next run starts. pigz: 1,927 -> 196
+  escalations, 1.49 s -> 1.34 s; zstd starts in the fallback. Loading a profile cannot break anything: an
+  escalation too many only costs ordering, a missing one is learned again.
+
+zstd stays behind (57 % against FEX's 68 %), in the fallback and without it alike (0.83 to 0.87 s against 0.72 s):
+
+- In the fallback the stack accesses are ordered, and on the A76 `ldapr`/`stlr` take no offset, so every
+  `[rsp + x]` needs one more addition: 26 % more instructions than FEX's full TSO, 10 % with stack accesses plain
+  (`TSO_VIEWS_FALLBACK_STACK=plain`, unsound, only for measuring).
+- Without the fallback, with the profile: 141 instructions of its hottest function
+  (ZSTD_compressBlock_doubleFast, 64 % of the cycles) are escalated. They read the input buffer, which the main
+  thread fills and a worker then compresses. The buffer is reused, so its pages end up shared read-write for good,
+  although only one thread uses them at a time.
+
+Next: **migratory ownership**. A page (or a chunk) that changes hands should move to the new thread instead of
+becoming shared: the old owner loses it by `mprotect`, which also makes its stores visible, and both threads keep
+plain accesses. Only pages used by two threads at once (detected by ping-pong) become shared. That is the case of
+zstd's, pigz's and xz's buffers.

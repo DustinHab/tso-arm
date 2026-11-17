@@ -1,4 +1,4 @@
-From 3691e881a10d42ea663362ac738781c6aa1791e0 Mon Sep 17 00:00:00 2001
+From 1aaf1dbf72b847fd20fc2867339831ea29f312c7 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
@@ -12,7 +12,7 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |    2 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |  146 ++-
  .../Interface/Core/OpcodeDispatcher.cpp       |    8 +-
- .../Source/Interface/Core/OpcodeDispatcher.h  |   62 +-
+ .../Source/Interface/Core/OpcodeDispatcher.h  |   63 +-
  FEXCore/Source/Interface/IR/IR.json           |   18 +-
  FEXCore/Source/Interface/IR/PassManager.cpp   |    6 +
  FEXCore/Source/Interface/IR/Passes.h          |    4 +
@@ -20,7 +20,7 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../IR/Passes/RegisterAllocationPass.cpp      |   10 +-
  FEXCore/include/FEXCore/Core/Context.h        |   21 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    3 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |   94 ++
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  103 ++
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |    5 +
  Source/Tools/LinuxEmulation/CMakeLists.txt    |    2 +
  .../LinuxSyscalls/SignalDelegator.cpp         |   10 +
@@ -32,7 +32,7 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  145 +++
  .../LinuxSyscalls/ThreadManager.cpp           |   18 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |    5 +
- 28 files changed, 2616 insertions(+), 29 deletions(-)
+ 28 files changed, 2626 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -580,7 +580,7 @@ index 901a922..3eb2fbb 100644
      if (DstSegment) {
        Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 4477c72..401a90e 100644
+index 4477c72..360d605 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 @@ -5,6 +5,7 @@
@@ -641,17 +641,18 @@ index 4477c72..401a90e 100644
    }
  
    IR::OpSize GetGPROpSize() const {
-@@ -1601,7 +1616,8 @@ private:
+@@ -1601,7 +1616,9 @@ private:
  
    [[nodiscard]]
    static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
 -    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP;
 +    // tso-arm: with views an escalated stack access must be ordered too; unescalated ones are plain anyway
-+    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP && !FEXCore::TSOViews::Enabled();
++    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP &&
++           (!FEXCore::TSOViews::Enabled() || FEXCore::TSOViews::PlainStackInFallback());
    }
  
    AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
-@@ -2717,13 +2733,32 @@ private:
+@@ -2717,13 +2734,32 @@ private:
      return _StoreMemPairAutoTSO(RegClass::FPR, Size, A, Value1, Value2, Align);
    }
  
@@ -664,7 +665,7 @@ index 4477c72..401a90e 100644
 +  }
 +
 +  Ref Pop(IR::OpSize Size, Ref& SP_RMW) {
-+    if (FEXCore::TSOViews::Enabled()) {
++    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
 +      // the pointer moves by a new node instead of in place
 +      Ref Value = _LoadMemGPRAutoTSO(Size, StackSlot(SP_RMW, 0), Size);
 +      SP_RMW = Add(GetGPROpSize(), SP_RMW, uint64_t(IR::OpSizeToSize(Size)));
@@ -676,7 +677,7 @@ index 4477c72..401a90e 100644
    }
  
    Ref Pop(IR::OpSize Size) {
-+    if (FEXCore::TSOViews::Enabled()) {
++    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
 +      Ref OldSP = LoadGPRRegister(X86State::REG_RSP);
 +      Ref Value = _LoadMemGPRAutoTSO(Size, StackSlot(OldSP, 0), Size);
 +      StoreGPRRegister(X86State::REG_RSP, Add(GetGPROpSize(), OldSP, uint64_t(IR::OpSizeToSize(Size))));
@@ -685,13 +686,13 @@ index 4477c72..401a90e 100644
      Ref SP = _RMWHandle(LoadGPRRegister(X86State::REG_RSP));
      Ref Value = _AllocateGPR(false);
  
-@@ -2741,9 +2776,20 @@ private:
+@@ -2741,9 +2777,20 @@ private:
      return AlreadyExtended ? Value : _VMov(Size, Value);
    }
  
 +  // Stores Value below OldSP and returns the new stack pointer
 +  Ref PushTo(Ref OldSP, IR::OpSize Size, Ref Value) {
-+    if (FEXCore::TSOViews::Enabled()) {
++    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
 +      // the store comes first, so push rsp stores the old value
 +      const auto S = int64_t(IR::OpSizeToSize(Size));
 +      _StoreMemAutoTSO(RegClass::GPR, Size, StackSlot(OldSP, -S), Value, Size);
@@ -1203,10 +1204,10 @@ index 2112073..19ae82f 100644
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
 new file mode 100644
-index 0000000..b2878ff
+index 0000000..a7ac53a
 --- /dev/null
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,103 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: layout of the guest memory views used to elide TSO ordering for memory that only one thread uses.
 +//
@@ -1277,6 +1278,15 @@ index 0000000..b2878ff
 +}
 +inline bool Fallback() {
 +  return FallbackInCompile;
++}
++// TSO_VIEWS_FALLBACK_STACK=plain: in the fallback, stack accesses through RSP stay unordered as in FEX's own full
++// TSO (it treats the stack as private to its thread). Not sound; for measuring what ordering them costs.
++inline bool PlainStackInFallback() {
++  static const bool On = [] {
++    const char* E = getenv("TSO_VIEWS_FALLBACK_STACK");
++    return E && E[0] == 'p';
++  }();
++  return On && Fallback();
 +}
 +
 +// Exact instruction starts (full register write-back, carry in ABI form, no merges across instructions), needed for

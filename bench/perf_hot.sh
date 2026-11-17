@@ -17,5 +17,5 @@ protocol) vars="TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1" bi
 esac
 trap 'sh tools/freq.sh restore >/dev/null' EXIT
 sh tools/freq.sh fix 1800000 >/dev/null
-env $vars FEX_BLOCKJITNAMING=1 perf record -q -e cycles:u -o /tmp/perf-hot.data $bin $cmd >/dev/null 2>/tmp/perf-hot.err
+env $vars $PERF_ENV FEX_BLOCKJITNAMING=1 perf record -q -e cycles:u -o /tmp/perf-hot.data $bin $cmd >/dev/null 2>/tmp/perf-hot.err
 perf report -i /tmp/perf-hot.data --sort sym --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' | head -n ${TOP:-25}
