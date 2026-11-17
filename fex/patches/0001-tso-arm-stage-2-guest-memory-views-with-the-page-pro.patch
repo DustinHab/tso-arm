@@ -1,14 +1,14 @@
-From 0e1b9f8ed92813a1588d1e6f5dff478e78a850ff Mon Sep 17 00:00:00 2001
+From 6af84ae06402e57a5a9db89cba89961ac463a63d Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
 
 ---
  FEXCore/Source/CMakeLists.txt                 |   1 +
- FEXCore/Source/Interface/Context/Context.h    |  13 +
+ FEXCore/Source/Interface/Context/Context.h    |  14 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |  15 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
- FEXCore/Source/Interface/Core/Core.cpp        |  60 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  81 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |   2 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   | 163 +++-
  .../Interface/Core/OpcodeDispatcher.cpp       |   8 +-
@@ -16,23 +16,23 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  FEXCore/Source/Interface/IR/IR.json           |  18 +-
  FEXCore/Source/Interface/IR/PassManager.cpp   |   6 +
  FEXCore/Source/Interface/IR/Passes.h          |   4 +
- .../Interface/IR/Passes/GuestViewPass.cpp     | 260 ++++++
+ .../Interface/IR/Passes/GuestViewPass.cpp     | 262 ++++++
  .../IR/Passes/RegisterAllocationPass.cpp      |  10 +-
- FEXCore/include/FEXCore/Core/Context.h        |  16 +
+ FEXCore/include/FEXCore/Core/Context.h        |  21 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   3 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |  57 ++
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  73 ++
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   5 +
  Source/Tools/LinuxEmulation/CMakeLists.txt    |   2 +
  .../LinuxSyscalls/SignalDelegator.cpp         |  10 +
  .../LinuxSyscalls/Syscalls/Memory.cpp         |   9 +
  .../LinuxSyscalls/Syscalls/Thread.cpp         |   8 +
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 128 ++-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 149 +++-
  .../LinuxSyscalls/TSOAccess.cpp               | 422 ++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 790 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 793 ++++++++++++++++++
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 103 +++
  .../LinuxSyscalls/ThreadManager.cpp           |  14 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
- 28 files changed, 2162 insertions(+), 29 deletions(-)
+ 28 files changed, 2231 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -52,30 +52,31 @@ index 61385d2..f07180d 100644
    Interface/IR/Passes/x87StackOptimizationPass.cpp
    Utils/LongJump.cpp
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 9b91055..2bc5f71 100644
+index 9b91055..cd82b50 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
-@@ -243,6 +243,14 @@ public:
+@@ -243,6 +243,15 @@ public:
  
    void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) override;
  
-+  void AddTSOEscalation(uint64_t RIP) override;
++  void AddTSOEscalation(uint64_t Start, uint64_t End) override;
++  bool GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t* Start, uint64_t* End) override;
 +  bool TSOTrapBlockBoundaries(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) override;
 +  uint64_t TSOTrapRIP(uint64_t HostPC) override;
 +  // Under CodeInvalidationMutex (shared while compiling)
 +  bool IsTSOEscalated(uint64_t RIP) const {
-+    return TSOEscalated.contains(RIP);
++    return TSOEscalated.Query(RIP).Enclosed;
 +  }
 +
    void MarkMonoDetected() override {
      MonoDetected = true;
    }
-@@ -510,6 +518,11 @@ private:
+@@ -510,6 +519,11 @@ private:
      void* Data;
    };
    fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
 +  // tso-arm: guest instructions translated ordered (all others plain) when views are on; under CodeInvalidationMutex
-+  fextl::set<uint64_t> TSOEscalated;
++  IntervalList<uint64_t> TSOEscalated;
 +  // tso-arm: trapped instruction starts of left-behind blocks, host PC -> guest RIP
 +  std::mutex TSOTrapMutex;
 +  fextl::unordered_map<uint64_t, uint64_t> TSOTrapRIPs;
@@ -144,7 +145,7 @@ index 02d22e1..a65d037 100644
  constexpr auto VTMP1 = ARMEmitter::VReg::v0;
  constexpr auto VTMP2 = ARMEmitter::VReg::v1;
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index 1946dc9..0e74f49 100644
+index 1946dc9..4ab7a29 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -37,6 +37,7 @@ $end_info$
@@ -179,18 +180,47 @@ index 1946dc9..0e74f49 100644
 +          // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
 +          // thread writes; the page protections make that sound
 +          if (FEXCore::TSOViews::Enabled() && Config.Is64BitMode && !FEXCore::TSOViews::Stage1()) {
-+            ForceTSO = TSOEscalated.contains(InstAddress) ? IR::ForceTSOMode::ForceEnabled : IR::ForceTSOMode::ForceDisabled;
++            ForceTSO = TSOEscalated.Query(InstAddress).Enclosed ? IR::ForceTSOMode::ForceEnabled : IR::ForceTSOMode::ForceDisabled;
 +          }
  
            Thread->OpDispatcher->SetForceTSO(ForceTSO);
            std::invoke(Fn, Thread->OpDispatcher, DecodedInfo);
-@@ -1153,6 +1165,52 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
+@@ -925,7 +937,17 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
+   FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
+ 
++  const uint64_t CompileStart = TSOViews::Enabled() ? TSOViews::Nanos() : 0;
+   auto [CompiledCode, DebugData, StartAddr, Length, NeedsAddGuestCodeRanges] = CompileCode(Thread, GuestRIP, MaxInst);
++  if (CompileStart) {
++    TSOViews::Account(TSOViews::Spent.Compiles, TSOViews::Spent.CompileNs, CompileStart);
++    static const bool Log = TSOViews::Knob("TSO_VIEWS_LOG");
++    if (Log) {
++      fprintf(stderr, "tso-arm: compiled rip %#lx at %p (block %p, guest %#lx+%#lx) slot %d\n", (unsigned long)GuestRIP,
++              static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
++              (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
++    }
++  }
+   auto CodePtr = CompiledCode.EntryPoints[GuestRIP];
+   if (CodePtr == nullptr) {
+     return 0;
+@@ -1153,6 +1175,63 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
    ForceTSOInstructions.merge(std::move(Instructions));
  }
  
-+void ContextImpl::AddTSOEscalation(uint64_t RIP) {
++void ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
 +  LogMan::Throw::AFmt(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
-+  TSOEscalated.insert(RIP);
++  TSOEscalated.Insert({Start, End});
++}
++
++bool ContextImpl::GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t* Start, uint64_t* End) {
++  const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
++  auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
++  if (!InlineHeader || HostPC < BlockBegin || HostPC >= BlockBegin + InlineTail->Size) {
++    return false;
++  }
++  *Start = InlineTail->RIP;
++  *End = InlineTail->RIP + InlineTail->GuestSize;
++  return true;
 +}
 +
 +bool ContextImpl::TSOTrapBlockBoundaries(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) {
@@ -761,10 +791,10 @@ index 213967a..8011bcc 100644
    fextl::unique_ptr<Pass> CreateIRValidation();
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 new file mode 100644
-index 0000000..7a9c906
+index 0000000..6f6af80
 --- /dev/null
 +++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,262 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -893,7 +923,9 @@ index 0000000..7a9c906
 +        switch (IROp->Op) {
 +        case OP_GUESTOPCODE:
 +          // Marks the start of a guest instruction with side effects (every instruction that accesses memory)
-+          Escalated = Protocol && CTX->IsTSOEscalated(BlockRIP + IROp->C<IROp_GuestOpcode>()->GuestEntryOffset);
++          // The offset is relative to the block entry and negative for instructions before it (a loop head in a
++          // multiblock); it is stored in 32 bits
++          Escalated = Protocol && CTX->IsTSOEscalated(BlockRIP + int64_t(int32_t(IROp->C<IROp_GuestOpcode>()->GuestEntryOffset)));
 +          continue;
 +        case OP_STOREREGISTER: {
 +          const PhysicalRegister R(CodeNode);
@@ -1068,18 +1100,23 @@ index 0f0a9c8..bcfc8af 100644
        }
  
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index 8aa448e..bc493af 100644
+index 8aa448e..af838da 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
-@@ -192,6 +192,22 @@ public:
+@@ -192,6 +192,27 @@ public:
  
    FEX_DEFAULT_VISIBILITY virtual void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) = 0;
  
 +  /**
-+   * @brief tso-arm: the guest instruction at RIP touched memory another thread writes; translate it ordered from now on.
-+   * CodeInvalidationMutex must be unique_locked; the caller invalidates the code containing RIP.
++   * @brief tso-arm: guest code in [Start, End) touched memory another thread writes; translate it ordered from now on.
++   * CodeInvalidationMutex must be unique_locked; the caller invalidates that code.
 +   */
-+  FEX_DEFAULT_VISIBILITY virtual void AddTSOEscalation(uint64_t RIP) = 0;
++  FEX_DEFAULT_VISIBILITY virtual void AddTSOEscalation(uint64_t Start, uint64_t End) = 0;
++  /**
++   * @brief tso-arm: guest code range [Start, End) of the block this thread runs, if HostPC lies in it.
++   */
++  FEX_DEFAULT_VISIBILITY virtual bool GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC,
++                                                                uint64_t* Start, uint64_t* End) = 0;
 +  /**
 +   * @brief tso-arm: makes every thread leave the current block of this thread at its next instruction boundary.
 +   * Writes TSOViews::BoundaryTrap at the start of each guest instruction of the block that has an entry in the
@@ -1110,10 +1147,10 @@ index 2112073..19ae82f 100644
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
 new file mode 100644
-index 0000000..623e484
+index 0000000..3f15a3d
 --- /dev/null
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,73 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: layout of the guest memory views used to elide TSO ordering for memory that only one thread uses.
 +//
@@ -1125,6 +1162,7 @@ index 0000000..623e484
 +#pragma once
 +#include <cstdint>
 +#include <cstdlib>
++#include <ctime>
 +
 +namespace FEXCore::TSOViews {
 +constexpr uint64_t WindowBits = 34;
@@ -1169,6 +1207,21 @@ index 0000000..623e484
 +inline bool Stage1() {
 +  static const bool On = Knob("TSO_VIEWS_STAGE1");
 +  return On;
++}
++
++// Time spent on the protocol, for TSO_VIEWS_STATS (nanoseconds, all threads together)
++struct TimeSpent {
++  uint64_t Compiles, CompileNs, Faults, FaultNs;
++};
++inline TimeSpent Spent;
++inline uint64_t Nanos() {
++  timespec T;
++  clock_gettime(CLOCK_MONOTONIC, &T);
++  return uint64_t(T.tv_sec) * 1'000'000'000ULL + uint64_t(T.tv_nsec);
++}
++inline void Account(uint64_t& Count, uint64_t& Ns, uint64_t Start) {
++  __atomic_fetch_add(&Count, 1, __ATOMIC_RELAXED);
++  __atomic_fetch_add(&Ns, Nanos() - Start, __ATOMIC_RELAXED);
 +}
 +} // namespace FEXCore::TSOViews
 diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
@@ -1299,7 +1352,7 @@ index 4ea460a..76c7e6b 100644
      syscall(SYSCALL_DEF(exit_group), status);
      // This will never be reached
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 94bdd37..c7c9b3b 100644
+index 94bdd37..dfb4398 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -12,6 +12,7 @@ $end_info$
@@ -1318,7 +1371,7 @@ index 94bdd37..c7c9b3b 100644
  
  #include <FEXCore/Debug/InternalThreadState.h>
  #include <FEXCore/Utils/LogManager.h>
-@@ -42,6 +44,33 @@ static void HandleSegfaultForCodeCacheFinalization(FEXCore::Core::InternalThread
+@@ -42,6 +44,34 @@ static void HandleSegfaultForCodeCacheFinalization(FEXCore::Core::InternalThread
    }
  }
  
@@ -1337,7 +1390,8 @@ index 94bdd37..c7c9b3b 100644
 +    return false;
 +  }
 +  if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
-+    fprintf(stderr, "tso-arm: boundary exit at rip %#lx (host pc %#lx)\n", (unsigned long)RIP, (unsigned long)PC);
++    fprintf(stderr, "tso-arm: boundary exit at rip %#lx (host pc %#lx) slot %d\n", (unsigned long)RIP, (unsigned long)PC,
++            TSOSlotOf(Thread));
 +  }
 +  auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
 +  ThreadObject->SignalInfo.Delegator->SpillSRA(Thread, ucontext, Thread->CurrentFrame->InSyscallInfo & 0xFFFF);
@@ -1352,12 +1406,17 @@ index 94bdd37..c7c9b3b 100644
  // Handles segfaults from:
  // - call-ret shadow stack overflow
  // - guest-side self-modifying code (SMC)
-@@ -57,6 +86,72 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -57,6 +87,92 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      return true;
    }
  
 +  // tso-arm: page protocol faults on the views of guest memory
 +  if (auto* Views = TSOViewMemory::Get()) {
++    const uint64_t Start = FEXCore::TSOViews::Nanos();
++    const auto Handled = [Start] {
++      FEXCore::TSOViews::Account(FEXCore::TSOViews::Spent.Faults, FEXCore::TSOViews::Spent.FaultNs, Start);
++      return true;
++    };
 +    // The faulting instruction, read once: another thread may write a boundary trap over it at any time
 +    const uint64_t PC = ArchHelpers::Context::GetPc(ucontext);
 +    const bool InCode = Thread->CTX->IsAddressInCodeBuffer(Thread, PC);
@@ -1367,12 +1426,12 @@ index 94bdd37..c7c9b3b 100644
 +    // the code again (with the escalated instructions ordered). The trap may also have replaced an instruction
 +    // that faulted just before; that one has not done anything yet, so leaving here is exact as well.
 +    if (InCode && TSOTryBoundaryExit(Thread, ucontext, Insn)) {
-+      return true;
++      return Handled();
 +    }
 +
 +    const bool Write = ArchHelpers::Context::GetArmESR(ucontext) & ArchHelpers::Context::ESR1_WNR;
 +    switch (Views->HandleFault(FaultAddress, Write, TSOSlotOf(Thread))) {
-+    case TSOViewMemory::Fault::Retry: return true;
++    case TSOViewMemory::Fault::Retry: return Handled();
 +    case TSOViewMemory::Fault::Escalate: {
 +      auto CTX = Thread->CTX;
 +      const uint64_t HostPC = ArchHelpers::Context::GetPc(ucontext);
@@ -1386,22 +1445,37 @@ index 94bdd37..c7c9b3b 100644
 +      const uint64_t RIP = CTX->RestoreRIPFromHostPC(Thread, HostPC);
 +      static const bool Log = FEXCore::TSOViews::Knob("TSO_VIEWS_LOG");
 +      if (Log) {
-+        fprintf(stderr, "tso-arm: escalate rip %#lx (host pc %#lx, address %#lx)\n", (unsigned long)RIP, (unsigned long)HostPC,
-+                (unsigned long)FaultAddress);
++        uint64_t BS = 0, BE = 0;
++        CTX->GetCurrentBlockGuestRange(Thread, HostPC, &BS, &BE);
++        fprintf(stderr, "tso-arm: escalate rip %#lx (host pc %#lx, address %#lx) slot %d block %#lx-%#lx header %#lx\n", (unsigned long)RIP,
++                (unsigned long)HostPC, (unsigned long)FaultAddress, TSOSlotOf(Thread), (unsigned long)BS, (unsigned long)BE,
++                (unsigned long)Thread->CurrentFrame->State.InlineJITBlockHeader);
 +      }
-+      _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, RIP, 1, [CTX, RIP](uint64_t, uint64_t) { CTX->AddTSOEscalation(RIP); });
++      // By default the whole block is translated ordered (one recompilation instead of one per instruction that
++      // meets shared memory); TSO_VIEWS_ESC=rip escalates the single instruction.
++      static const bool PerInstruction = getenv("TSO_VIEWS_ESC") && !strcmp(getenv("TSO_VIEWS_ESC"), "rip");
++      uint64_t EscStart = RIP, EscEnd = RIP + 1;
++      if (!PerInstruction) {
++        uint64_t BlockStart, BlockEnd;
++        if (CTX->GetCurrentBlockGuestRange(Thread, HostPC, &BlockStart, &BlockEnd) && BlockStart <= RIP && RIP < BlockEnd) {
++          EscStart = BlockStart;
++          EscEnd = BlockEnd;
++        }
++      }
++      _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart,
++                                                   [CTX, EscStart, EscEnd](uint64_t, uint64_t) { CTX->AddTSOEscalation(EscStart, EscEnd); });
 +      const bool Emulated = TSOViewMemory::EmulateAccess(ucontext, Insn);
 +      TSOViewMemory::NoteAccess(Emulated);
 +      if (Emulated) {
 +        // The rest of this block is stale: every thread in it leaves at its next instruction start
 +        CTX->TSOTrapBlockBoundaries(Thread, HostPC);
-+        return true;
++        return Handled();
 +      }
 +      ThreadObject->SignalInfo.Delegator->SpillSRA(Thread, ucontext, Thread->CurrentFrame->InSyscallInfo & 0xFFFF);
 +      const auto& Config = ThreadObject->SignalInfo.Delegator->GetConfig();
 +      ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
 +      ArchHelpers::Context::SetArmReg(ucontext, 1, 1); // ENTRY_FILL_SRA_SINGLE_INST_REG: compile a single instruction
-+      return true;
++      return Handled();
 +    }
 +    case TSOViewMemory::Fault::NotOurs:
 +      if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
@@ -1425,7 +1499,7 @@ index 94bdd37..c7c9b3b 100644
    {
      // Can't use the deferred signal lock in the SIGSEGV handler.
      auto lk = FEXCore::MaskSignalsAndLockMutex<std::shared_lock>(_SyscallHandler->VMATracking.Mutex);
-@@ -326,6 +421,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -326,6 +442,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
          return reinterpret_cast<void*>(Result);
        }
        LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
@@ -1437,7 +1511,7 @@ index 94bdd37..c7c9b3b 100644
      } else {
        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
        if (Result == ~0ULL) {
-@@ -366,7 +466,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -366,7 +487,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
      // To be more optimal the frontend should provide this code with a valid Thread object earlier.
      auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
  
@@ -1451,7 +1525,7 @@ index 94bdd37..c7c9b3b 100644
        Result = Get32BitAllocator()->Munmap(addr, length);
        if (FEX::HLE::HasSyscallError(Result)) {
          return Result;
-@@ -396,7 +501,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -396,7 +522,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -1466,7 +1540,7 @@ index 94bdd37..c7c9b3b 100644
        Result = reinterpret_cast<uint64_t>(::mremap(old_address, old_size, new_size, flags, new_address));
        if (Result == -1) {
          return -errno;
-@@ -473,9 +584,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+@@ -473,9 +605,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -1916,10 +1990,10 @@ index 0000000..277cd3f
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 new file mode 100644
-index 0000000..a5b778f
+index 0000000..dda8202
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -0,0 +1,790 @@
+@@ -0,0 +1,793 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -1996,6 +2070,9 @@ index 0000000..a5b778f
 +            (unsigned long)Count.Claims, (unsigned long)Count.Shares, (unsigned long)Count.Upgrades, (unsigned long)Count.Lazy,
 +            (unsigned long)Count.Escalations, (unsigned long)Count.Stale, (unsigned long)Count.Emulated, (unsigned long)Count.Repeated,
 +            (unsigned long)Count.BoundaryExits);
++    const auto& S = FEXCore::TSOViews::Spent;
++    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)\n", (unsigned long)S.Faults,
++            S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9);
 +  }
 +} // namespace
 +

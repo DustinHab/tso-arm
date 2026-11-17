@@ -48,7 +48,7 @@ run_config() {
     [ $w = 7zz ] && sum=-
     echo "$w $cfg $r $(tail -n 1 /dev/shm/tso-time) $sum $ok" | tee -a $raw
     [ "$ok" != ok ] && tail -n 5 /dev/shm/tso-err
-    grep '^tso-arm: claims' /dev/shm/tso-err | sed "s/^tso-arm:/$w $cfg $r:/" | tee -a out/views_stats.txt
+    grep -E '^tso-arm: (claims|handled)' /dev/shm/tso-err | sed "s/^tso-arm:/$w $cfg $r:/" | tee -a out/views_stats.txt
 }
 
 trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/tso-out /dev/shm/tso-time /dev/shm/tso-err' EXIT
