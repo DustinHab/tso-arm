@@ -8,7 +8,7 @@
 // Part 1 runs on 8 cache lines in L1 and reports processor cycles per access (PMU, user mode).
 // Part 2 walks buffers of increasing size, sequentially and at random, and reports cycles per element.
 //
-// Build: gcc -O2 -o order_cost order_cost.c      Run: ./order_cost [cpu]
+// Build: gcc -O2 -mcpu=cortex-a76 -o order_cost order_cost.c      Run: ./order_cost [cpu]
 
 #define _GNU_SOURCE
 #include <linux/perf_event.h>
