@@ -44,20 +44,24 @@ run_config() {
     protocol-cold) set -- env TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
     # the hot functions translated ahead of time (aot/), the rest by FEX: without ordering, and with the page
     # protocol and a profile of its own
+    # FEX compiles the rest block by block (FEX_MULTIBLOCK=0): with the hot code translated ahead of time, compiling
+    # whole functions costs more at start-up than it gains (notes section 18)
     aot-off | aot-full | aot)
         lib=$PWD/out/aot/$w.so
         [ -f $lib ] || return
         if [ $cfg = aot-off ]; then
-            set -- env FEX_TSOENABLED=0 TSO_AOT=$lib $FEXV $X/$w
+            set -- env FEX_TSOENABLED=0 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         elif [ $cfg = aot-full ]; then
             # no page protocol: FEX full TSO, the translated functions ordered throughout
-            set -- env FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 TSO_AOT_ORDERED=1 TSO_AOT=$lib $FEXV $X/$w
+            set -- env FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         else
             set -- env TSO_VIEWS=1 TSO_VIEWS_PROFILE=$HOME/.cache/tso-arm/$w-aot.prof FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 \
-                TSO_AOT=$lib $FEXV $X/$w
+                FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         fi
         ;;
     esac
+    # FEXENV: settings for every FEX configuration (FEX reads its options from the environment)
+    [ $cfg != native ] && [ -n "$FEXENV" ] && set -- env $FEXENV "$@"
     timeout 600 /usr/bin/time -f '%e %U %S' -o /dev/shm/eff-time "$@" $(args_of $w) >/dev/shm/eff-out 2>/dev/shm/eff-err
     rc=$?
     sum=$(md5sum </dev/shm/eff-out | cut -c1-8)

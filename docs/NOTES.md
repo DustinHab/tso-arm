@@ -706,3 +706,40 @@ Efficiency (`bench/efficiency.sh`, best of three, README table):
 **FEX's fixed cost** is the larger lever left for short runs: zstd on an empty input compiles 406 blocks, 45 ms of
 CPU time; against zstd's 0.49 s natively that alone is about ten points. FEX's own code cache
 (`FEX_ENABLECODECACHINGWIP=1`) crashes on the third run (SIGILL) and is no way out as it stands.
+
+## 18. Start-up, the PLT, and a fallback without views (2026-11-17)
+
+**Start-up** (`bench/startup.sh`, a program on an empty input, median of 9): xz 67 ms under FEX with views, 37 ms
+with `FEX_MULTIBLOCK=0`; zstd 93 -> 59 ms. Multiblock compiles whole guest functions at once, cold paths included;
+with the hot functions translated ahead of time, FEX only translates the rest, and block by block is cheaper.
+For FEX's own translation of the hot code multiblock is worth it (all three programs lose without it: FEX without
+ordering 82 -> 76 %), so only the ahead-of-time configurations switch it off. FEX also writes a telemetry file at
+every exit with an `fsync` (10 ms on the Pi's SD card in `bench/startup_trace.sh`; in the medians within the noise),
+left as it is.
+
+**PLT**: translated code calls glibc's string functions through the PLT, which jumps through a GOT slot written at
+start-up by an IRELATIVE relocation (the AVX variants under FEX's CPUID). Such a call now reads the slot and calls a
+translated target directly; glibc's `__memmove_avx_unaligned_erms` and `__memset_avx2_unaligned_erms` are translated
+(256-bit moves as two 128-bit halves, `vpbroadcastb`, `vzeroupper`, `rep movsb`) but not routed for FEX's own calls
+(`--internal`): routing them as well changed nothing for pigz (82 against 81 %). pigz also gained
+`deflateSetDictionary` and `deflateStateCheck`: no calls back into the guest are left in its hot path.
+
+**Fallback without views**: a program whose profile says it fell back to full ordering (zstd in every run) now runs
+without views from the start (FEXInterpreter reads the profile before the context exists): FEX's full TSO and the
+ordered variants of the translated functions, without the views' set-up and address arithmetic. Translated code
+without views and with FEX's TSO on always runs its ordered variants (before, only `TSO_AOT_ORDERED=1` did that).
+zstd with its functions translated ahead of time: 0.87 s on the first run (it falls back and says so in the
+profile), 0.70 s after (57 % -> 70 %).
+
+Efficiency (`bench/efficiency.sh`, best of three, README table):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 61 % | 70 % | 67 % | 66 % |
+| tso-arm, with profile | yes | 74 % | 71 % | 66 % | 70 % |
+| ahead of time, TSO off | no | 93 % | 93 % | 89 % | 92 % |
+| ahead of time, all ordered | yes, except RSP | 56 % | 65 % | 64 % | 62 % |
+| ahead of time + tso-arm, with profile | yes | 83 % | 87 % | 66 % | 78 % |
+
+Without ordering the translation is past 90 %. With x86 order kept the page protocol leaves 6 to 10 points for pigz
+and xz; zstd hands its data between threads and pays for full ordering (66 %, as FEX's full TSO).

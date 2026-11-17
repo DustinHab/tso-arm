@@ -111,6 +111,7 @@ for i in range(8, 16):
     REGS[f"r{i}b"] = (f"r{i}", 8, False)
 for i in range(16):
     REGS[f"xmm{i}"] = (f"x{i}", 128, False)
+    REGS[f"ymm{i}"] = (f"x{i}", 256, False)  # low half in xN, high half in yN
 GPRS = ["rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8, 16)]
 ARGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
 
@@ -523,6 +524,7 @@ class Lifter:
         locs = [r for r in GPRS if r not in ARGS]
         decl.append("    uint64_t " + ", ".join(f"{r} = 0" for r in locs) + ";")
         decl.append("    u128 " + ", ".join(f"x{i} = {{0, 0}}" for i in range(16)) + ";")
+        decl.append("    u128 " + ", ".join(f"y{i} = {{0, 0}}" for i in range(16)) + "; // upper halves of ymm")
         decl.append("    bool cf = 0, zf = 0, sf = 0, of = 0;")
         if f.frame_size:
             decl.append(f"    uint8_t F[{f.frame_size}] __attribute__((aligned(16)));")
@@ -798,11 +800,30 @@ class Lifter:
             self.guest_stack_args[target] = n
         return self.guest_stack_args[target]
 
+    def plt_got(self, target):
+        # A PLT entry ([endbr64;] [bnd] jmp *GOT(%rip)): the GOT slot it jumps through, or None
+        try:
+            b = self.elf.read(target, 11)
+        except LiftError:
+            return None
+        at = 4 if b[:4] == b"\xf3\x0f\x1e\xfa" else 0
+        if b[at] == 0xF2:
+            at += 1
+        if b[at:at + 2] != b"\xff\x25":
+            return None
+        disp = struct.unpack_from("<i", b, at + 2)[0]
+        return target + at + 6 + disp
+
     def direct_call(self, target, gsp_expr, argp_off, tail):
         callee = self.by_start.get(target)
         if callee:
             argp = "A" if tail else self.callee_argp(callee, argp_off)
             return f"{self.pre}{callee.name}(c, V, {gsp_expr}, {argp}, {self.call_args()})"
+        got = self.plt_got(target)
+        if got is not None:
+            # through the PLT (glibc's string functions, chosen at start-up by IRELATIVE relocations): the GOT slot,
+            # written before any translated code runs, names the target; a translated one is called directly
+            return f"aot_dispatch_{self.pre[0]}(c, V, rld64(V, {got:#x}ULL), {gsp_expr}, {self.call_args()})"
         n = self.guest_nstack(target)
         if n:
             if tail:
@@ -833,6 +854,8 @@ class Lifter:
             return self.locked(insn, ops, mn[5:])
         if mn.startswith("rep stos"):
             return self.rep_stos(insn, ops)
+        if mn == "rep movsb":
+            return self.i_rep_movsb(insn, ops)
         h = getattr(self, "i_" + mn, None)
         if h:
             return h(insn, ops)
@@ -1304,6 +1327,84 @@ class Lifter:
         else:
             self.store(d, self.reg(s)[0], 128)
 
+    # AVX moves: a 256-bit register is xN (low) and yN (high); a VEX-encoded 128-bit write clears the high half
+    def ymm(self, op):
+        return self.reg(op)[0], "y" + self.reg(op)[0][1:]
+
+    def mem_plus(self, op, k):
+        # the same memory operand k bytes further
+        a = self.address(op)
+        expr, kind = self.guest_addr(a)
+        if kind == "h":
+            return kind, f"{expr} + {k}"
+        return kind, f"({expr}) + {k}"
+
+    def i_vmovdqu(self, insn, ops):
+        d, s = ops
+        wide = d.size == 32
+        if d.type == X.X86_OP_REG and s.type == X.X86_OP_REG:
+            dx, dy = self.ymm(d)
+            sx, sy = self.ymm(s)
+            self.e(f"{dx} = {sx}; {dy} = {sy if wide else '(u128){0, 0}'};")
+        elif d.type == X.X86_OP_REG:
+            dx, dy = self.ymm(d)
+            a = self.address(s)
+            expr, kind = self.guest_addr(a)
+            if a[0] == "dyn" and kind != "h":
+                expr = self.tmp(64, expr)
+            lo = self.tmp(128, self.ld(kind, 128, expr))
+            hi = self.tmp(128, self.ld(kind, 128, f"{expr} + 16")) if wide else "(u128){0, 0}"
+            self.e(f"{dx} = {lo}; {dy} = {hi};")
+        else:
+            sx, sy = self.ymm(s)
+            a = self.address(d)
+            expr, kind = self.guest_addr(a)
+            if a[0] == "dyn" and kind != "h":
+                expr = self.tmp(64, expr)
+            self.e(self.st(kind, 128, expr, sx))
+            if wide:
+                self.e(self.st(kind, 128, f"{expr} + 16", sy))
+
+    i_vmovdqa = i_vmovdqu
+    i_vmovups = i_vmovdqu
+    i_vmovaps = i_vmovdqu
+    i_vmovntdq = i_vmovdqu
+
+    def i_vmovd(self, insn, ops):
+        self.i_movd(insn, ops)
+        if ops[0].type == X.X86_OP_REG and self.reg(ops[0])[1] >= 128:
+            self.e(f"{self.ymm(ops[0])[1]} = (u128){{0, 0}};")
+
+    def i_vmovq(self, insn, ops):
+        self.i_movq(insn, ops)
+        if ops[0].type == X.X86_OP_REG and self.reg(ops[0])[1] >= 128:
+            self.e(f"{self.ymm(ops[0])[1]} = (u128){{0, 0}};")
+
+    def i_vpbroadcastb(self, insn, ops):
+        s = self.tmp(128, self.xsrc(ops[1]) if ops[1].type == X.X86_OP_REG else f"(u128)(v16b){{{self.src(ops[1], 8)}}}")
+        idx = ", ".join("0" for k in range(16))
+        b = self.tmp(128, f"(u128)__builtin_shufflevector((v16b){s}, (v16b){s}, {idx})")
+        dx, dy = self.ymm(ops[0])
+        self.e(f"{dx} = {b}; {dy} = {b if ops[0].size == 32 else '(u128){0, 0}'};")
+
+    def i_vzeroupper(self, insn, ops):
+        self.e(" ".join(f"y{i} = (u128){{0, 0}};" for i in range(16)))
+
+    def i_rep_movsb(self, insn, ops):
+        # forward, byte by byte as x86 defines it; 8 bytes at a time where that gives the same result (the
+        # destination not within 8 bytes after the source)
+        g = "G" if not self.ordered else "O"
+        self.e("if (rdi - rsi >= 8) {")
+        self.e("    while (rcx >= 8) {")
+        self.e("        " + self.st("g", 64, "rdi", self.ld("g", 64, "rsi")))
+        self.e("        rdi += 8; rsi += 8; rcx -= 8;")
+        self.e("    }")
+        self.e("}")
+        self.e("while (rcx) {")
+        self.e("    " + self.st("g", 8, "rdi", self.ld("g", 8, "rsi")))
+        self.e("    rdi++; rsi++; rcx--;")
+        self.e("}")
+
     i_movaps = i_movups
     i_movdqu = i_movups
     i_movdqa = i_movups
@@ -1595,7 +1696,7 @@ class Lifter:
             out.append("}")
         out.append("const struct aot_entry aot_table[] = {")
         for f in self.funcs.values():
-            if roots and f.name not in roots:
+            if roots and f.name not in roots and f.name.rsplit("_", 1)[0] not in roots:
                 continue
             out.append(f"    {{{f.start:#x}ULL, {f.size}, {fnv(f.code):#x}ULL, e_{f.name}, \"{f.name}\"}},")
         out.append("    {0, 0, 0, 0, 0},")
@@ -1726,6 +1827,13 @@ def main():
         k = names.index("--roots")
         roots = set(names[k + 1:])
         names = names[:k]
+    # --internal NAME...: translated and called from translated code, but not routed for FEX's code (a call from
+    # the JIT would pay the bridge; glibc's string functions are called often with little to do)
+    if "--internal" in names:
+        k = names.index("--internal")
+        internal = names[k + 1:]
+        names = names[:k] + internal
+        roots = set(n.split("@")[0] for n in names[:k]) if roots is None else roots
     elf = Elf(binary)
     try:
         funcs = [Function(elf, n) for n in names]

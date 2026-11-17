@@ -1,4 +1,4 @@
-From 47028f883e57282b36a506f5b72666e5bccfc915 Mon Sep 17 00:00:00 2001
+From 91c3baf45ad1c628d6c7a979ba9becd3044c6298 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -10,12 +10,13 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
  FEXCore/include/FEXCore/Core/Context.h        |   8 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |   3 +
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  15 +
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  39 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp |  24 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 375 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 101 +++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |   5 +
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 377 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 11 files changed, 515 insertions(+), 10 deletions(-)
+ 12 files changed, 588 insertions(+), 33 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -168,10 +169,43 @@ index 19ae82f..4e6a385 100644
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b9..beb3894 100644
+index bed03b9..495ef89 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-@@ -617,6 +617,9 @@ int main(int argc, char** argv, char** const envp) {
+@@ -22,6 +22,7 @@ $end_info$
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/TSOViews.h"
+ #include "Linux/Utils/ELFContainer.h"
+ #include "Thunks.h"
+ 
+@@ -29,6 +30,7 @@ $end_info$
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Core/CoreState.h>
+ #include <FEXCore/Core/DiskCacheFileMapper.h>
++#include <FEXCore/Core/TSOViews.h>
+ #include <FEXCore/Utils/Allocator.h>
+ #include <FEXCore/Utils/FileLoading.h>
+ #include <FEXCore/Utils/LogManager.h>
+@@ -535,6 +537,16 @@ int main(int argc, char** argv, char** const envp) {
+     FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
+   }
+ 
++  // tso-arm: a program whose profile says it fell back to full ordering runs without views from the start: full
++  // ordering as FEX does it, without the views' set-up and address arithmetic (TSO_VIEWS_FALLBACK_VIEWS=1 keeps them)
++  if (FEXCore::TSOViews::Knob("TSO_VIEWS") && !FEXCore::TSOViews::Knob("TSO_VIEWS_FALLBACK_VIEWS")) {
++    auto App = FEXCore::Config::Get(FEXCore::Config::CONFIG_APP_FILENAME);
++    if (App && FEX::HLE::TSOViewMemory::ProfileSaysFallback(App.value()->c_str())) {
++      unsetenv("TSO_VIEWS");
++      LogMan::Msg::IFmt("tso-arm: the profile says full ordering; views off for this run");
++    }
++  }
++
+   // Setup Thread handlers, so FEXCore can create threads.
+   auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
+ 
+@@ -617,6 +629,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  
@@ -260,7 +294,7 @@ index 41aba2d..8d43106 100644
        }
        break;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d..942c3de 100644
+index 76be33d..f7a45a2 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -95,19 +95,28 @@ namespace {
@@ -305,7 +339,101 @@ index 76be33d..942c3de 100644
      PrintStats = true;
      atexit(DumpStats);
    }
-@@ -1069,6 +1078,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -242,32 +251,19 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
+   if (Env && !strcmp(Env, "none")) {
+     return;
+   }
+-  if (Env && Env[0]) {
+-    ProfilePath = Env;
+-  } else {
+-    // Bound to the program file: a rebuilt program gets a new profile
++  {
+     auto Program = FEXCore::Config::Get(FEXCore::Config::CONFIG_APP_FILENAME);
+-    const char* Home = getenv("HOME");
+-    struct stat St {};
+-    if (!Program || !Home || stat(Program.value()->c_str(), &St) != 0) {
++    if (!Program) {
+       return;
+     }
+-    const std::string Path = Program.value()->c_str();
+-    uint64_t H = 1469598103934665603ULL;
+-    auto Mix = [&H](const void* P, size_t N) {
+-      for (size_t i = 0; i < N; ++i) {
+-        H = (H ^ static_cast<const uint8_t*>(P)[i]) * 1099511628211ULL;
+-      }
+-    };
+-    Mix(Path.data(), Path.size());
+-    Mix(&St.st_size, sizeof(St.st_size));
+-    Mix(&St.st_mtim, sizeof(St.st_mtim));
+-    const std::string Dir = std::string(Home) + "/.cache/tso-arm";
+-    mkdir((std::string(Home) + "/.cache").c_str(), 0755);
+-    mkdir(Dir.c_str(), 0755);
+-    char Name[64];
+-    snprintf(Name, sizeof(Name), "-%016lx.prof", (unsigned long)H);
+-    ProfilePath = Dir + "/" + Path.substr(Path.find_last_of('/') + 1) + Name;
++    ProfilePath = ProfilePathFor(Program.value()->c_str());
++    if (ProfilePath.empty()) {
++      return;
++    }
++    if (const char* Home = getenv("HOME"); Home && !(Env && Env[0])) {
++      mkdir((std::string(Home) + "/.cache").c_str(), 0755);
++      mkdir((std::string(Home) + "/.cache/tso-arm").c_str(), 0755);
++    }
+   }
+ 
+   FILE* F = fopen(ProfilePath.c_str(), "r");
+@@ -320,6 +316,50 @@ void TSOViewMemory::SaveProfile() {
+   ProfileChanged = false;
+ }
+ 
++std::string TSOViewMemory::ProfilePathFor(const char* Program) {
++  const char* Env = getenv("TSO_VIEWS_PROFILE");
++  if (Env && !strcmp(Env, "none")) {
++    return {};
++  }
++  if (Env && Env[0]) {
++    return Env;
++  }
++  // Bound to the program file: a rebuilt program gets a new profile
++  const char* Home = getenv("HOME");
++  struct stat St {};
++  if (!Program || !Home || stat(Program, &St) != 0) {
++    return {};
++  }
++  const std::string Path = Program;
++  uint64_t H = 1469598103934665603ULL;
++  auto Mix = [&H](const void* P, size_t N) {
++    for (size_t i = 0; i < N; ++i) {
++      H = (H ^ static_cast<const uint8_t*>(P)[i]) * 1099511628211ULL;
++    }
++  };
++  Mix(Path.data(), Path.size());
++  Mix(&St.st_size, sizeof(St.st_size));
++  Mix(&St.st_mtim, sizeof(St.st_mtim));
++  char Name[64];
++  snprintf(Name, sizeof(Name), "-%016lx.prof", (unsigned long)H);
++  return std::string(Home) + "/.cache/tso-arm/" + Path.substr(Path.find_last_of('/') + 1) + Name;
++}
++
++bool TSOViewMemory::ProfileSaysFallback(const char* Program) {
++  const std::string P = ProfilePathFor(Program);
++  FILE* F = P.empty() ? nullptr : fopen(P.c_str(), "r");
++  if (!F) {
++    return false;
++  }
++  char Line[128];
++  bool Fall = false;
++  while (!Fall && fgets(Line, sizeof(Line), F)) {
++    Fall = !strncmp(Line, "fallback", 8);
++  }
++  fclose(F);
++  return Fall;
++}
++
+ uint64_t TSOViewMemory::ViewBase(int Slot, bool Ordered) {
+   return Ordered ? OrderedViewBase(Slot) : SlotBase(Slot);
+ }
+@@ -1069,6 +1109,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        EnterFallback(Now - StartNs);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -313,7 +441,7 @@ index 76be33d..942c3de 100644
        }
        return Result;
      }
-@@ -1088,6 +1098,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +1129,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -321,7 +449,7 @@ index 76be33d..942c3de 100644
        }
        return Result;
      }
-@@ -1102,6 +1113,9 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1102,6 +1144,9 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
    if (Result == Fault::Escalate) {
      ++Count.Escalations;
@@ -331,8 +459,24 @@ index 76be33d..942c3de 100644
    }
    return Result;
  }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
+index cf5fc2b..6118d75 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
+@@ -63,6 +63,11 @@ public:
+   // (TSO_VIEWS_PROFILE: a file, or "none"; default ~/.cache/tso-arm/<program>-<hash of path, size, mtime>).
+   // Loading it only saves work: an escalation too many costs ordering, a missing one is learned again.
+   void LoadProfile(FEXCore::Context::Context* CTX);
++  // The profile file of a program (TSO_VIEWS_PROFILE if set; empty for "none" or when it cannot be named)
++  static std::string ProfilePathFor(const char* Program);
++  // Whether the program's profile says it fell back to full ordering: such a program runs without views at all
++  // (FEXInterpreter, before the context exists), full ordering without the protocol's cost
++  static bool ProfileSaysFallback(const char* Program);
+   void NoteEscalation(uint64_t Start, uint64_t End);
+   // Logs a failed memory call (TSO_VIEWS_LOG) and passes the result through
+   static int64_t Result(const char* What, int64_t R);
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..52af55f 100644
+index 9c018bc..34375e1 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -21,8 +21,19 @@ $end_info$
@@ -655,7 +799,7 @@ index 9c018bc..52af55f 100644
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +478,77 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,6 +478,79 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  
@@ -701,9 +845,11 @@ index 9c018bc..52af55f 100644
 +    AOT::ReserveStubs();
 +    AOT::EscalateFn = reinterpret_cast<const char* (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
 +    AOT::OrderAllFn = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_all"));
-+    // TSO_AOT_ORDERED=1: every translated function ordered from the start (x86 order without the page protocol);
-+    // the protocol's fallback to full ordering does the same
-+    if ((getenv("TSO_AOT_ORDERED") && getenv("TSO_AOT_ORDERED")[0] == '1') || FEXCore::TSOViews::FallbackActive.load()) {
++    // Every translated function ordered from the start when x86 order is wanted without the page protocol (FEX's TSO
++    // on, no views), with TSO_AOT_ORDERED=1, and in the protocol's fallback to full ordering
++    FEX_CONFIG_OPT(TSOEnabled, TSOENABLED);
++    if ((TSOEnabled() && !FEXCore::TSOViews::Enabled()) || FEXCore::TSOViews::Knob("TSO_AOT_ORDERED") ||
++        FEXCore::TSOViews::FallbackActive.load()) {
 +      AOTOrderAll();
 +    }
 +
