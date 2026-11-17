@@ -531,3 +531,41 @@ the flags are live. Not kept.
 
 What remains of the view cost is one addition per basic block and base register; FEX's IR keeps values inside a
 block, so they cannot be shared further without changing its register allocation.
+
+## 15. FEX's own code generation (2026-11-17)
+
+FEX without any ordering reaches 84 % of native (geometric mean); 90 % with correct ordering would need a better
+translation first. Where FEX loses against the native build (`bench/native_vs_fex.sh`, `bench/stalls.sh`, xz,
+user mode, billions):
+
+| | instructions | cycles | backend stalls | frontend stalls | loads | stores |
+|---|---|---|---|---|---|---|
+| native | 10.34 | 7.23 | 2.84 | 0.13 | 2.58 | 0.76 |
+| FEX, TSO off | 15.89 | 8.79 | 2.85 | 0.12 | 3.35 | 1.28 |
+
+Stalls are the same; the 1.56 billion extra cycles are spent issuing 5.56 billion extra instructions. 1.3 billion
+of them are loads and stores the x86 code itself has (16 registers: more values live on the stack). The rest is
+spread thin: in the hottest function (`bench/mix_compare.sh`, lzma_lzma_optimum_normal: 1,744 instructions native,
+2,671 translated) more additions (address arithmetic), register copies, merges into 16-bit parts of registers
+(`bfxil`, `uxth`, from x86's 16-bit writes), `mul` where the compiler would shift and add, and materialised
+constants for large displacements. pigz: +21 % instructions, +10 % cycles; zstd: +5 % cycles, its wall time is lost
+in the serial main thread.
+
+Changes (`LocalCSE.cpp`, `Addressing.cpp`), measured on all three without views (`bench/codegen.sh`):
+
+- **Narrowing**: `Bfe(32, Op64)` of a single-use 64-bit add, sub, shifted add, mul, logical op or constant shift
+  becomes the 32-bit operation (Arm zero-extends), `add x20, x7, #1; mov w9, w20` -> `add w9, w7, #1`. xz -2.6 %
+  instructions.
+- **Large displacements**: an aligned displacement that does not fit the access is split into
+  `add #imm, lsl #12` on the base and the access's immediate, instead of `mov`, `movk` and a register offset. xz
+  -2 % instructions.
+- **Value sharing within a block** (registers loaded once, equal address arithmetic and constants computed once):
+  fewer instructions on paper, more cycles in practice (longer live values for FEX's register allocator), also
+  restricted to address arithmetic. Off (`TSO_ARM_CSE=1` or `2` to try).
+
+Together xz runs 4.6 % fewer instructions and about 1 % fewer cycles; pigz and zstd within the noise. The
+efficiency table shows the build without ordering at the same 84 % as upstream FEX.
+
+Assessment: the remaining distance to native is many small costs of translating x86 (its register pressure, its
+partial registers and flags), each worth a percent or less. That is FEX's own long-term work, not something a
+memory-ordering project closes; 90 % of native with correct ordering is out of reach on this path.

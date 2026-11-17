@@ -1,22 +1,24 @@
-From 764687070447afefc91a75506893d539f094d78c Mon Sep 17 00:00:00 2001
+From 5d4bf47d83d3d13fc279fccf0cf56002c84af342 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
 
 ---
- FEXCore/Source/CMakeLists.txt                 |    1 +
+ FEXCore/Source/CMakeLists.txt                 |    2 +
  FEXCore/Source/Interface/Context/Context.h    |   16 +
+ FEXCore/Source/Interface/Core/Addressing.cpp  |   24 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |   15 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |    3 +
- FEXCore/Source/Interface/Core/Core.cpp        |   97 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  103 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |    2 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |  146 ++-
  .../Interface/Core/OpcodeDispatcher.cpp       |    8 +-
  .../Source/Interface/Core/OpcodeDispatcher.h  |   63 +-
  FEXCore/Source/Interface/IR/IR.json           |   18 +-
- FEXCore/Source/Interface/IR/PassManager.cpp   |    6 +
- FEXCore/Source/Interface/IR/Passes.h          |    4 +
+ FEXCore/Source/Interface/IR/PassManager.cpp   |   11 +
+ FEXCore/Source/Interface/IR/Passes.h          |    5 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  304 +++++
+ .../Source/Interface/IR/Passes/LocalCSE.cpp   |  267 ++++
  .../IR/Passes/RegisterAllocationPass.cpp      |   10 +-
  FEXCore/include/FEXCore/Core/Context.h        |   21 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    3 +
@@ -32,22 +34,24 @@ Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  153 +++
  .../LinuxSyscalls/ThreadManager.cpp           |   18 +
  .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |    5 +
- 28 files changed, 2706 insertions(+), 29 deletions(-)
+ 30 files changed, 3010 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+ create mode 100644 FEXCore/Source/Interface/IR/Passes/LocalCSE.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 
 diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
-index 61385d2..f07180d 100644
+index 61385d2..8786e69 100644
 --- a/FEXCore/Source/CMakeLists.txt
 +++ b/FEXCore/Source/CMakeLists.txt
-@@ -66,6 +66,7 @@ set(SRCS
+@@ -66,6 +66,8 @@ set(SRCS
    Interface/IR/Passes/IRDumperPass.cpp
    Interface/IR/Passes/IRValidation.cpp
    Interface/IR/Passes/RedundantFlagCalculationElimination.cpp
 +  Interface/IR/Passes/GuestViewPass.cpp
++  Interface/IR/Passes/LocalCSE.cpp
    Interface/IR/Passes/RegisterAllocationPass.cpp
    Interface/IR/Passes/x87StackOptimizationPass.cpp
    Utils/LongJump.cpp
@@ -84,6 +88,48 @@ index 9b91055..dc85492 100644
 +  fextl::unordered_map<uint64_t, uint64_t> TSOTrapRIPs;
    IntervalList<uint64_t> ForceTSOValidRanges; // The ranges for which ForceTSOInstructions has populated data
    fextl::set<uint64_t> ForceTSOInstructions;
+ 
+diff --git a/FEXCore/Source/Interface/Core/Addressing.cpp b/FEXCore/Source/Interface/Core/Addressing.cpp
+index 8848dcb..fd2f9bb 100644
+--- a/FEXCore/Source/Interface/Core/Addressing.cpp
++++ b/FEXCore/Source/Interface/Core/Addressing.cpp
+@@ -5,6 +5,8 @@
+ #include "FEXCore/Utils/MathUtils.h"
+ #include "Interface/IR/IR.h"
+ 
++#include <cstdlib>
++
+ namespace FEXCore::IR {
+ 
+ Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSize, bool AddSegmentBase, bool AllowUpperGarbage) {
+@@ -125,6 +127,28 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
+   }
+ 
+   if (Vector || !AtomicTSO) {
++    // tso-arm: a large aligned displacement (struct fields far into a structure, 0x10edc(%r11,%rax)) is split into
++    // a part added to the base with one `add #imm, lsl #12` and a part the access encodes as its immediate:
++    // two instructions instead of materialising the constant (mov, movk) for a register offset. Accesses to
++    // neighbouring fields then share the addition (TSO_ARM_NOSPLIT=1: off).
++    static const bool Split = !(getenv("TSO_ARM_NOSPLIT") && getenv("TSO_ARM_NOSPLIT")[0] == '1');
++    if (Split && !Is32Bit && (A.Base || A.Segment) && A.Offset > 0 && (A.Offset % AccessSizeAsImm) == 0) {
++      const int64_t Span = 4096 * int64_t(AccessSizeAsImm);
++      const int64_t Low = A.Offset & (Span - 1);
++      const int64_t High = A.Offset - Low;
++      if (High > 0 && High < (int64_t(1) << 24)) {
++        AddressMode B = A;
++        B.Offset = 0;
++        Ref Base = IREmit->Add(GPRSize, LoadEffectiveAddress(IREmit, B, GPRSize, true /* AddSegmentBase */, false), High);
++        return {
++          .Base = Base,
++          .Index = Low ? IREmit->Constant(Low) : IREmit->Invalid(),
++          .IndexType = MemOffsetType::SXTX,
++          .IndexScale = 1,
++        };
++      }
++    }
++
+     if ((A.Base || A.Segment) && A.Offset) {
+       const bool Const_16K = A.Offset > -16384 && A.Offset < 16384 && GPRSizeMatchesAddrSize && Is32Bit;
  
 diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
 index 09828be..8b060b1 100644
@@ -147,7 +193,7 @@ index 02d22e1..a65d037 100644
  constexpr auto VTMP1 = ARMEmitter::VReg::v0;
  constexpr auto VTMP2 = ARMEmitter::VReg::v1;
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index 1946dc9..a9b9863 100644
+index 1946dc9..a1cddcd 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -37,6 +37,7 @@ $end_info$
@@ -195,7 +241,7 @@ index 1946dc9..a9b9863 100644
    if (SourcecodeResolver && Config.GDBSymbols()) {
      auto MappedSection = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
      if (MappedSection) {
-@@ -925,7 +938,28 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -925,7 +938,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
@@ -213,6 +259,12 @@ index 1946dc9..a9b9863 100644
 +        fwrite(CompiledCode.BlockBegin, 1, Header->OffsetToBlockTail, F);
 +        fclose(F);
 +      }
++      // and where it lies, to match profile samples to its instructions
++      snprintf(Name, sizeof(Name), "/tmp/tso-block-%lx.addr", (unsigned long)GuestRIP);
++      if (FILE* F = fopen(Name, "w")) {
++        fprintf(F, "%lx\n", (unsigned long)reinterpret_cast<uintptr_t>(CompiledCode.BlockBegin));
++        fclose(F);
++      }
 +    }
 +    static const bool Log = TSOViews::Knob("TSO_VIEWS_LOG");
 +    if (Log) {
@@ -224,7 +276,7 @@ index 1946dc9..a9b9863 100644
    auto CodePtr = CompiledCode.EntryPoints[GuestRIP];
    if (CodePtr == nullptr) {
      return 0;
-@@ -1153,6 +1187,67 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
+@@ -1153,6 +1193,67 @@ void ContextImpl::AddForceTSOInformation(const IntervalList<uint64_t>& ValidRang
    ForceTSOInstructions.merge(std::move(Instructions));
  }
  
@@ -759,7 +811,7 @@ index 6c1a345..cfa9f13 100644
            "Pushes a value to the address, returning the new pointer after incrementing.",
            "The address is decremented by the value size while.",
 diff --git a/FEXCore/Source/Interface/IR/PassManager.cpp b/FEXCore/Source/Interface/IR/PassManager.cpp
-index 5d3bcec..a2ce6d1 100644
+index 5d3bcec..7860aa5 100644
 --- a/FEXCore/Source/Interface/IR/PassManager.cpp
 +++ b/FEXCore/Source/Interface/IR/PassManager.cpp
 @@ -13,6 +13,7 @@ $end_info$
@@ -770,7 +822,7 @@ index 5d3bcec..a2ce6d1 100644
  #include <FEXCore/Utils/LogManager.h>
  #include <FEXCore/Utils/Profiler.h>
  
-@@ -77,6 +78,11 @@ void PassManager::AddDefaultPasses(Context::ContextImpl* ctx) {
+@@ -77,6 +78,16 @@ void PassManager::AddDefaultPasses(Context::ContextImpl* ctx) {
      InsertPass(CreateDeadFlagCalculationEliminination());
    }
  
@@ -779,11 +831,16 @@ index 5d3bcec..a2ce6d1 100644
 +    InsertPass(CreateGuestViewPass(ctx), "GuestView");
 +  }
 +
++  // tso-arm: narrowing and value sharing within blocks (general code generation, with or without views)
++  if (!DisablePasses()) {
++    InsertPass(CreateLocalCSEPass(), "LocalCSE");
++  }
++
    InsertPass(IR::CreateRegisterAllocationPass(&ctx->CPUID), "RA");
  
  #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
 diff --git a/FEXCore/Source/Interface/IR/Passes.h b/FEXCore/Source/Interface/IR/Passes.h
-index 213967a..8011bcc 100644
+index 213967a..6e467e8 100644
 --- a/FEXCore/Source/Interface/IR/Passes.h
 +++ b/FEXCore/Source/Interface/IR/Passes.h
 @@ -6,6 +6,9 @@
@@ -796,11 +853,12 @@ index 213967a..8011bcc 100644
  } // namespace FEXCore
  
  namespace FEXCore::IR {
-@@ -14,6 +17,7 @@ class Pass;
+@@ -14,6 +17,8 @@ class Pass;
  fextl::unique_ptr<Pass> CreateDeadFlagCalculationEliminination();
  fextl::unique_ptr<Pass> CreateRegisterAllocationPass(const CPUIDEmu* CPUID);
  fextl::unique_ptr<Pass> CreateX87StackOptimizationPass(const HostFeatures&, OpSize GPROpSize);
 +fextl::unique_ptr<Pass> CreateGuestViewPass(const Context::ContextImpl* CTX);
++fextl::unique_ptr<Pass> CreateLocalCSEPass();
  
  namespace Validation {
    fextl::unique_ptr<Pass> CreateIRValidation();
@@ -1112,6 +1170,279 @@ index 0000000..dd0ddac
 +
 +fextl::unique_ptr<Pass> CreateGuestViewPass(const Context::ContextImpl* CTX) {
 +  return fextl::make_unique<GuestViewPass>(CTX);
++}
++} // namespace FEXCore::IR
+diff --git a/FEXCore/Source/Interface/IR/Passes/LocalCSE.cpp b/FEXCore/Source/Interface/IR/Passes/LocalCSE.cpp
+new file mode 100644
+index 0000000..173afb2
+--- /dev/null
++++ b/FEXCore/Source/Interface/IR/Passes/LocalCSE.cpp
+@@ -0,0 +1,267 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: ir|opts
++desc: tso-arm: narrows zero-extended 64-bit arithmetic to 32 bits and shares equal values within a block
++$end_info$
++*/
++
++// Two cleanups FEX's IR leaves to the register allocator, which cannot do them:
++//
++// 1. x86 computes `lea 1(%rdi), %r9d` with a 64-bit address and keeps the low 32 bits; the IR has a 64-bit Add and a
++//    Bfe that zero-extends its low half, which becomes `add x20, x7, #1; mov w9, w20`. On Arm a 32-bit operation
++//    zero-extends its result anyway, and the low half of add, sub, mul, shift left and the logical operations only
++//    depends on the low halves of the inputs: when the 64-bit result has no other use, the operation is done in 32
++//    bits and the Bfe goes (`add w9, w7, #1`).
++// 2. The dispatcher loads a guest register afresh for each instruction and recomputes addresses and constants every
++//    time (`add x20, x11, x4` before each of four stores to neighbouring fields). Within a block, equal pure
++//    operations on equal arguments are computed once; loads of a guest register are shared until it is written
++//    (and a load after a write takes the written value), or until an operation that may change registers in the
++//    context (a syscall, a call into the runtime).
++//
++// TSO_ARM_NONARROW=1 turns the first off; the second is off unless TSO_ARM_CSE=1 (it costs cycles on the
++// workloads measured, notes section 15).
++
++#include "Interface/IR/IREmitter.h"
++#include "Interface/IR/PassManager.h"
++#include "Interface/IR/Passes.h"
++#include "Interface/IR/RegisterAllocationData.h"
++
++#include <FEXCore/IR/IR.h>
++#include <FEXCore/Utils/Profiler.h>
++#include <FEXCore/fextl/map.h>
++#include <FEXCore/fextl/vector.h>
++
++#include <array>
++#include <cstdlib>
++
++namespace FEXCore::IR {
++namespace {
++  bool Knob(const char* Name) {
++    const char* E = getenv(Name);
++    return E && E[0] == '1';
++  }
++
++  class LocalCSE final : public FEXCore::IR::Pass {
++  public:
++    void Run(IREmitter* IREmit) override;
++  };
++
++  using Key = std::array<uint64_t, 10>;
++
++  // Memory and ordering operations change no guest register
++  bool KeepsRegisters(IROps Op) {
++    switch (Op) {
++    case OP_STOREMEM:
++    case OP_STOREMEMTSO:
++    case OP_STOREMEMPAIR:
++    case OP_VSTOREVECTORELEMENT:
++    case OP_VSTORENONTEMPORAL:
++    case OP_VSTORENONTEMPORALPAIR:
++    case OP_VSTOREVECTORMASKED:
++    case OP_FENCE:
++    case OP_GUESTOPCODE:
++    case OP_STORENZCV:
++    case OP_STOREPF:
++    case OP_STOREAF:
++    case OP_CAS:
++    case OP_CASPAIR:
++    case OP_ATOMICSWAP:
++    case OP_ATOMICFETCHADD:
++    case OP_ATOMICFETCHSUB:
++    case OP_ATOMICFETCHAND:
++    case OP_ATOMICFETCHCLR:
++    case OP_ATOMICFETCHOR:
++    case OP_ATOMICFETCHXOR:
++    case OP_ATOMICFETCHNEG: return true;
++    default: return false;
++    }
++  }
++
++  void LocalCSE::Run(IREmitter* IREmit) {
++    FEXCORE_PROFILE_SCOPED("PassManager::LocalCSE");
++    static const bool Narrow = !Knob("TSO_ARM_NONARROW");
++    // Off by default: on xz, pigz and zstd it costs cycles (longer live values, more register pressure).
++    // TSO_ARM_CSE=1: everything; TSO_ARM_CSE=2: address arithmetic only (Add, AddShift, Sub, view addresses), with
++    // register loads shared but not taken from earlier register writes
++    static const int ShareMode = [] {
++      const char* E = getenv("TSO_ARM_CSE");
++      return E ? atoi(E) : 0;
++    }();
++    const bool Share = ShareMode != 0;
++    const bool AddressOnly = ShareMode == 2;
++
++    auto CurrentIR = IREmit->ViewIR();
++
++    auto InlineValue = [&](OrderedNodeWrapper W, uint64_t* V) {
++      const auto Op = CurrentIR.GetOp<IROp_Header>(W);
++      if (Op->Op == OP_INLINECONSTANT) {
++        *V = Op->C<IROp_InlineConstant>()->Constant;
++        return true;
++      }
++      return false;
++    };
++
++    fextl::vector<Ref> Dead;
++    for (auto [Block, BlockHeader] : CurrentIR.GetBlocks()) {
++      // 1. Narrowing
++      if (Narrow) {
++        for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
++          if (IROp->Op != OP_BFE) {
++            continue;
++          }
++          const auto Bfe = IROp->C<IROp_Bfe>();
++          if (Bfe->Width != 32 || Bfe->lsb != 0) {
++            continue;
++          }
++          Ref Src = CurrentIR.GetNode(Bfe->Src);
++          auto SrcOp = const_cast<IROp_Header*>(CurrentIR.GetOp<IROp_Header>(Src));
++          if (Src->GetUses() != 1 || SrcOp->Size != OpSize::i64Bit) {
++            continue;
++          }
++          uint64_t V {};
++          const bool Arg1Inline = GetArgs(SrcOp->Op) > 1 && InlineValue(SrcOp->Args[1], &V);
++          bool Ok = false;
++          switch (SrcOp->Op) {
++          case OP_ADD:
++          case OP_SUB: Ok = !Arg1Inline || V < (1ULL << 24); break; // immediates that encode the same in 32 bits
++          case OP_ADDSHIFT: Ok = SrcOp->C<IROp_AddShift>()->Shift == ShiftType::LSL; break;
++          case OP_MUL:
++          case OP_AND:
++          case OP_OR:
++          case OP_XOR: Ok = !Arg1Inline; break; // logical immediates are encoded per width
++          case OP_LSHL: Ok = Arg1Inline && V < 32; break;
++          default: break;
++          }
++          if (!Ok) {
++            continue;
++          }
++          SrcOp->Size = OpSize::i32Bit;
++          IREmit->ReplaceUsesWithAfter(CodeNode, Src, CodeNode);
++          Dead.push_back(CodeNode);
++        }
++      }
++
++      // 2. Sharing
++      if (Share) {
++        fextl::map<Key, Ref> Seen;
++        fextl::map<uint32_t, Ref> RegValue; // guest register -> its current value in this block
++        auto ArgKey = [&](OrderedNodeWrapper W, uint64_t* Tag, uint64_t* Val) {
++          uint64_t V;
++          if (InlineValue(W, &V)) {
++            *Tag = 1;
++            *Val = V;
++          } else {
++            *Tag = 2;
++            *Val = reinterpret_cast<uint64_t>(CurrentIR.GetNode(W));
++          }
++        };
++
++        for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
++          const auto Op = IROp->Op;
++          if (Op == OP_STOREREGISTER) {
++            const PhysicalRegister R(CodeNode);
++            if (R.AsRegClass() == RegClass::GPRFixed) {
++              if (IROp->Size == OpSize::i64Bit && !AddressOnly) {
++                RegValue[R.Reg] = CurrentIR.GetNode(IROp->Args[0]);
++              } else {
++                RegValue.erase(R.Reg);
++              }
++            }
++            continue;
++          }
++          if (Op == OP_LOADREGISTER) {
++            const auto L = IROp->C<IROp_LoadRegister>();
++            if (L->Class != RegClass::GPR || IROp->Size != OpSize::i64Bit) {
++              continue;
++            }
++            if (auto It = RegValue.find(L->Reg); It != RegValue.end()) {
++              IREmit->ReplaceUsesWithAfter(CodeNode, It->second, CodeNode);
++              Dead.push_back(CodeNode);
++            } else {
++              RegValue[L->Reg] = CodeNode;
++            }
++            continue;
++          }
++          if (HasSideEffects(Op) && !KeepsRegisters(Op)) {
++            RegValue.clear();
++            continue;
++          }
++          if (CodeNode->GetUses() == 0) {
++            continue; // dead already (a Bfe narrowed away above)
++          }
++
++          if (AddressOnly && Op != OP_ADD && Op != OP_ADDSHIFT && Op != OP_SUB && Op != OP_VIEWPLAIN && Op != OP_VIEWORDERED) {
++            continue;
++          }
++          Key K {};
++          K[0] = Op;
++          K[1] = uint64_t(IROp->Size);
++          switch (Op) {
++          case OP_CONSTANT: {
++            const auto C = IROp->C<IROp_Constant>();
++            K[2] = C->Constant;
++            K[3] = uint64_t(C->Pad) | (uint64_t(C->MaxBytes) << 8);
++            break;
++          }
++          case OP_ADDSHIFT: {
++            const auto S = IROp->C<IROp_AddShift>();
++            K[2] = uint64_t(S->Shift);
++            K[3] = S->ShiftAmount;
++            ArgKey(IROp->Args[0], &K[4], &K[5]);
++            ArgKey(IROp->Args[1], &K[6], &K[7]);
++            break;
++          }
++          case OP_BFE: {
++            const auto B = IROp->C<IROp_Bfe>();
++            K[2] = B->Width;
++            K[3] = B->lsb;
++            ArgKey(IROp->Args[0], &K[4], &K[5]);
++            break;
++          }
++          case OP_SBFE: {
++            const auto B = IROp->C<IROp_Sbfe>();
++            K[2] = B->Width;
++            K[3] = B->lsb;
++            ArgKey(IROp->Args[0], &K[4], &K[5]);
++            break;
++          }
++          case OP_ADD:
++          case OP_SUB:
++          case OP_AND:
++          case OP_OR:
++          case OP_XOR:
++          case OP_LSHL:
++          case OP_LSHR:
++          case OP_ASHR:
++          case OP_MUL:
++            ArgKey(IROp->Args[0], &K[4], &K[5]);
++            ArgKey(IROp->Args[1], &K[6], &K[7]);
++            break;
++          case OP_NOT:
++          case OP_VIEWPLAIN:
++          case OP_VIEWORDERED: ArgKey(IROp->Args[0], &K[4], &K[5]); break;
++          default: continue;
++          }
++          if (auto It = Seen.find(K); It != Seen.end()) {
++            IREmit->ReplaceUsesWithAfter(CodeNode, It->second, CodeNode);
++            Dead.push_back(CodeNode);
++          } else {
++            Seen[K] = CodeNode;
++          }
++        }
++      }
++    }
++
++    for (Ref N : Dead) {
++      if (N->GetUses() == 0) {
++        IREmit->Remove(N);
++      }
++    }
++  }
++} // namespace
++
++fextl::unique_ptr<Pass> CreateLocalCSEPass() {
++  return fextl::make_unique<LocalCSE>();
 +}
 +} // namespace FEXCore::IR
 diff --git a/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp b/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp

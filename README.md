@@ -19,16 +19,17 @@ options (`bench/build_native.sh`, `bench/efficiency.sh`). The protocol is the pa
 change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-17T17:43, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-17T18:56, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.08 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.14 s, 88 % | 1.38 s, 78 % | 0.59 s, 83 % | 83 % |
-| FEX default | no | 1.57 s, 64 % | 1.53 s, 71 % | 0.69 s, 71 % | 68 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.68 s, 60 % | 1.56 s, 69 % | 0.73 s, 67 % | 65 % |
-| tso-arm, first run | yes | 1.47 s, 68 % | 1.67 s, 65 % | 1.02 s, 48 % | 60 % |
-| tso-arm, with profile | yes | 1.36 s, 74 % | 1.53 s, 71 % | 0.88 s, 56 % | 66 % |
+| native Arm | - | 1.01 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.14 s, 89 % | 1.34 s, 80 % | 0.58 s, 84 % | 84 % |
+| tso-arm build, TSO off | no | 1.14 s, 89 % | 1.33 s, 80 % | 0.58 s, 84 % | 84 % |
+| FEX default | no | 1.58 s, 64 % | 1.53 s, 70 % | 0.69 s, 71 % | 68 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.65 s, 61 % | 1.54 s, 69 % | 0.75 s, 65 % | 65 % |
+| tso-arm, first run | yes | 1.49 s, 68 % | 1.67 s, 64 % | 0.99 s, 49 % | 60 % |
+| tso-arm, with profile | yes | 1.33 s, 76 % | 1.54 s, 69 % | 0.87 s, 56 % | 67 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 <!-- efficiency:end -->
