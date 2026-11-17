@@ -52,11 +52,23 @@ class Elf:
             if p_type == 1:
                 self.segs.append((p_vaddr, p_offset, p_filesz, p_memsz, p_flags))
         self.syms = {}
+        self.all = {}  # name -> every (address, size): static functions of different files may share a name
         for line in subprocess.run(["nm", "-S", path], capture_output=True, text=True).stdout.splitlines():
             p = line.split()
             if len(p) == 4 and p[2] in "tTwW":
                 self.syms[p[3]] = (int(p[0], 16), int(p[1], 16))
-        self.by_addr = {a: n for n, (a, s) in self.syms.items()}
+                self.all.setdefault(p[3], []).append((int(p[0], 16), int(p[1], 16)))
+
+    def lookup(self, spec):
+        # NAME, or NAME@ADDRESS for a name several functions share
+        name, _, at = spec.partition("@")
+        cands = self.all.get(name, [])
+        if at:
+            cands = [c for c in cands if c[0] == int(at, 16)]
+        if len(cands) != 1:
+            raise LiftError(f"{spec}: {len(cands)} functions of that name"
+                            + (" (" + ", ".join(f"{name}@{a:#x}" for a, s in self.all.get(name, [])) + ")" if cands else ""))
+        return name, cands[0]
 
     def read(self, addr, n):
         for v, o, fs, ms, fl in self.segs:
@@ -115,10 +127,11 @@ def cc_of(mnemonic, prefix):
 
 
 class Function:
-    def __init__(self, elf, name):
+    def __init__(self, elf, spec):
         self.elf = elf
-        self.name = name
-        self.start, self.size = elf.syms[name]
+        name, (self.start, self.size) = elf.lookup(spec)
+        # C name: a shared name gets its address
+        self.name = name if len(elf.all.get(name, [])) == 1 else f"{name}_{self.start:x}"
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         md.detail = True
         self.code = elf.read(self.start, self.size)
@@ -301,6 +314,8 @@ class Lifter:
         self.elf = elf
         self.funcs = {f.name: f for f in funcs}
         self.by_start = {f.start: f for f in funcs}
+        self.problems = []
+        self.guest_stack_args = {}
         # Escape analysis, to a fixed point over the call graph: which argument registers of each function may leave
         # translated code when they hold addresses, and whether the addresses of a function's own stack objects may
         for f in funcs:
@@ -491,7 +506,12 @@ class Lifter:
                 continue
             self.insn = insn
             self.d = f.delta[insn.address]
-            self.emit_insn(insn)
+            try:
+                self.emit_insn(insn)
+            except LiftError as e:
+                # collected: all problems of a run are reported together
+                self.problems.append(str(e))
+                self.e(f"aot_unreachable({insn.address:#x}ULL);")
         params = ", ".join(f"uint64_t {a}" for a in ARGS)
         head = [f"static uint64_t {self.pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params})", "{"]
         decl = []
@@ -502,7 +522,7 @@ class Lifter:
             decl.append(f"        return o_{f.name}(c, V, gsp, A, {self.call_args()});")
         locs = [r for r in GPRS if r not in ARGS]
         decl.append("    uint64_t " + ", ".join(f"{r} = 0" for r in locs) + ";")
-        decl.append("    u128 " + ", ".join(f"x{i} = 0" for i in range(16)) + ";")
+        decl.append("    u128 " + ", ".join(f"x{i} = {{0, 0}}" for i in range(16)) + ";")
         decl.append("    bool cf = 0, zf = 0, sf = 0, of = 0;")
         if f.frame_size:
             decl.append(f"    uint8_t F[{f.frame_size}] __attribute__((aligned(16)));")
@@ -621,27 +641,37 @@ class Lifter:
         if a[0] == "const" and self.elf.readonly(a[1], bits // 8):
             v = int.from_bytes(self.elf.read(a[1], bits // 8), "little")
             if bits == 128:
-                return f"(((u128){v >> 64:#x}ULL << 64) | {v & M64:#x}ULL)"
+                return f"((u128){{{v & M64:#x}ULL, {v >> 64:#x}ULL}})"
             return f"(({T[bits]}){v:#x}ULL)"
         expr, kind = self.guest_addr(a)
         return self.ld(kind, bits, expr)
 
     # accessors by kind: h host memory, r read-only guest data, s the thread's own guest stack, g guest memory (plain
     # view, or the ordered view in the ordered variant)
+    def stack_view(self):
+        # the thread's own stack for translated code is private, but under the protocol's fallback to full ordering
+        # every page is shared and reachable through the ordered view only: the ordered variant goes there (plain
+        # accesses, nobody else uses that stack); stack objects in host memory are reached through V in both variants
+        return "O" if self.ordered and not self.f.esc_host else "V"
+
     def ld(self, kind, bits, expr):
         if kind == "h":
             return f"hld{bits}({expr})"
         if kind == "r":
             return f"rld{bits}(V, {expr})"
         if kind == "g" and self.ordered:
-            return f"old{bits}(O, {expr})"
+            return f"old{bits}(O, V, {expr})"
+        if kind == "s":
+            return f"gld{bits}({self.stack_view()}, {expr})"
         return f"gld{bits}(V, {expr})"
 
     def st(self, kind, bits, expr, value):
         if kind == "h":
             return f"hst{bits}({expr}, {value});"
         if kind == "g" and self.ordered:
-            return f"ost{bits}(O, {expr}, {value});"
+            return f"ost{bits}(O, V, {expr}, {value});"
+        if kind == "s":
+            return f"gst{bits}({self.stack_view()}, {expr}, {value});"
         return f"gst{bits}(V, {expr}, {value});"
 
     def store(self, op, value, bits=None):
@@ -753,11 +783,40 @@ class Lifter:
             return f"(F + {off - self.f.frame_min})"
         raise self.err("outgoing stack arguments in the incoming argument area")
 
+    def guest_nstack(self, target):
+        # stack argument bytes a function that is not translated reads (decoded only for that); 0 if it has no
+        # symbol (PLT entries: memcpy and friends take register arguments)
+        if target not in self.guest_stack_args:
+            n = 0
+            for name, entries in self.elf.all.items():
+                if any(a == target for a, s in entries):
+                    try:
+                        n = Function(self.elf, f"{name}@{target:x}").nstack
+                    except LiftError as e:
+                        raise self.err(f"cannot tell the stack arguments of {name}: {e}")
+                    break
+            self.guest_stack_args[target] = n
+        return self.guest_stack_args[target]
+
     def direct_call(self, target, gsp_expr, argp_off, tail):
         callee = self.by_start.get(target)
         if callee:
             argp = "A" if tail else self.callee_argp(callee, argp_off)
             return f"{self.pre}{callee.name}(c, V, {gsp_expr}, {argp}, {self.call_args()})"
+        n = self.guest_nstack(target)
+        if n:
+            if tail:
+                raise self.err("tail call with stack arguments into guest code")
+            # the outgoing stack arguments go where the x86 code has them, on the guest stack above the callee's
+            # return address slot (gsp + offset: the thread's own stack for translated code)
+            for k in range(0, n, 8):
+                off = argp_off + k
+                kind = self.f.stack_kind(off)
+                if kind == "frame":
+                    view = "O" if self.ordered else "V"
+                    self.e(f"gst64({view}, gsp + {off & M64:#x}ULL, hld64(F + {off - self.f.frame_min}));")
+                elif kind != "esc" or self.f.esc_host:
+                    raise self.err("outgoing stack arguments for guest code outside the frame")
         return f"aot_guest_call(c, {target:#x}ULL, {gsp_expr}, {self.call_args()})"
 
     # --- instructions --------------------------------------------------------------------------------------------------
@@ -1208,28 +1267,35 @@ class Lifter:
         self.e("    rcx--;")
         self.e("}")
 
-    # SSE: 128-bit registers as unsigned __int128
+    # SSE: 128-bit registers as clang vectors (u128 = two 64-bit lanes, cast to other lane types per operation), so
+    # that they stay in NEON registers and lane operations become NEON instructions
     def xsrc(self, op):
         if op.type == X.X86_OP_REG:
             return self.reg(op)[0]
         return self.load(op, 128)
 
+    def xbin(self, ops, lane, expr):
+        # dst = expr(a, b) on lanes of type lane (v16b, v8w, v8ws, v4d, v4ds, u128)
+        a = self.tmp(128, self.reg(ops[0])[0])
+        b = self.tmp(128, self.xsrc(ops[1]))
+        self.wreg(ops[0], f"(u128)({expr(f'(({lane}){a})', f'(({lane}){b})')})")
+
     def i_movd(self, insn, ops):
         d, s = ops
         if d.type == X.X86_OP_REG and self.reg(d)[1] == 128:
-            self.wreg(d, f"(u128)(uint32_t){self.src(s, 32)}")
+            self.wreg(d, f"(u128)(v4d){{(uint32_t){self.src(s, 32)}, 0, 0, 0}}")
         else:
-            self.dst(d, f"(uint32_t){self.reg(s)[0]}", 32)
+            self.dst(d, f"((v4d){self.reg(s)[0]})[0]", 32)
 
     def i_movq(self, insn, ops):
         d, s = ops
         if d.type == X.X86_OP_REG and self.reg(d)[1] == 128:
             if s.type == X.X86_OP_REG and self.reg(s)[1] == 128:
-                self.wreg(d, f"(u128)(uint64_t){self.reg(s)[0]}")
+                self.wreg(d, f"(u128){{{self.reg(s)[0]}[0], 0}}")
             else:
-                self.wreg(d, f"(u128){self.src(s, 64)}")
+                self.wreg(d, f"(u128){{{self.src(s, 64)}, 0}}")
         else:
-            self.dst(d, f"(uint64_t){self.reg(s)[0]}", 64)
+            self.dst(d, f"{self.reg(s)[0]}[0]", 64)
 
     def i_movups(self, insn, ops):
         d, s = ops
@@ -1246,31 +1312,228 @@ class Lifter:
 
     def i_pxor(self, insn, ops):
         if ops[1].type == X.X86_OP_REG and ops[0].reg == ops[1].reg:
-            self.wreg(ops[0], "(u128)0")
+            self.wreg(ops[0], "(u128){0, 0}")
         else:
-            self.wreg(ops[0], f"{self.reg(ops[0])[0]} ^ {self.xsrc(ops[1])}")
+            self.xbin(ops, "u128", lambda a, b: f"{a} ^ {b}")
 
     i_xorps = i_pxor
 
+    def i_pand(self, insn, ops):
+        self.xbin(ops, "u128", lambda a, b: f"{a} & {b}")
+
+    i_andps = i_pand
+
+    def i_pandn(self, insn, ops):
+        self.xbin(ops, "u128", lambda a, b: f"~{a} & {b}")
+
+    def i_por(self, insn, ops):
+        self.xbin(ops, "u128", lambda a, b: f"{a} | {b}")
+
+    i_orps = i_por
+
     def i_punpckldq(self, insn, ops):
-        a = self.reg(ops[0])[0]
-        b = self.tmp(128, self.xsrc(ops[1]))
-        self.wreg(ops[0], f"mk4(d32({a}, 0), d32({b}, 0), d32({a}, 1), d32({b}, 1))")
+        self.xbin(ops, "v4d", lambda a, b: f"__builtin_shufflevector({a}, {b}, 0, 4, 1, 5)")
 
     def i_punpcklqdq(self, insn, ops):
-        a = self.reg(ops[0])[0]
-        b = self.tmp(128, self.xsrc(ops[1]))
-        self.wreg(ops[0], f"(u128)(uint64_t){a} | ((u128)(uint64_t){b} << 64)")
+        self.xbin(ops, "u128", lambda a, b: f"__builtin_shufflevector({a}, {b}, 0, 2)")
+
+    def i_punpcklwd(self, insn, ops):
+        self.xbin(ops, "v8w", lambda a, b: f"__builtin_shufflevector({a}, {b}, 0, 8, 1, 9, 2, 10, 3, 11)")
+
+    def i_punpcklbw(self, insn, ops):
+        idx = ", ".join(f"{k}, {k + 16}" for k in range(8))
+        self.xbin(ops, "v16b", lambda a, b: f"__builtin_shufflevector({a}, {b}, {idx})")
 
     def i_pshufd(self, insn, ops):
         s = self.tmp(128, self.xsrc(ops[1]))
         imm = ops[2].imm
-        self.wreg(ops[0], "mk4(" + ", ".join(f"d32({s}, {(imm >> (2 * k)) & 3})" for k in range(4)) + ")")
+        idx = ", ".join(str((imm >> (2 * k)) & 3) for k in range(4))
+        self.wreg(ops[0], f"(u128)__builtin_shufflevector((v4d){s}, (v4d){s}, {idx})")
+
+    def i_pshuflw(self, insn, ops):
+        s = self.tmp(128, self.xsrc(ops[1]))
+        imm = ops[2].imm
+        idx = ", ".join([str((imm >> (2 * k)) & 3) for k in range(4)] + ["4", "5", "6", "7"])
+        self.wreg(ops[0], f"(u128)__builtin_shufflevector((v8w){s}, (v8w){s}, {idx})")
 
     def i_paddd(self, insn, ops):
+        self.xbin(ops, "v4d", lambda a, b: f"{a} + {b}")
+
+    def i_paddw(self, insn, ops):
+        self.xbin(ops, "v8w", lambda a, b: f"{a} + {b}")
+
+    def i_paddq(self, insn, ops):
+        self.xbin(ops, "u128", lambda a, b: f"{a} + {b}")
+
+    def i_psubd(self, insn, ops):
+        self.xbin(ops, "v4d", lambda a, b: f"{a} - {b}")
+
+    def i_psubw(self, insn, ops):
+        self.xbin(ops, "v8w", lambda a, b: f"{a} - {b}")
+
+    def i_psubq(self, insn, ops):
+        self.xbin(ops, "u128", lambda a, b: f"{a} - {b}")
+
+    def i_pcmpeqd(self, insn, ops):
+        self.xbin(ops, "v4d", lambda a, b: f"{a} == {b}")
+
+    def i_pcmpeqb(self, insn, ops):
+        self.xbin(ops, "v16b", lambda a, b: f"{a} == {b}")
+
+    def i_pcmpeqw(self, insn, ops):
+        self.xbin(ops, "v8w", lambda a, b: f"{a} == {b}")
+
+    def i_pcmpgtd(self, insn, ops):
+        self.xbin(ops, "v4ds", lambda a, b: f"{a} > {b}")
+
+    def i_pcmpgtw(self, insn, ops):
+        self.xbin(ops, "v8ws", lambda a, b: f"{a} > {b}")
+
+    def i_psubusw(self, insn, ops):
+        self.xbin(ops, "v8w", lambda a, b: f"((v8w)({a} > {b})) & ({a} - {b})")
+
+    def i_pmaxsw(self, insn, ops):
+        self.xbin(ops, "v8ws", lambda a, b: f"__builtin_elementwise_max({a}, {b})")
+
+    def xshift(self, ops, lane, bits, op):
+        if ops[1].type != X.X86_OP_IMM:
+            raise self.err("vector shift by a register")
+        n = ops[1].imm
         a = self.tmp(128, self.reg(ops[0])[0])
-        b = self.tmp(128, self.xsrc(ops[1]))
-        self.wreg(ops[0], "mk4(" + ", ".join(f"d32({a}, {k}) + d32({b}, {k})" for k in range(4)) + ")")
+        if n >= bits:
+            if op == ">>s":
+                self.wreg(ops[0], f"(u128)(((({lane}){a})) >> {bits - 1})")
+            else:
+                self.wreg(ops[0], "(u128){0, 0}")
+            return
+        self.wreg(ops[0], f"(u128)(((({lane}){a})) {op.rstrip('s')} {n})")
+
+    def i_pslld(self, insn, ops):
+        self.xshift(ops, "v4d", 32, "<<")
+
+    def i_psrld(self, insn, ops):
+        self.xshift(ops, "v4d", 32, ">>")
+
+    def i_psrad(self, insn, ops):
+        self.xshift(ops, "v4ds", 32, ">>s")
+
+    def i_psllw(self, insn, ops):
+        self.xshift(ops, "v8w", 16, "<<")
+
+    def i_psrlw(self, insn, ops):
+        self.xshift(ops, "v8w", 16, ">>")
+
+    def i_psllq(self, insn, ops):
+        self.xshift(ops, "u128", 64, "<<")
+
+    def i_psrlq(self, insn, ops):
+        self.xshift(ops, "u128", 64, ">>")
+
+    def i_psrldq(self, insn, ops):
+        n = ops[1].imm
+        a = self.tmp(128, self.reg(ops[0])[0])
+        idx = ", ".join(str(k + n if k + n < 16 else 16) for k in range(16))
+        self.wreg(ops[0], f"(u128)__builtin_shufflevector((v16b){a}, (v16b){{0}}, {idx})")
+
+    def i_pslldq(self, insn, ops):
+        n = ops[1].imm
+        a = self.tmp(128, self.reg(ops[0])[0])
+        idx = ", ".join(str(k - n if k - n >= 0 else 16) for k in range(16))
+        self.wreg(ops[0], f"(u128)__builtin_shufflevector((v16b){a}, (v16b){{0}}, {idx})")
+
+    # --- scalar odds and ends -------------------------------------------------------------------------------------
+    def i_mul(self, insn, ops):
+        bits = self.bits0(ops)
+        if bits not in (32, 64):
+            raise self.err("mul of this size")
+        s = self.tmp(bits, self.src(ops[0], bits))
+        if bits == 64:
+            p = f"((unsigned __int128)rax * {s})"
+            self.e(f"{{ unsigned __int128 p_ = {p}; rax = (uint64_t)p_; rdx = (uint64_t)(p_ >> 64); }}")
+        else:
+            self.e(f"{{ uint64_t p_ = (uint64_t)(uint32_t)rax * {s}; rax = (uint32_t)p_; rdx = (uint32_t)(p_ >> 32); }}")
+        self.e("cf = of = rdx != 0;")
+        self.fd = None
+
+    def i_bts(self, insn, ops):
+        bits = self.bits0(ops)
+        if ops[0].type != X.X86_OP_REG and ops[1].type != X.X86_OP_IMM:
+            raise self.err("bts on memory with a register offset")
+        a, write = self.rmw(ops[0], bits)
+        n = self.tmp(bits, f"{self.src(ops[1], bits)} & {bits - 1}")
+        self.e(f"cf = ({a} >> {n}) & 1;")
+        write(f"{a} | (({T[bits]})1 << {n})")
+        self.fd = None
+
+    def i_bt(self, insn, ops):
+        bits = self.bits0(ops)
+        if ops[0].type != X.X86_OP_REG and ops[1].type != X.X86_OP_IMM:
+            raise self.err("bt on memory with a register offset")
+        a = self.tmp(bits, self.src(ops[0], bits))
+        n = self.tmp(bits, f"{self.src(ops[1], bits)} & {bits - 1}")
+        self.e(f"cf = ({a} >> {n}) & 1;")
+        self.fd = None
+
+    def prefetch(self, insn, ops):
+        a = self.address(ops[0])
+        if a[0] == "dyn":
+            self.e(f"__builtin_prefetch(V + {a[1]});")
+
+    i_prefetcht0 = prefetch
+    i_prefetcht1 = prefetch
+    i_prefetcht2 = prefetch
+    i_prefetchnta = prefetch
+    i_prefetchw = prefetch
+
+    # BMI2: shifts without flags, count masked to the operand size
+    def bmi_shift(self, ops, op, signed=False):
+        bits = self.bits0(ops)
+        s = self.tmp(bits, self.src(ops[1], bits))
+        n = self.tmp(bits, f"{self.src(ops[2], bits)} & {bits - 1}")
+        if signed:
+            self.wreg(ops[0], f"({T[bits]})(({S[bits]}){s} >> {n})")
+        else:
+            self.wreg(ops[0], f"({T[bits]})({s} {op} {n})")
+
+    def i_shlx(self, insn, ops):
+        self.bmi_shift(ops, "<<")
+
+    def i_shrx(self, insn, ops):
+        self.bmi_shift(ops, ">>")
+
+    def i_sarx(self, insn, ops):
+        self.bmi_shift(ops, ">>", True)
+
+    def i_bzhi(self, insn, ops):
+        bits = self.bits0(ops)
+        s = self.tmp(bits, self.src(ops[1], bits))
+        n = self.tmp(8, f"(uint8_t){self.src(ops[2], bits)}")
+        r = self.tmp(bits, f"{n} >= {bits} ? {s} : ({T[bits]})({s} & ((({T[bits]})1 << {n}) - 1))")
+        self.wreg(ops[0], r)
+        self.e(f"cf = {n} > {bits - 1};")
+        self.flags_zs(r, bits)
+        self.e("of = 0;")
+        self.fd = None
+
+    def i_andn(self, insn, ops):
+        bits = self.bits0(ops)
+        r = self.tmp(bits, f"~{self.src(ops[1], bits)} & {self.src(ops[2], bits)}")
+        self.wreg(ops[0], r)
+        self.flags_logic(r, bits)
+
+    def i_bswap(self, insn, ops):
+        bits = self.bits0(ops)
+        fn = "__builtin_bswap64" if bits == 64 else "__builtin_bswap32"
+        self.wreg(ops[0], f"{fn}({self.src(ops[0], bits)})")
+
+    def i_lzcnt(self, insn, ops):
+        bits = self.bits0(ops)
+        a = self.tmp(bits, self.src(ops[1], bits))
+        fn = "__builtin_clzll" if bits == 64 else "__builtin_clz"
+        r = self.tmp(bits, f"{a} ? ({T[bits]}){fn}({a}) : {bits}")
+        self.wreg(ops[0], r)
+        self.e(f"cf = {a} == 0; zf = {r} == 0;")
+        self.fd = None
 
     # --- whole program -------------------------------------------------------------------------------------------------
     def program(self, roots):
@@ -1284,13 +1547,18 @@ class Lifter:
             for f in funcs:
                 attr = "static inline __attribute__((always_inline))" if f.nstack else "static"
                 out.append(f"{attr} uint64_t {pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params});")
+        # Entry points and indirect calls go through these tables, so that no function is inlined into them: a host pc
+        # in translated code then lies in the body of the function it belongs to (aot_escalate)
+        for pre in ("f_", "o_"):
+            out.append(f"static uint64_t (*const volatile aot_fn_{pre[0]}[{len(funcs)}])(struct aot_ctx *, uint8_t *, uint64_t, "
+                       f"uint8_t *, {', '.join('uint64_t' for a in ARGS)}) = {{" + ", ".join(f"{pre}{f.name}" for f in funcs) + "};")
         for pre in ("f_", "o_"):
             out.append(f"static uint64_t aot_dispatch_{pre[0]}(struct aot_ctx *c, uint8_t *V, uint64_t t, uint64_t gsp, {params})")
             out.append("{")
             out.append("    switch (t) {")
             for f in funcs:
                 if not f.nstack:
-                    out.append(f"    case {f.start:#x}ULL: return {pre}{f.name}(c, V, gsp, 0, {self.call_args()});")
+                    out.append(f"    case {f.start:#x}ULL: return aot_fn_{pre[0]}[{f.index}](c, V, gsp, 0, {self.call_args()});")
             out.append(f"    default: return aot_guest_call(c, t, gsp, {self.call_args()});")
             out.append("    }")
             out.append("}")
@@ -1299,15 +1567,19 @@ class Lifter:
                 out.extend(self.lift(f, ordered))
                 out.append("")
         # For FEX: which function a host pc of a plain variant belongs to (it met shared memory there)
-        out.append("void aot_escalate(uint64_t pc)")
+        # returns the name of the function switched to its ordered variant, or 0 if it already was
+        out.append("const char *aot_escalate(uint64_t pc)")
         out.append("{")
         out.append("    static void *const fn[] = {" + ", ".join(f"(void *)f_{f.name}" for f in funcs) + "};")
+        out.append("    static const char *const name[] = {" + ", ".join(f'"{f.name}"' for f in funcs) + "};")
         out.append("    int best = -1;")
         out.append(f"    for (int k = 0; k < {len(funcs)}; k++)")
         out.append("        if ((uint64_t)(uintptr_t)fn[k] <= pc && (best < 0 || (uintptr_t)fn[k] > (uintptr_t)fn[best]))")
         out.append("            best = k;")
-        out.append("    if (best >= 0)")
-        out.append("        aot_mode[best] = 1;")
+        out.append("    if (best < 0 || aot_mode[best])")
+        out.append("        return 0;")
+        out.append("    aot_mode[best] = 1;")
+        out.append("    return name[best];")
         out.append("}")
         out.append("void aot_order_all(void)")
         out.append("{")
@@ -1319,7 +1591,7 @@ class Lifter:
         for f in self.funcs.values():
             out.append(f"static uint64_t e_{f.name}(struct aot_ctx *c, uint64_t rsp, uint64_t stack, const uint64_t *a)")
             out.append("{")
-            out.append(f"    return f_{f.name}(c, c->view, stack, c->view + rsp + 8, a[0], a[1], a[2], a[3], a[4], a[5]);")
+            out.append(f"    return aot_fn_f[{f.index}](c, c->view, stack, c->view + rsp + 8, a[0], a[1], a[2], a[3], a[4], a[5]);")
             out.append("}")
         out.append("const struct aot_entry aot_table[] = {")
         for f in self.funcs.values():
@@ -1345,11 +1617,17 @@ PRELUDE = r"""// Generated by aot/lift.py: x86-64 functions translated to C. Do 
 #include <stdint.h>
 #include "aot.h"
 
-typedef unsigned __int128 u128;
+// xmm registers: 128-bit vectors, viewed per operation with the lane type it needs
+typedef uint64_t u128 __attribute__((vector_size(16)));
+typedef uint8_t v16b __attribute__((vector_size(16)));
+typedef uint16_t v8w __attribute__((vector_size(16)));
+typedef int16_t v8ws __attribute__((vector_size(16)));
+typedef uint32_t v4d __attribute__((vector_size(16)));
+typedef int32_t v4ds __attribute__((vector_size(16)));
 typedef uint16_t u16u __attribute__((aligned(1)));
 typedef uint32_t u32u __attribute__((aligned(1)));
 typedef uint64_t u64u __attribute__((aligned(1)));
-typedef u128 u128u __attribute__((aligned(1)));
+typedef uint64_t u128u __attribute__((vector_size(16), aligned(1)));
 
 // guest memory, ordered among themselves (volatile)
 static inline uint8_t gld8(uint8_t *V, uint64_t a) { return *(volatile uint8_t *)(V + a); }
@@ -1380,27 +1658,34 @@ static inline void hst32(uint8_t *p, uint32_t v) { __builtin_memcpy(p, &v, 4); }
 static inline void hst64(uint8_t *p, uint64_t v) { __builtin_memcpy(p, &v, 8); }
 static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
 
-// guest memory in the ordered variant: the ordered view, x86 order kept (acquire loads, release stores; an
-// unaligned access between two full barriers)
+// guest memory in the ordered variant: the ordered view, x86 order kept. Loads acquire (`ldapr`), stores release
+// (`stlr`); unaligned, a load is followed by `dmb ishld` and a store preceded by `dmb ish`, which orders them the
+// same way. With views, guest addresses lie below 2^34; a larger value is the address of a stack object kept in
+// host memory (relative to the plain view, private to the thread): plain.
+#define HOSTOBJ(a) __builtin_expect(((a) >> 34) != 0 && O != V, 0)
 #define ORDERED(bits, T)                                                                                               \
-    static inline T old##bits(uint8_t *O, uint64_t a)                                                                  \
+    static inline T old##bits(uint8_t *O, uint8_t *V, uint64_t a)                                                      \
     {                                                                                                                  \
+        if (HOSTOBJ(a))                                                                                                \
+            return *(volatile T##u *)(V + a);                                                                          \
         if (__builtin_expect((a & (bits / 8 - 1)) == 0, 1))                                                            \
             return __atomic_load_n((T *)(O + a), __ATOMIC_ACQUIRE);                                                    \
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);                                                                       \
         T v = *(volatile T##u *)(O + a);                                                                               \
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);                                                                       \
+        __asm__ volatile("dmb ishld" ::: "memory");                                                                    \
         return v;                                                                                                      \
     }                                                                                                                  \
-    static inline void ost##bits(uint8_t *O, uint64_t a, T v)                                                          \
+    static inline void ost##bits(uint8_t *O, uint8_t *V, uint64_t a, T v)                                              \
     {                                                                                                                  \
+        if (HOSTOBJ(a)) {                                                                                              \
+            *(volatile T##u *)(V + a) = v;                                                                             \
+            return;                                                                                                    \
+        }                                                                                                              \
         if (__builtin_expect((a & (bits / 8 - 1)) == 0, 1)) {                                                          \
             __atomic_store_n((T *)(O + a), v, __ATOMIC_RELEASE);                                                       \
             return;                                                                                                    \
         }                                                                                                              \
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);                                                                       \
+        __asm__ volatile("dmb ish" ::: "memory");                                                                      \
         *(volatile T##u *)(O + a) = v;                                                                                 \
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);                                                                       \
     }
 typedef uint8_t uint8_tu;
 typedef u16u uint16_tu;
@@ -1411,21 +1696,15 @@ ORDERED(16, uint16_t)
 ORDERED(32, uint32_t)
 ORDERED(64, uint64_t)
 // 16 bytes (SSE moves): two ordered 8-byte halves, in address order
-static inline u128 old128(uint8_t *O, uint64_t a)
+static inline u128 old128(uint8_t *O, uint8_t *V, uint64_t a)
 {
-    uint64_t lo = old64(O, a), hi = old64(O, a + 8);
-    return (u128)lo | ((u128)hi << 64);
+    uint64_t lo = old64(O, V, a), hi = old64(O, V, a + 8);
+    return (u128){lo, hi};
 }
-static inline void ost128(uint8_t *O, uint64_t a, u128 v)
+static inline void ost128(uint8_t *O, uint8_t *V, uint64_t a, u128 v)
 {
-    ost64(O, a, (uint64_t)v);
-    ost64(O, a + 8, (uint64_t)(v >> 64));
-}
-
-static inline uint32_t d32(u128 x, int i) { return (uint32_t)(x >> (32 * i)); }
-static inline u128 mk4(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
-{
-    return (u128)a | ((u128)b << 32) | ((u128)c << 64) | ((u128)d << 96);
+    ost64(O, V, a, v[0]);
+    ost64(O, V, a + 8, v[1]);
 }
 
 __attribute__((noreturn, cold)) void aot_unreachable(uint64_t rip);
@@ -1454,6 +1733,13 @@ def main():
         text = lifter.program(roots)
     except LiftError as e:
         sys.exit(f"lift: {e}")
+    if lifter.problems:
+        seen = set()
+        for p in lifter.problems:
+            if p not in seen:
+                seen.add(p)
+                print("lift:", p, file=sys.stderr)
+        sys.exit(f"lift: {len(seen)} problems")
     open(out, "w").write(text)
     for f in funcs:
         objs = ""

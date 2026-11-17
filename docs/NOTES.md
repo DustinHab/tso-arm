@@ -649,3 +649,60 @@ Limits of the prototype: only the instruction forms these functions use; the bou
 pattern (an index outside it ends in an abort, not silently); indirect calls are assumed to pass no stack
 arguments; the per-thread stack for translated code (2 MiB, 4 MiB reserved) is not freed when a thread ends; guest
 code changed after loading is not noticed (the hash is checked once).
+
+## 17. pigz and zstd ahead of time; single accesses ordered by patching (2026-11-17)
+
+Hot sets (`bench/func_profile.sh`, `aot/calls.sh`): pigz 16 functions, 2,941 x86 instructions (zlib's
+`deflate_slow` and everything below it, `crc32_z`); zstd 16 functions, 5,276 instructions (the double-fast match
+finder, 3,296 instructions in one function, sequence encoding in the BMI2 variant FEX's CPUID selects, XXH64, block
+splitting with its fingerprint functions, statistics).
+
+Translator additions: SSE integer operations (`pand`, `pcmpgtd`, `punpcklwd`, `pshuflw`, `psrldq`, ...) on clang
+vectors, so xmm values stay in NEON registers; BMI2 shifts, `bzhi`, `mul`, `bt`/`bts`, prefetches; functions that
+share a name (zstd has five static `ZSTD_safecopyLiterals`) are named by address; stack arguments of calls into guest
+code are copied to where the x86 code has them on the guest stack (zstd's `ZSTD_buildCTable` takes 16 arguments).
+
+Three faults found on the way:
+
+1. **FEX, dispatcher stack**: a signal handler that sends a thread back to the dispatcher loop from inside a block
+   (an escalation, a boundary exit, self-modifying code) leaves the block's spill area on the host stack. In the
+   outer loop that is a small leak; in a callback from host code into guest code (thunks, here the translated code
+   calling memcpy through the PLT) the callback's return then pops the wrong frame and jumps to address 0. The page
+   protocol sends threads back often enough to hit it. Fix: the frame records the stack pointer of the dispatcher
+   loop that runs; the loop top resets it; a callback keeps the outer loop's value and restores it on return.
+2. Stack objects kept in host memory are addressed relative to the plain view; the ordered variant read them
+   through the ordered view, 2^38 away. Ordered accesses now take an address above the 16 GB window as such an
+   object.
+3. Switching a function to its ordered variant looked up the nearest function start below the faulting pc; clang
+   had inlined the plain variant into the entry function, so the wrong function was switched. Entry points and
+   indirect calls now call through a table.
+
+**Single accesses instead of whole functions.** Switching whole functions is too coarse: in pigz seven functions
+met shared memory somewhere, among them `deflate_slow`, and ran ordered from then on (2.02 s, cold). Now the fault
+handler replaces the faulting instruction by a branch to a ten-word stub: the base register with bit 38 set (the
+ordered view), the original instruction, `dmb ishld` after a load or `dmb ish` before a store, and back. A base or
+64-bit offset register that already has bit 38 set holds a host address (a stack object in host memory) and takes
+the original instruction. This is FEX's escalation of single instructions, done to the translated code: pigz
+1.37 s cold, 1,896 escalations (FEX alone: 1,920). Whole functions switch only for an instruction the patcher does
+not know, and in the protocol's fallback. Litmus tests (`litmus/run_aot.sh`): without ordering mp 4, vec 5,
+vecwait 7 forbidden outcomes; ordered throughout and with the protocol none, and store buffering shows again
+(1,111 times), so the stubs do not order more than x86.
+
+**zstd** stays where it was. It falls back to full ordering in every run (its input buffers move between threads,
+sections 12 and 13), and it is memory-bound: natively 0.68 instructions per cycle. Translated ahead of time it
+executes fewer instructions than FEX (2.15 against 2.61 billion) but not fewer cycles (2.96 against 2.85; native
+2.69). Unaligned ordered accesses now take one barrier instead of two (`ldr; dmb ishld`, `dmb ish; str`).
+
+Efficiency (`bench/efficiency.sh`, best of three, README table):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 61 % | 70 % | 68 % | 66 % |
+| tso-arm, with profile | yes | 74 % | 69 % | 57 % | 66 % |
+| ahead of time, TSO off | no | 92 % | 91 % | 83 % | 89 % |
+| ahead of time, all ordered | yes, except RSP | 56 % | 64 % | 64 % | 61 % |
+| ahead of time + tso-arm, with profile | yes | 81 % | 85 % | 53 % | 71 % |
+
+**FEX's fixed cost** is the larger lever left for short runs: zstd on an empty input compiles 406 blocks, 45 ms of
+CPU time; against zstd's 0.49 s natively that alone is about ten points. FEX's own code cache
+(`FEX_ENABLECODECACHINGWIP=1`) crashes on the third run (SIGILL) and is no way out as it stands.

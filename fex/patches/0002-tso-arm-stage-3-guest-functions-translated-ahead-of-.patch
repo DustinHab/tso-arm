@@ -1,18 +1,21 @@
-From 01d1f974672a0d48d761c1daab65e7d0c0d33af9 Mon Sep 17 00:00:00 2001
+From 47028f883e57282b36a506f5b72666e5bccfc915 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
  FEXCore/Source/Interface/Context/Context.h    |   1 +
- FEXCore/Source/Interface/Core/Core.cpp        |  16 ++
+ FEXCore/Source/Interface/Core/Core.cpp        |  16 +
+ .../Interface/Core/Dispatcher/Dispatcher.cpp  |  21 +
+ .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
  FEXCore/include/FEXCore/Core/Context.h        |   8 +
+ FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |   3 +
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  13 +
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  39 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp |  24 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 229 ++++++++++++++++++
- Source/Tools/LinuxEmulation/Thunks.h          |  15 ++
- 8 files changed, 304 insertions(+), 5 deletions(-)
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 375 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.h          |  18 +
+ 11 files changed, 515 insertions(+), 10 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -53,6 +56,82 @@ index a1cddcd..97869df 100644
  void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index c903d3b..6fd5a81 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -86,9 +86,17 @@ void Dispatcher::EmitDispatcher() {
+   // regardless of where we were in the stack
+   add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, ARMEmitter::Reg::rsp, 0);
+   str(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, ReturningStackLocation));
++#ifndef ARCHITECTURE_arm64ec
++  str(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, DispatchSP));
++#endif
+ 
+   ARMEmitter::ForwardLabel CompileSingleStep;
+   AbsoluteLoopTopAddressFillSRA = GetCursorAddress<uint64_t>();
++#ifndef ARCHITECTURE_arm64ec
++  // tso-arm: entered from a signal handler in the middle of a block, the block's spill area is still on the stack
++  ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, DispatchSP));
++  add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, ARMEmitter::Reg::r0, 0);
++#endif
+ 
+   FillStaticRegs();
+   ldr(RipReg, STATE_PTR(CpuStateFrame, State.rip));
+@@ -510,6 +518,19 @@ void Dispatcher::EmitDispatcher() {
+     // First thing we need to move the thread state pointer back in to our register
+     mov(STATE, ARMEmitter::XReg::x0);
+ 
++#ifndef ARCHITECTURE_arm64ec
++    // tso-arm: x25 belongs to the host code that calls back (callee-saved, it may hold anything here); the call-ret
++    // stack pointer comes from the thunk call that left the JIT
++    ldr(REG_CALLRET_SP, STATE_PTR(CpuStateFrame, State.callret_sp));
++
++    // tso-arm: this loop's stack pointer, for re-entries at the loop top from signal handlers; the outer loop's value
++    // is kept on the stack and restored by CallbackReturn
++    ldr(ARMEmitter::XReg::x3, STATE_PTR(CpuStateFrame, DispatchSP));
++    stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::x3, ARMEmitter::XReg::zr, ARMEmitter::XReg::rsp, -0x10);
++    add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r3, ARMEmitter::Reg::rsp, 0);
++    str(ARMEmitter::XReg::x3, STATE_PTR(CpuStateFrame, DispatchSP));
++#endif
++
+     // Make sure to adjust the refcounter so we don't clear the cache now
+     ldr(ARMEmitter::WReg::w2, STATE_PTR(CpuStateFrame, SignalHandlerRefCounter));
+     add(ARMEmitter::Size::i32Bit, ARMEmitter::Reg::r2, ARMEmitter::Reg::r2, 1);
+diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+index ae3ed51..238f494 100644
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -24,7 +24,16 @@ DEF_OP(CallbackReturn) {
+   SpillStaticRegs(TMP1);
+ 
+   // First we must reset the stack
++#ifndef ARCHITECTURE_arm64ec
++  // tso-arm: to the callback loop's stack pointer (a signal handler may have sent the thread to the loop top from
++  // inside a block, leaving that block's spill area behind), then the outer loop's value back into the state
++  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, DispatchSP));
++  add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, TMP1.R(), 0);
++  ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, ARMEmitter::XReg::rsp, 0x10);
++  str(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, DispatchSP));
++#else
+   ResetStack();
++#endif
+ 
+   // We can now lower the ref counter again
+ 
+@@ -306,6 +315,12 @@ DEF_OP(Thunk) {
+ 
+   PushDynamicRegs(TMP1);
+ 
++#ifndef ARCHITECTURE_arm64ec
++  // tso-arm: the host code may use x25 (callee-saved) before it calls back into guest code; the callback entry takes
++  // the call-ret stack pointer from here instead of from the register
++  str(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
++#endif
++
+   mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GetReg(Op->ArgPtr));
+ 
+   InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
 index ddec229..ffaac6e 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
@@ -72,6 +151,22 @@ index ddec229..ffaac6e 100644
    /**
     * @brief Adds additional per-instruction granularity TSO enable/disable information for the given range.
     *
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 19ae82f..4e6a385 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -477,6 +477,11 @@ struct CpuStateFrame {
+   // tso-arm: base of this thread's plain view of guest memory (0 when views are off)
+   uint64_t TSOViewBase {};
+ 
++  // tso-arm: host stack pointer of the dispatcher loop that runs now (the outer one, or the one of a callback from
++  // host code into guest code). A signal handler that sends the thread back to the loop top from inside a block
++  // leaves the block's spill area on the stack; the loop top resets the stack pointer to this value.
++  uint64_t DispatchSP {};
++
+ #ifdef _WIN32
+   // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
+   uint32_t SuspendDoorbell {};
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 index bed03b9..beb3894 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
@@ -87,7 +182,7 @@ index bed03b9..beb3894 100644
  
    SyscallHandler->DefaultProgramBreak(BRKInfo.Base, BRKInfo.Size);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d..712c16d 100644
+index 41aba2d..8d43106 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -106,16 +201,25 @@ index 41aba2d..712c16d 100644
        if (InCode) {
          Thread->CTX->TSOTrapBlockBoundaries(Thread, PC);
        }
-@@ -122,6 +124,17 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -122,6 +124,26 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        auto CTX = Thread->CTX;
        const uint64_t HostPC = ArchHelpers::Context::GetPc(ucontext);
        if (!CTX->IsAddressInCodeBuffer(Thread, HostPC)) {
 +        // Code translated ahead of time (TSO_AOT) is not translated again: each of its accesses to memory that
 +        // another thread writes is completed here, ordered
 +        if (FEX::HLE::IsAOTCode(HostPC)) {
-+          // ...and the function runs its ordered variant from its next call on
-+          FEX::HLE::AOTEscalate(HostPC);
-+          const bool Emulated = TSOViewMemory::EmulateAccess(ucontext, *reinterpret_cast<const uint32_t*>(HostPC));
++          // ...and this access is ordered from now on (TSO_AOT_SWITCH=1, or an instruction the patcher does not
++          // know: the whole function runs its ordered variant from its next call on)
++          const uint32_t AInsn = __atomic_load_n(reinterpret_cast<const uint32_t*>(HostPC), __ATOMIC_RELAXED);
++          if ((AInsn & 0xFC000000) == 0x14000000) {
++            // Another thread patched the instruction meanwhile; it has not run yet: again, now through the stub
++            return Handled();
++          }
++          static const bool Switch = FEXCore::TSOViews::Knob("TSO_AOT_SWITCH");
++          if (Switch || !FEX::HLE::AOTPatch(HostPC, AInsn)) {
++            FEX::HLE::AOTEscalate(HostPC);
++          }
++          const bool Emulated = TSOViewMemory::EmulateAccess(ucontext, AInsn);
 +          TSOViewMemory::NoteAccess(Emulated);
 +          if (Emulated) {
 +            return Handled();
@@ -124,6 +228,37 @@ index 41aba2d..712c16d 100644
          LogMan::Msg::EFmt("tso-arm: plain access to shared memory outside translated code, pc {:#x}, address {:#x}", HostPC, FaultAddress);
          return false;
        }
+@@ -181,7 +203,7 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+       return Handled();
+     }
+     case TSOViewMemory::Fault::NotOurs:
+-      if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
++      if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG") || FEXCore::TSOViews::Knob("TSO_AOT_LOG")) {
+         if (Thread->CTX->IsAddressInCodeBuffer(Thread, PC)) {
+           fprintf(stderr, "tso-arm: not ours at host pc %#lx, instruction %#010x, rip %#lx, x24 %#lx\n", (unsigned long)PC,
+                   *reinterpret_cast<const uint32_t*>(PC), (unsigned long)Thread->CTX->RestoreRIPFromHostPC(Thread, PC),
+@@ -189,10 +211,17 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+         } else {
+           Dl_info Info {};
+           dladdr(reinterpret_cast<void*>(PC), &Info);
+-          fprintf(stderr, "tso-arm: not ours outside translated code, pc %#lx (%s+%#lx, %s), lr %#lx, rip %#lx\n", (unsigned long)PC,
+-                  Info.dli_fname ? Info.dli_fname : "?", (unsigned long)(PC - reinterpret_cast<uint64_t>(Info.dli_fbase)),
+-                  Info.dli_sname ? Info.dli_sname : "?", (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 30),
+-                  (unsigned long)Thread->CurrentFrame->State.rip);
++          fprintf(stderr, "tso-arm: not ours outside translated code, pc %#lx (%s+%#lx, %s), instruction %#010x, address %#lx, lr %#lx, rip %#lx\n",
++                  (unsigned long)PC, Info.dli_fname ? Info.dli_fname : "?", (unsigned long)(PC - reinterpret_cast<uint64_t>(Info.dli_fbase)),
++                  Info.dli_sname ? Info.dli_sname : "?", *reinterpret_cast<const uint32_t*>(PC), (unsigned long)FaultAddress,
++                  (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 30), (unsigned long)Thread->CurrentFrame->State.rip);
++          for (int R = 0; R < 31; R += 6) {
++            fprintf(stderr, "    ");
++            for (int K = R; K < R + 6 && K < 31; ++K) {
++              fprintf(stderr, " x%d %#lx", K, (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, K));
++            }
++            fprintf(stderr, "\n");
++          }
+         }
+       }
+       break;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 index 76be33d..942c3de 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
@@ -197,7 +332,7 @@ index 76be33d..942c3de 100644
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..8634c53 100644
+index 9c018bc..52af55f 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -21,8 +21,19 @@ $end_info$
@@ -220,7 +355,7 @@ index 9c018bc..8634c53 100644
  
  #include <malloc.h>
  #include <mutex>
-@@ -72,6 +83,154 @@ namespace FEX::HLE {
+@@ -72,6 +83,299 @@ namespace FEX::HLE {
  
  static thread_local FEX::HLE::ThreadStateObject* ThreadObject {};
  
@@ -257,7 +392,7 @@ index 9c018bc..8634c53 100644
 +  bool Log {};
 +  std::atomic<int> Logged {};
 +  // The library's switches to the ordered variants: of the function a host pc lies in, and of all functions
-+  void (*EscalateFn)(uint64_t PC) {};
++  const char* (*EscalateFn)(uint64_t PC) {}; // the name of the function switched, or null
 +  void (*OrderAllFn)() {};
 +  std::atomic<bool> OrderedAll {};
 +
@@ -360,9 +495,154 @@ index 9c018bc..8634c53 100644
 +  return PC >= AOT::CodeStart.load(std::memory_order_relaxed) && PC < AOT::CodeEnd.load(std::memory_order_relaxed);
 +}
 +
++// A plain access of translated code met a page another thread writes. Like FEX's escalation of a guest
++// instruction, only this access becomes ordered: the instruction is replaced by a branch to a stub that performs it
++// through the ordered view (its base register with bit 38 set: plain view | OrderedBit) between barriers, `dmb ishld`
++// after a load and `dmb ish` before a store (x86 order: loads acquire, stores release), and branches back. Host
++// addresses (bit 38 already set: stack objects kept in host memory) take the instruction unchanged.
++// Returns false when the instruction is not one it can patch (the caller switches the whole function instead).
++namespace AOT {
++  constexpr uint32_t DmbIshld = 0xD50339BF, DmbIsh = 0xD5033BBF;
++  uint32_t* StubNext {};
++  uint32_t* StubEnd {};
++  std::atomic<bool> PatchLock {};
++  std::atomic<uint64_t> Patched {};
++
++  uint32_t Branch(const void* From, const void* To) {
++    const int64_t Off = reinterpret_cast<const uint8_t*>(To) - reinterpret_cast<const uint8_t*>(From);
++    return 0x14000000 | ((Off >> 2) & 0x3FFFFFF);
++  }
++
++  enum class PatchResult { Done, Busy, Impossible };
++
++  PatchResult Patch(uint64_t PC, uint32_t Insn) {
++    // Loads and stores with a base register: unsigned offset, register offset, unscaled, pre/post index, pairs
++    const bool RegOffset = (Insn & 0x3b200c00) == 0x38200800;
++    const bool Single = (Insn & 0x3b000000) == 0x39000000 || RegOffset || (Insn & 0x3b200c00) == 0x38000000 ||
++                        (Insn & 0x3b200400) == 0x38000400;
++    const bool Pair = (Insn & 0x3a000000) == 0x28000000;
++    if (!Single && !Pair) {
++      return PatchResult::Impossible;
++    }
++    const bool Vec = Insn & (1u << 26);
++    const uint32_t Rn = (Insn >> 5) & 31, Rt = Insn & 31, Rt2 = (Insn >> 10) & 31, Rm = (Insn >> 16) & 31;
++    if (Rn == 31) {
++      return PatchResult::Impossible; // sp: the host stack
++    }
++    // A 64-bit offset register may hold the address while the base holds the view (option LSL/UXTX or SXTX)
++    const bool WideOffset = RegOffset && ((Insn >> 13) & 3) == 3 && Rm != 31;
++    bool Load;
++    if (Pair || Vec) {
++      Load = Insn & (1u << 22);
++    } else {
++      Load = ((Insn >> 22) & 3) != 0;
++    }
++    const bool BaseIsData = !Vec && (Rt == Rn || (Pair && Rt2 == Rn));
++    const bool OffsetIsData = WideOffset && !Vec && Rt == Rm;
++    if (!Load && (BaseIsData || OffsetIsData)) {
++      return PatchResult::Impossible; // would store the changed base
++    }
++    // The base stays as it was unless the load overwrote it
++    const bool Restore = !(Load && BaseIsData);
++    const uint32_t Orr = 0xB25A0000 | (Rn << 5) | Rn;
++    const uint32_t And = 0x9259F800 | (Rn << 5) | Rn;
++    const uint32_t Nop = 0xD503201F;
++    // tbnz xR, #38, to word Target of the stub (from word At)
++    auto Tbnz = [](uint32_t R, int At, int Target) { return 0xB7300000 | (uint32_t((Target - At) & 0x3FFF) << 5) | R; };
++
++    bool Expected = false;
++    if (!PatchLock.compare_exchange_strong(Expected, true)) {
++      return PatchResult::Busy; // another thread is patching: complete this access only
++    }
++    auto* Site = reinterpret_cast<uint32_t*>(PC);
++    PatchResult Result = PatchResult::Impossible;
++    if (__atomic_load_n(Site, __ATOMIC_RELAXED) == Insn) {
++      constexpr int Words = 10;
++      if (!StubNext || StubEnd - StubNext < Words) {
++        PatchLock.store(false);
++        return PatchResult::Impossible; // no (more) room for stubs
++      }
++      uint32_t* S = StubNext;
++      const void* Back = Site + 1;
++      // A host address (bit 38 set in the base or in a 64-bit offset register) takes the instruction unchanged
++      int K = 0;
++      if (Load) {
++        S[K++] = Tbnz(Rn, 0, 7);
++        S[K++] = WideOffset ? Tbnz(Rm, 1, 7) : Nop;
++        S[K++] = Orr;
++        S[K++] = Insn;
++        S[K++] = Restore ? And : Nop;
++        S[K++] = Branch(&S[5], &S[8]);
++        S[K++] = Nop;
++        S[K++] = Insn; // 7
++        S[K++] = DmbIshld; // 8
++        S[K++] = Branch(&S[9], Back);
++      } else {
++        S[K++] = DmbIsh;
++        S[K++] = Tbnz(Rn, 1, 8);
++        S[K++] = WideOffset ? Tbnz(Rm, 2, 8) : Nop;
++        S[K++] = Orr;
++        S[K++] = Insn;
++        S[K++] = And;
++        S[K++] = Branch(&S[6], Back);
++        S[K++] = Nop;
++        S[K++] = Insn; // 8
++        S[K++] = Branch(&S[9], Back);
++      }
++      __builtin___clear_cache(reinterpret_cast<char*>(S), reinterpret_cast<char*>(S + Words));
++      StubNext += Words;
++      // The library's code page writable for the one word (a private mapping: copy on write)
++      const uint64_t Page = PC & ~4095ULL;
++      if (::mprotect(reinterpret_cast<void*>(Page), 4096, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
++        __atomic_store_n(Site, Branch(Site, S), __ATOMIC_RELEASE);
++        __builtin___clear_cache(reinterpret_cast<char*>(Site), reinterpret_cast<char*>(Site + 1));
++        ::mprotect(reinterpret_cast<void*>(Page), 4096, PROT_READ | PROT_EXEC);
++        Result = PatchResult::Done;
++        Patched.fetch_add(1, std::memory_order_relaxed);
++      }
++    } else {
++      Result = PatchResult::Done; // patched meanwhile
++    }
++    PatchLock.store(false);
++    return Result;
++  }
++} // namespace AOT
++
++bool AOTPatch(uint64_t PC, uint32_t Insn) {
++  // Busy: this access is completed in the handler, the next fault patches
++  return AOT::Patch(PC, Insn) != AOT::PatchResult::Impossible;
++}
++
++namespace AOT {
++  // Room for stubs within branch range (+-128 MiB) of the library's code: 1 MiB, 32,768 stubs
++  void ReserveStubs() {
++    constexpr size_t Size = 1 << 20;
++    const uint64_t Start = CodeStart.load(), End = CodeEnd.load();
++    for (uint64_t Want : {Start - (2ULL << 20), End + (4ULL << 20), Start - (16ULL << 20), End + (32ULL << 20)}) {
++      void* P = ::mmap(reinterpret_cast<void*>(Want & ~0xFFFFFULL), Size, PROT_READ | PROT_WRITE | PROT_EXEC,
++                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++      if (P == MAP_FAILED) {
++        continue;
++      }
++      // library code and stubs together within 120 MiB: every branch between them reaches
++      const uint64_t A = reinterpret_cast<uint64_t>(P);
++      if (std::max(A + Size, End) - std::min(A, Start) < (120ULL << 20)) {
++        StubNext = static_cast<uint32_t*>(P);
++        StubEnd = StubNext + Size / 4;
++        return;
++      }
++      ::munmap(P, Size);
++    }
++    fprintf(stderr, "tso-arm aot: no room for stubs near the library; accesses to shared memory switch whole functions\n");
++  }
++} // namespace AOT
++
 +void AOTEscalate(uint64_t PC) {
 +  if (AOT::EscalateFn) {
-+    AOT::EscalateFn(PC);
++    const char* Name = AOT::EscalateFn(PC);
++    if (Name && AOT::Log) {
++      fprintf(stderr, "tso-arm aot: %s runs ordered from its next call on\n", Name);
++    }
 +  }
 +}
 +
@@ -375,7 +655,7 @@ index 9c018bc..8634c53 100644
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +333,76 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,6 +478,77 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  
@@ -418,7 +698,8 @@ index 9c018bc..8634c53 100644
 +      &F);
 +    AOT::CodeStart = F.Start;
 +    AOT::CodeEnd = F.End;
-+    AOT::EscalateFn = reinterpret_cast<void (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
++    AOT::ReserveStubs();
++    AOT::EscalateFn = reinterpret_cast<const char* (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
 +    AOT::OrderAllFn = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_all"));
 +    // TSO_AOT_ORDERED=1: every translated function ordered from the start (x86 order without the page protocol);
 +    // the protocol's fallback to full ordering does the same
@@ -453,7 +734,7 @@ index 9c018bc..8634c53 100644
    // Bits in a SHA256 sum are already randomly distributed, so truncation yields a suitable hash function
    struct TruncatingSHA256Hash {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.h b/Source/Tools/LinuxEmulation/Thunks.h
-index 16a89ce..f1cff7c 100644
+index 16a89ce..22405b3 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.h
 +++ b/Source/Tools/LinuxEmulation/Thunks.h
 @@ -7,6 +7,10 @@
@@ -467,7 +748,7 @@ index 16a89ce..f1cff7c 100644
  namespace FEX::HLE {
  struct ThreadStateObject;
  
-@@ -20,6 +24,17 @@ public:
+@@ -20,6 +24,20 @@ public:
     * @param Definitions A vector of thunk definitions that the frontend controls
     */
    virtual void AppendThunkDefinitions(std::span<const FEXCore::IR::ThunkDefinition> Definitions) = 0;
@@ -482,6 +763,9 @@ index 16a89ce..f1cff7c 100644
 +bool IsAOTCode(uint64_t PC);
 +// tso-arm: the translated function at host PC met shared memory: it runs its ordered variant from its next call on
 +void AOTEscalate(uint64_t PC);
++// tso-arm: the access of translated code at host PC (instruction Insn) met shared memory: it is ordered from now on
++// (patched to a stub); false if this instruction cannot be patched
++bool AOTPatch(uint64_t PC, uint32_t Insn);
 +// tso-arm: all translated functions ordered (the page protocol fell back to full ordering)
 +void AOTOrderAll();
  } // namespace FEX::HLE
