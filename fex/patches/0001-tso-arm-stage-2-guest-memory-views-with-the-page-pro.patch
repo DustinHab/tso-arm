@@ -1,38 +1,38 @@
-From 7405c60b2c21f09d1aaf4e806ab9f3ae00405deb Mon Sep 17 00:00:00 2001
+From 3691e881a10d42ea663362ac738781c6aa1791e0 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
 
 ---
- FEXCore/Source/CMakeLists.txt                 |   1 +
- FEXCore/Source/Interface/Context/Context.h    |  16 +
- .../Core/ArchHelpers/Arm64Emitter.cpp         |  15 +-
- .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
- FEXCore/Source/Interface/Core/Core.cpp        |  97 +-
- FEXCore/Source/Interface/Core/JIT/JITClass.h  |   2 +
- .../Source/Interface/Core/JIT/MemoryOps.cpp   | 146 ++-
- .../Interface/Core/OpcodeDispatcher.cpp       |   8 +-
- .../Source/Interface/Core/OpcodeDispatcher.h  |  62 +-
- FEXCore/Source/Interface/IR/IR.json           |  18 +-
- FEXCore/Source/Interface/IR/PassManager.cpp   |   6 +
- FEXCore/Source/Interface/IR/Passes.h          |   4 +
- .../Interface/IR/Passes/GuestViewPass.cpp     | 304 ++++++
- .../IR/Passes/RegisterAllocationPass.cpp      |  10 +-
- FEXCore/include/FEXCore/Core/Context.h        |  21 +
- FEXCore/include/FEXCore/Core/CoreState.h      |   3 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |  94 ++
- Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   5 +
- Source/Tools/LinuxEmulation/CMakeLists.txt    |   2 +
- .../LinuxSyscalls/SignalDelegator.cpp         |  10 +
- .../LinuxSyscalls/Syscalls/Memory.cpp         |   9 +
- .../LinuxSyscalls/Syscalls/Thread.cpp         |   8 +
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 172 +++-
- .../LinuxSyscalls/TSOAccess.cpp               | 422 ++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 927 ++++++++++++++++++
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 125 +++
- .../LinuxSyscalls/ThreadManager.cpp           |  14 +
- .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
- 28 files changed, 2480 insertions(+), 29 deletions(-)
+ FEXCore/Source/CMakeLists.txt                 |    1 +
+ FEXCore/Source/Interface/Context/Context.h    |   16 +
+ .../Core/ArchHelpers/Arm64Emitter.cpp         |   15 +-
+ .../Interface/Core/ArchHelpers/Arm64Emitter.h |    3 +
+ FEXCore/Source/Interface/Core/Core.cpp        |   97 +-
+ FEXCore/Source/Interface/Core/JIT/JITClass.h  |    2 +
+ .../Source/Interface/Core/JIT/MemoryOps.cpp   |  146 ++-
+ .../Interface/Core/OpcodeDispatcher.cpp       |    8 +-
+ .../Source/Interface/Core/OpcodeDispatcher.h  |   62 +-
+ FEXCore/Source/Interface/IR/IR.json           |   18 +-
+ FEXCore/Source/Interface/IR/PassManager.cpp   |    6 +
+ FEXCore/Source/Interface/IR/Passes.h          |    4 +
+ .../Interface/IR/Passes/GuestViewPass.cpp     |  304 +++++
+ .../IR/Passes/RegisterAllocationPass.cpp      |   10 +-
+ FEXCore/include/FEXCore/Core/Context.h        |   21 +
+ FEXCore/include/FEXCore/Core/CoreState.h      |    3 +
+ FEXCore/include/FEXCore/Core/TSOViews.h       |   94 ++
+ Source/Tools/FEXInterpreter/ELFCodeLoader.h   |    5 +
+ Source/Tools/LinuxEmulation/CMakeLists.txt    |    2 +
+ .../LinuxSyscalls/SignalDelegator.cpp         |   10 +
+ .../LinuxSyscalls/Syscalls/Memory.cpp         |    9 +
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |    8 +
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  175 ++-
+ .../LinuxSyscalls/TSOAccess.cpp               |  422 +++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1036 +++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  145 +++
+ .../LinuxSyscalls/ThreadManager.cpp           |   18 +
+ .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |    5 +
+ 28 files changed, 2616 insertions(+), 29 deletions(-)
  create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
  create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -1429,7 +1429,7 @@ index 4ea460a..76c7e6b 100644
      syscall(SYSCALL_DEF(exit_group), status);
      // This will never be reached
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 94bdd37..74a6f1c 100644
+index 94bdd37..41aba2d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -12,6 +12,7 @@ $end_info$
@@ -1483,7 +1483,7 @@ index 94bdd37..74a6f1c 100644
  // Handles segfaults from:
  // - call-ret shadow stack overflow
  // - guest-side self-modifying code (SMC)
-@@ -57,6 +87,115 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -57,6 +87,118 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      return true;
    }
  
@@ -1555,6 +1555,9 @@ index 94bdd37..74a6f1c 100644
 +      // TSO_VIEWS_DEFER=0 invalidates at the first fault.
 +      static const bool Defer = !(getenv("TSO_VIEWS_DEFER") && getenv("TSO_VIEWS_DEFER")[0] == '0');
 +      const bool New = CTX->AddTSOEscalation(EscStart, EscEnd);
++      if (New) {
++        Views->NoteEscalation(EscStart, EscEnd);
++      }
 +      const bool Refresh = !New || !Defer || FEXCore::TSOViews::FallbackActive.load();
 +      if (Refresh) {
 +        _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart);
@@ -1599,7 +1602,7 @@ index 94bdd37..74a6f1c 100644
    {
      // Can't use the deferred signal lock in the SIGSEGV handler.
      auto lk = FEXCore::MaskSignalsAndLockMutex<std::shared_lock>(_SyscallHandler->VMATracking.Mutex);
-@@ -326,6 +465,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -326,6 +468,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
          return reinterpret_cast<void*>(Result);
        }
        LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
@@ -1611,7 +1614,7 @@ index 94bdd37..74a6f1c 100644
      } else {
        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
        if (Result == ~0ULL) {
-@@ -366,7 +510,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -366,7 +513,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
      // To be more optimal the frontend should provide this code with a valid Thread object earlier.
      auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
  
@@ -1625,7 +1628,7 @@ index 94bdd37..74a6f1c 100644
        Result = Get32BitAllocator()->Munmap(addr, length);
        if (FEX::HLE::HasSyscallError(Result)) {
          return Result;
-@@ -396,7 +545,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -396,7 +548,13 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -1640,7 +1643,7 @@ index 94bdd37..74a6f1c 100644
        Result = reinterpret_cast<uint64_t>(::mremap(old_address, old_size, new_size, flags, new_address));
        if (Result == -1) {
          return -errno;
-@@ -473,9 +628,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+@@ -473,9 +631,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -2090,10 +2093,10 @@ index 0000000..277cd3f
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 new file mode 100644
-index 0000000..40ed54d
+index 0000000..8f4caee
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,1036 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -2116,7 +2119,10 @@ index 0000000..40ed54d
 +
 +#include "LinuxSyscalls/TSOViews.h"
 +
++#include <FEXCore/Config/Config.h>
++#include <FEXCore/Core/Context.h>
 +#include <FEXCore/Utils/LogManager.h>
++#include <sys/stat.h>
 +
 +#include <algorithm>
 +#include <cerrno>
@@ -2186,6 +2192,7 @@ index 0000000..40ed54d
 +    uint64_t Claims, Shares, Upgrades, Lazy, Escalations, Stale, Emulated, Repeated, BoundaryExits, Collapsed;
 +  } Count;
 +  bool PrintStats;
++  uint64_t FallbackAt; // nanoseconds from the start to the fallback
 +  void DumpStats() {
 +    fprintf(stderr,
 +            "tso-arm: claims %lu, shares %lu, upgrades %lu, lazy %lu, escalations %lu, stale %lu, completed in the handler %lu, "
@@ -2194,9 +2201,12 @@ index 0000000..40ed54d
 +            (unsigned long)Count.Escalations, (unsigned long)Count.Stale, (unsigned long)Count.Emulated, (unsigned long)Count.Repeated,
 +            (unsigned long)Count.BoundaryExits, (unsigned long)Count.Collapsed);
 +    const auto& S = FEXCore::TSOViews::Spent;
-+    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)%s\n", (unsigned long)S.Faults,
-+            S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9,
-+            FEXCore::TSOViews::FallbackActive.load() ? ", fell back to full ordering" : "");
++    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)", (unsigned long)S.Faults,
++            S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9);
++    if (FEXCore::TSOViews::FallbackActive.load()) {
++      fprintf(stderr, ", fell back to full ordering after %.3f s", FallbackAt / 1e9);
++    }
++    fprintf(stderr, "\n");
 +  }
 +} // namespace
 +
@@ -2265,6 +2275,12 @@ index 0000000..40ed54d
 +  if (const char* B = getenv("TSO_VIEWS_BUDGET")) {
 +    Budget = strtoull(B, nullptr, 10);
 +  }
++  if (const char* W = getenv("TSO_VIEWS_WARMUP")) {
++    WarmupNs = strtoull(W, nullptr, 10) * 1'000'000ULL; // milliseconds
++  }
++  if (const char* W = getenv("TSO_VIEWS_WINDOW")) {
++    WindowSize = std::max<uint64_t>(strtoull(W, nullptr, 10), 1);
++  }
 +
 +  LogMan::Msg::IFmt("tso-arm: views on, window {:#x}, ordered views at plain view | {:#x}, {} thread slots{}", Window, OrderedBit,
 +                    Usable, Stage1() ? ", stage 1 (no page protocol)" : "");
@@ -2291,6 +2307,100 @@ index 0000000..40ed54d
 +    PrintStats = false;
 +    DumpStats();
 +  }
++  if (auto* M = Get()) {
++    M->SaveProfile();
++  }
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Profile
++
++void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
++  std::lock_guard lk(Mutex);
++  if (ProfileLoaded) {
++    return;
++  }
++  ProfileLoaded = true;
++  const char* Env = getenv("TSO_VIEWS_PROFILE");
++  if (Env && !strcmp(Env, "none")) {
++    return;
++  }
++  if (Env && Env[0]) {
++    ProfilePath = Env;
++  } else {
++    // Bound to the program file: a rebuilt program gets a new profile
++    auto Program = FEXCore::Config::Get(FEXCore::Config::CONFIG_APP_FILENAME);
++    const char* Home = getenv("HOME");
++    struct stat St {};
++    if (!Program || !Home || stat(Program.value()->c_str(), &St) != 0) {
++      return;
++    }
++    const std::string Path = Program.value()->c_str();
++    uint64_t H = 1469598103934665603ULL;
++    auto Mix = [&H](const void* P, size_t N) {
++      for (size_t i = 0; i < N; ++i) {
++        H = (H ^ static_cast<const uint8_t*>(P)[i]) * 1099511628211ULL;
++      }
++    };
++    Mix(Path.data(), Path.size());
++    Mix(&St.st_size, sizeof(St.st_size));
++    Mix(&St.st_mtim, sizeof(St.st_mtim));
++    const std::string Dir = std::string(Home) + "/.cache/tso-arm";
++    mkdir((std::string(Home) + "/.cache").c_str(), 0755);
++    mkdir(Dir.c_str(), 0755);
++    char Name[64];
++    snprintf(Name, sizeof(Name), "-%016lx.prof", (unsigned long)H);
++    ProfilePath = Dir + "/" + Path.substr(Path.find_last_of('/') + 1) + Name;
++  }
++
++  FILE* F = fopen(ProfilePath.c_str(), "r");
++  if (!F) {
++    return;
++  }
++  char Line[128];
++  bool Fall = false;
++  while (fgets(Line, sizeof(Line), F)) {
++    unsigned long S, E;
++    if (sscanf(Line, "esc %lx %lx", &S, &E) == 2 && S < E) {
++      Escalations.emplace_back(S, E);
++      CTX->AddTSOEscalation(S, E);
++    } else if (!strncmp(Line, "fallback", 8)) {
++      Fall = true;
++    }
++  }
++  fclose(F);
++  VLOG("tso-arm: profile %s: %zu escalated ranges%s\n", ProfilePath.c_str(), Escalations.size(), Fall ? ", fallback" : "");
++  if (Fall && Budget) {
++    // Nothing is translated yet: no code to throw away
++    EnterFallback(0, false);
++  }
++}
++
++void TSOViewMemory::NoteEscalation(uint64_t Start, uint64_t End) {
++  std::lock_guard lk(Mutex);
++  Escalations.emplace_back(Start, End);
++  ProfileChanged = true;
++}
++
++void TSOViewMemory::SaveProfile() {
++  std::lock_guard lk(Mutex);
++  if (ProfilePath.empty() || !ProfileChanged) {
++    return;
++  }
++  const std::string Tmp = ProfilePath + ".tmp";
++  FILE* F = fopen(Tmp.c_str(), "w");
++  if (!F) {
++    return;
++  }
++  if (FallbackActive.load()) {
++    fprintf(F, "fallback\n");
++  }
++  for (auto [S, E] : Escalations) {
++    fprintf(F, "esc %lx %lx\n", (unsigned long)S, (unsigned long)E);
++  }
++  fclose(F);
++  rename(Tmp.c_str(), ProfilePath.c_str());
++  ProfileChanged = false;
 +}
 +
 +uint64_t TSOViewMemory::ViewBase(int Slot, bool Ordered) {
@@ -2831,11 +2941,12 @@ index 0000000..40ed54d
 +// ---------------------------------------------------------------------------------------------------------------
 +// Faults
 +
-+void TSOViewMemory::EnterFallback(uint64_t Elapsed) {
++void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
 +  // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
 +  // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
 +  // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
 +  LogMan::Msg::IFmt("tso-arm: {} protocol faults in {:.2f} s, falling back to full ordering", FaultsSeen, Elapsed / 1e9);
++  FallbackAt = Elapsed;
 +  for (auto& [Start, R] : Ranges) {
 +    if (Start >= Window) {
 +      continue;
@@ -2846,7 +2957,8 @@ index 0000000..40ed54d
 +    Apply(Start, R.End);
 +  }
 +  FallbackActive.store(true, std::memory_order_release);
-+  FallbackRequest.store(true, std::memory_order_release);
++  FallbackRequest.store(DropCode, std::memory_order_release);
++  ProfileChanged = true;
 +}
 +
 +bool TSOViewMemory::TakeFallbackRequest() {
@@ -2978,10 +3090,10 @@ index 0000000..40ed54d
 +  // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
 +  // faults while a program starts up and its threads first touch their data.
 +  ++FaultsSeen;
-+  if (Budget && !FallbackActive.load(std::memory_order_relaxed) && FaultsSeen - WindowFaults >= 1000) {
++  if (Budget && !FallbackActive.load(std::memory_order_relaxed) && FaultsSeen - WindowFaults >= WindowSize) {
 +    const uint64_t Now = Nanos();
 +    const uint64_t Span = Now - WindowStartNs;
-+    const bool Over = Now - StartNs > 300'000'000ULL && double(FaultsSeen - WindowFaults) * 1e9 / double(Span) > double(Budget);
++    const bool Over = Now - StartNs > WarmupNs && double(FaultsSeen - WindowFaults) * 1e9 / double(Span) > double(Budget);
 +    WindowFaults = FaultsSeen;
 +    WindowStartNs = Now;
 +    if (Over) {
@@ -3023,10 +3135,10 @@ index 0000000..40ed54d
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 new file mode 100644
-index 0000000..be89c18
+index 0000000..8fe0582
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,145 @@
 +// SPDX-License-Identifier: MIT
 +// tso-arm: guest memory as shared memory, mapped again in an ordered view and in one plain view per thread, with a
 +// page protocol that leaves accesses to memory only one thread uses unordered.
@@ -3037,10 +3149,16 @@ index 0000000..be89c18
 +#include <cstdint>
 +#include <map>
 +#include <mutex>
++#include <string>
 +#include <sys/types.h>
++#include <utility>
++#include <vector>
 +
 +namespace FEXCore::Core {
 +struct InternalThreadState;
++}
++namespace FEXCore::Context {
++class Context;
 +}
 +
 +namespace FEX::HLE {
@@ -3078,8 +3196,15 @@ index 0000000..be89c18
 +  uint64_t Transitions() const {
 +    return Stats.Transitions;
 +  }
-+  // Counters to stderr if TSO_VIEWS_STATS is set; called on exit_group, which leaves without atexit handlers
++  // Counters to stderr if TSO_VIEWS_STATS is set, and the profile written; called on exit_group, which leaves
++  // without atexit handlers
 +  static void ExitStats();
++
++  // Profile of the program: the escalated code ranges and whether it fell back, kept between runs
++  // (TSO_VIEWS_PROFILE: a file, or "none"; default ~/.cache/tso-arm/<program>-<hash of path, size, mtime>).
++  // Loading it only saves work: an escalation too many costs ordering, a missing one is learned again.
++  void LoadProfile(FEXCore::Context::Context* CTX);
++  void NoteEscalation(uint64_t Start, uint64_t End);
 +  // Logs a failed memory call (TSO_VIEWS_LOG) and passes the result through
 +  static int64_t Result(const char* What, int64_t R);
 +  // Performs the faulting load or store Insn at the signal context's pc, ordered, and steps over it
@@ -3128,11 +3253,18 @@ index 0000000..be89c18
 +  // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
 +  void CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask);
 +  // Process-wide fallback to full ordering (FEXCore::TSOViews::FallbackActive), under Mutex
-+  void EnterFallback(uint64_t Elapsed);
++  void EnterFallback(uint64_t Elapsed, bool DropCode = true);
++  void SaveProfile();
++  std::string ProfilePath;
++  std::vector<std::pair<uint64_t, uint64_t>> Escalations; // recorded and loaded, for the profile
++  bool ProfileLoaded {};
++  bool ProfileChanged {};
 +  uint64_t FaultsSeen {};
 +  uint64_t StartNs {};
 +  uint64_t WindowFaults {};
 +  uint64_t WindowStartNs {};
++  uint64_t WarmupNs {300'000'000ULL}; // TSO_VIEWS_WARMUP (ms): no fallback before
++  uint64_t WindowSize {1000};         // TSO_VIEWS_WINDOW: faults per rate measurement
 +  uint64_t Budget {};
 +  std::atomic<bool> FallbackRequest {false};
 +
@@ -3153,7 +3285,7 @@ index 0000000..be89c18
 +};
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-index 69e10b3..1c8cda8 100644
+index 69e10b3..01b077e 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 @@ -5,6 +5,7 @@
@@ -3164,7 +3296,7 @@ index 69e10b3..1c8cda8 100644
  
  #include <FEXHeaderUtils/Syscalls.h>
  #include <FEXCore/Utils/Allocator.h>
-@@ -181,6 +182,14 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+@@ -181,6 +182,18 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
    ThreadStateObject->Thread = CTX->CreateThread(NewThreadState);
    auto Frame = ThreadStateObject->Thread->CurrentFrame;
  
@@ -3174,12 +3306,16 @@ index 69e10b3..1c8cda8 100644
 +    if (!Frame->TSOViewBase && !FEXCore::TSOViews::IdentityBase()) {
 +      ERROR_AND_DIE_FMT("tso-arm: no free view slot for a new thread");
 +    }
++    // Before the first thread runs anything: what earlier runs of this program learned
++    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
++      Views->LoadProfile(CTX);
++    }
 +  }
 +
    // Allocate the call-ret stack with guard pages on both sides
    auto AllocBase =
      reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CALLRET_STACK_ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-@@ -292,6 +301,11 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
+@@ -292,6 +305,11 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
      FEXCore::Allocator::UninstallTLSData(Thread->Thread);
    }
  

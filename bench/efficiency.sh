@@ -3,7 +3,7 @@
 #   efficiency = native wall time / wall time of the x86-64 build under the configuration
 # Same inputs, same thread count, fixed clock. Every output is checked against the x86-64 reference checksum.
 # Raw lines: out/efficiency_runs.txt; table for the README: out/efficiency.md
-#   bench/efficiency.sh [workload ...]      (ROUNDS=3, KHZ=1800000, CONFIGS="native off default full protocol")
+#   bench/efficiency.sh [workload ...]      (ROUNDS=3, KHZ=1800000, CONFIGS="native off default full protocol-cold protocol")
 cd "$(dirname "$0")/.."
 FEX=$HOME/opt/fex/bin/FEX
 FEXV=$HOME/opt/fex-views/bin/FEX
@@ -15,7 +15,7 @@ KHZ=${KHZ:-1800000}
 raw=out/efficiency_runs.txt
 mkdir -p out
 WORKLOADS=${*:-zstd pigz xz}
-CONFIGS=${CONFIGS:-native off default full protocol}
+CONFIGS=${CONFIGS:-native off default full protocol-cold protocol}
 stamp=$(date +%Y-%m-%dT%H:%M)
 
 args_of() {
@@ -33,7 +33,10 @@ run_config() {
     off) set -- env FEX_TSOENABLED=0 $FEX $X/$w ;;
     default) set -- $FEX $X/$w ;;
     full) set -- env FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEX $X/$w ;;
+    # with the profile of earlier runs (the first round writes it)
     protocol) set -- env TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
+    # without any profile: everything learned in this run
+    protocol-cold) set -- env TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
     esac
     timeout 600 /usr/bin/time -f '%e %U %S' -o /dev/shm/eff-time "$@" $(args_of $w) >/dev/shm/eff-out 2>/dev/shm/eff-err
     rc=$?
@@ -46,6 +49,8 @@ run_config() {
 }
 
 trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/eff-out /dev/shm/eff-time /dev/shm/eff-err' EXIT
+# Profiles start empty for every measurement
+rm -f $HOME/.cache/tso-arm/*.prof
 sh tools/freq.sh fix $KHZ >/dev/null
 # The test machine has no fan: start every round below COOL degrees (at most two minutes of waiting)
 cooldown() {
@@ -74,8 +79,9 @@ LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" 
   END {
     n = split(cfgs, cf, " ");
     label["native"] = "native Arm"; label["off"] = "FEX, TSO off";
-    label["default"] = "FEX default"; label["full"] = "FEX full TSO"; label["protocol"] = "tso-arm protocol";
-    tso["native"] = "-"; tso["off"] = "no"; tso["default"] = "no"; tso["full"] = "yes"; tso["protocol"] = "yes";
+    label["default"] = "FEX default"; label["full"] = "FEX full TSO";
+    label["protocol-cold"] = "tso-arm, first run"; label["protocol"] = "tso-arm, with profile";
+    tso["native"] = "-"; tso["off"] = "no"; tso["default"] = "no"; tso["full"] = "yes, except stack accesses through RSP"; tso["protocol-cold"] = "yes"; tso["protocol"] = "yes";
     printf "Measured %s, Raspberry Pi 5 at %.1f GHz, 4 threads, best of the rounds, wall time.\n\n", s, khz / 1e6;
     printf "| Configuration | x86 memory order kept |";
     m = 0; for (x in w) names[++m] = x;
