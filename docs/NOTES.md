@@ -509,3 +509,25 @@ change rights by a register write instead of page table updates).
 
 zstd stays at about 0.9 to 1.0 s against 0.72 s with FEX's full TSO; its gap is the ordered stack in the fallback
 (section 12) and its large escalated hot loop.
+
+## 14. Stack pointer as a view address: tried, discarded (2026-11-17)
+
+In xz's hottest block 118 of the 332 view additions were for RSP (section 12). The experiment
+(`fex/experiments/stack-pointer-views.diff`, on top of the patch of this commit) kept RSP's static register as an
+address in the plain view: guest RSP + x24. `SpillStaticRegs`/`FillStaticRegs` and the signal handler's
+`SpillSRA` convert between that and the guest value in the context; the rewriting pass gives every load of RSP a
+guest-value node (`and` with the window mask), maps addresses on it back to the register, and stores RSP +/-
+constant and alignment masks in view form, anything else with the view base added. Correct at once (litmus,
+threads, shared stacks, all workloads), and no faster:
+
+| Instructions (user, all plain, `bench/perf_views.sh`) | FEX without ordering | views | views + RSP as view address |
+|---|---|---|---|
+| xz | 15.89 G | 18.08 G | 18.09 G |
+| pigz | 14.02 G | 16.58 G | 16.80 G |
+
+The additions it saves are mostly outside the hot loops (one per block that uses the stack), and it adds work
+where RSP is used as a value: an `and` for every `lea x(%rsp)`, and a view addition after `add`/`sub` of RSP when
+the flags are live. Not kept.
+
+What remains of the view cost is one addition per basic block and base register; FEX's IR keeps values inside a
+block, so they cannot be shared further without changing its register allocation.

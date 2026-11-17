@@ -1,0 +1,338 @@
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 8b060b1..56d8fb7 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -686,6 +686,14 @@ void Arm64Emitter::FillSpecialRegs(ARMEmitter::Register TmpReg, ARMEmitter::Regi
+   }
+ }
+ 
++bool Arm64Emitter::TSOViewRSP() const {
++#ifdef ARCHITECTURE_arm64ec
++  return false;
++#else
++  return FEXCore::TSOViews::Enabled() && EmitterCTX->Config.Is64BitMode();
++#endif
++}
++
+ void Arm64Emitter::SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOptions Options) {
+ #ifndef VIXL_SIMULATOR
+   if (EmitterCTX->HostFeatures.SupportsAFP) {
+@@ -724,9 +732,17 @@ void Arm64Emitter::SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOp
+ 
+   str(REG_CALLRET_SP, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
+ 
++  // tso-arm: with views the static register of RSP holds the stack pointer as an address in the thread's plain
++  // view (guest RSP + REG_VIEW), so stack accesses need no view arithmetic; the context holds the guest value
++  const bool ViewRSP = TSOViewRSP();
++
+   for (size_t i = 0; i < StaticRegisters.size(); i += 2) {
+     auto Reg1 = StaticRegisters[i];
+     auto Reg2 = StaticRegisters[i + 1];
++    if (ViewRSP && i == X86State::REG_RSP && ((1U << Reg1.Idx()) & Options.GPRSpillMask)) {
++      sub(ARMEmitter::Size::i64Bit, TmpReg, Reg1, REG_VIEW);
++      Reg1 = TmpReg;
++    }
+     if (((1U << Reg1.Idx()) & Options.GPRSpillMask) && ((1U << Reg2.Idx()) & Options.GPRSpillMask)) {
+       stp<ARMEmitter::IndexType::OFFSET>(Reg1.X(), Reg2.X(), STATE.R(), ARRAY_OFFSETOF(FEXCore::Core::CpuStateFrame, State.gregs, i));
+     } else if (((1U << Reg1.Idx()) & Options.GPRSpillMask)) {
+@@ -894,6 +910,11 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
+     }
+   }
+ 
++  // tso-arm: RSP as an address in the plain view (see SpillStaticRegs)
++  if (TSOViewRSP() && ((1U << StaticRegisters[X86State::REG_RSP].Idx()) & Options.GPRFillMask)) {
++    add(ARMEmitter::Size::i64Bit, StaticRegisters[X86State::REG_RSP], StaticRegisters[X86State::REG_RSP], REG_VIEW);
++  }
++
+   // Now handle PF/AF
+   if (Options.NZCV && PFAFFillMask) {
+     LOGMAN_THROW_A_FMT(PFAFFillMask == PFAFMask, "PF/AF not filled together");
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+index a65d037..919c6e0 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+@@ -170,6 +170,8 @@ protected:
+ 
+   void SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOptions Options);
+   void FillStaticRegs(FillStaticRegOptions Options);
++  // tso-arm: the static register of RSP holds the guest stack pointer plus REG_VIEW (views on, 64-bit guest)
++  bool TSOViewRSP() const;
+ 
+ 
+   void SpillStaticRegs(ARMEmitter::Register TmpReg) {
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 360d605..401a90e 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1617,8 +1617,7 @@ private:
+   [[nodiscard]]
+   static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
+     // tso-arm: with views an escalated stack access must be ordered too; unescalated ones are plain anyway
+-    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP &&
+-           (!FEXCore::TSOViews::Enabled() || FEXCore::TSOViews::PlainStackInFallback());
++    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP && !FEXCore::TSOViews::Enabled();
+   }
+ 
+   AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
+@@ -2742,7 +2741,7 @@ private:
+   }
+ 
+   Ref Pop(IR::OpSize Size, Ref& SP_RMW) {
+-    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
++    if (FEXCore::TSOViews::Enabled()) {
+       // the pointer moves by a new node instead of in place
+       Ref Value = _LoadMemGPRAutoTSO(Size, StackSlot(SP_RMW, 0), Size);
+       SP_RMW = Add(GetGPROpSize(), SP_RMW, uint64_t(IR::OpSizeToSize(Size)));
+@@ -2754,7 +2753,7 @@ private:
+   }
+ 
+   Ref Pop(IR::OpSize Size) {
+-    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
++    if (FEXCore::TSOViews::Enabled()) {
+       Ref OldSP = LoadGPRRegister(X86State::REG_RSP);
+       Ref Value = _LoadMemGPRAutoTSO(Size, StackSlot(OldSP, 0), Size);
+       StoreGPRRegister(X86State::REG_RSP, Add(GetGPROpSize(), OldSP, uint64_t(IR::OpSizeToSize(Size))));
+@@ -2779,7 +2778,7 @@ private:
+ 
+   // Stores Value below OldSP and returns the new stack pointer
+   Ref PushTo(Ref OldSP, IR::OpSize Size, Ref Value) {
+-    if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::PlainStackInFallback()) {
++    if (FEXCore::TSOViews::Enabled()) {
+       // the store comes first, so push rsp stores the old value
+       const auto S = int64_t(IR::OpSizeToSize(Size));
+       _StoreMemAutoTSO(RegClass::GPR, Size, StackSlot(OldSP, -S), Value, Size);
+diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+index dd0ddac..fbb61be 100644
+--- a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+@@ -21,6 +21,7 @@ $end_info$
+ #include "Interface/IR/RegisterAllocationData.h"
+ 
+ #include <FEXCore/Core/TSOViews.h>
++#include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/IR/IR.h>
+ #include <FEXCore/Utils/Profiler.h>
+ #include <FEXCore/fextl/unordered_map.h>
+@@ -82,14 +83,19 @@ namespace {
+   void GuestViewPass::Run(IREmitter* IREmit) {
+     FEXCORE_PROFILE_SCOPED("PassManager::GuestView");
+ 
+-    // After the fallback, translated code addresses guest memory directly
+-    if (FEXCore::TSOViews::Fallback()) {
+-      return;
+-    }
++    // After the fallback, translated code addresses guest memory directly, except through RSP (below)
++    const bool Fallback = FEXCore::TSOViews::Fallback();
+     auto CurrentIR = IREmit->ViewIR();
+     const uint64_t BlockRIP = CurrentIR.GetHeader()->OriginalRIP;
+     const bool Protocol = !FEXCore::TSOViews::Stage1();
+ 
++    // The static register of RSP holds the stack pointer as an address in the thread's plain view (guest RSP + x24,
++    // Arm64Emitter::SpillStaticRegs/FillStaticRegs). Each load of it gets a guest-value node (the view base masked
++    // off) that replaces it in every use; addresses built on that node are mapped back to the register itself, so
++    // stack accesses need no view arithmetic. Writes of RSP store the view address again.
++    fextl::unordered_map<Ref, Ref> RSPGuest;   // guest-value node -> loaded register
++    fextl::unordered_map<Ref, Ref> RSPOrdered; // loaded register -> its address in the ordered view
++
+     // Within a block, accesses through the same address share one view address. The dispatcher loads a guest
+     // register afresh for every access (a new LoadRegister node each time), so addresses that are plain guest
+     // registers are keyed by the register. A write of the register as itself plus a constant (pointer increments)
+@@ -124,10 +130,33 @@ namespace {
+       Ordered.clear();
+       RegPlain.clear();
+       RegOrdered.clear();
++      RSPGuest.clear();
++      RSPOrdered.clear();
+       bool Escalated = false;
+ 
++      // Ordered-view address of a loaded RSP register, one per load
++      auto OrderedRSP = [&](Ref Reg, Ref Before) {
++        if (auto It = RSPOrdered.find(Reg); It != RSPOrdered.end()) {
++          return It->second;
++        }
++        IREmit->SetWriteCursorBefore(Before);
++        Ref V = IREmit->_Or(OpSize::i64Bit, Reg, IREmit->_InlineConstant(FEXCore::TSOViews::OrderedBit));
++        RSPOrdered[Reg] = V;
++        return V;
++      };
++
+       for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
+         switch (IROp->Op) {
++        case OP_LOADREGISTER: {
++          const auto Op = IROp->C<IROp_LoadRegister>();
++          if (Op->Class == RegClass::GPR && Op->Reg == X86State::REG_RSP) {
++            IREmit->SetWriteCursor(CodeNode);
++            Ref Guest = IREmit->_And(OpSize::i64Bit, CodeNode, IREmit->_InlineConstant(FEXCore::TSOViews::Window - 1));
++            IREmit->ReplaceUsesWithAfter(CodeNode, Guest, Guest);
++            RSPGuest[Guest] = CodeNode;
++          }
++          continue;
++        }
+         case OP_GUESTOPCODE:
+           // Marks the start of a guest instruction with side effects (every instruction that accesses memory)
+           // The offset is relative to the block entry and negative for instructions before it (a loop head in a
+@@ -139,6 +168,40 @@ namespace {
+           if (R.AsRegClass() != RegClass::GPRFixed) {
+             continue;
+           }
++          if (R.Reg == X86State::REG_RSP) {
++            // RSP gets the view address of the new value: RSP +/- constant and alignment masks stay in the view
++            // (its base is a multiple of the window), anything else gets the view base added
++            Ref Value = CurrentIR.GetNode(IROp->Args[0]);
++            const auto VOp = CurrentIR.GetOp<IROp_Header>(Value);
++            IREmit->SetWriteCursorBefore(CodeNode);
++            Ref ViewValue {};
++            if (auto It = RSPGuest.find(Value); It != RSPGuest.end()) {
++              ViewValue = It->second;
++            } else if ((VOp->Op == OP_ADD || VOp->Op == OP_SUB || VOp->Op == OP_AND) && VOp->Size == OpSize::i64Bit) {
++              auto Src = RSPGuest.find(CurrentIR.GetNode(VOp->Args[0]));
++              int64_t K {};
++              if (Src != RSPGuest.end() && ConstantOf(VOp->Args[1], &K)) {
++                Ref KNode = CurrentIR.GetNode(VOp->Args[1]);
++                if (VOp->Op == OP_ADD) {
++                  ViewValue = IREmit->_Add(OpSize::i64Bit, Src->second, KNode);
++                } else if (VOp->Op == OP_SUB) {
++                  ViewValue = IREmit->_Sub(OpSize::i64Bit, Src->second, KNode);
++                } else if ((uint64_t(K) | (FEXCore::TSOViews::Window - 1)) == ~0ULL) {
++                  ViewValue = IREmit->_And(OpSize::i64Bit, Src->second, KNode);
++                }
++              }
++            }
++            if (!ViewValue) {
++              ViewValue = IREmit->_ViewPlain(Value);
++            }
++            IREmit->ReplaceNodeArgument(CodeNode, 0, ViewValue);
++            if (Value->GetUses() == 0 && !RSPGuest.contains(Value)) {
++              IREmit->Remove(Value);
++            }
++            RegPlain.erase(R.Reg);
++            RegOrdered.erase(R.Reg);
++            continue;
++          }
+           // r = r +/- constant (64-bit): the cached views stay valid at a new distance (both views map every
+           // page of the window, so any distance is fine)
+           bool Kept = false;
+@@ -192,9 +255,36 @@ namespace {
+           continue;
+         }
+ 
++        // Addresses on RSP: the guest-value node itself, or base + index / base + constant on it
++        Ref Addr0 = CurrentIR.GetNode(IROp->Args[Site.Index]);
++        const auto Addr0Op = CurrentIR.GetOp<IROp_Header>(Addr0);
++        Ref RSPDirect {}, RSPBase {};
++        if (auto It = RSPGuest.find(Addr0); It != RSPGuest.end()) {
++          RSPDirect = It->second;
++        } else if ((Addr0Op->Op == OP_ADD || Addr0Op->Op == OP_ADDSHIFT) && Addr0Op->Size == OpSize::i64Bit) {
++          if (auto It = RSPGuest.find(CurrentIR.GetNode(Addr0Op->Args[0])); It != RSPGuest.end()) {
++            RSPBase = It->second;
++          }
++        }
++        // In the fallback only stack accesses go through a view (the ordered one; RSP holds a view address)
++        if (Fallback && !RSPDirect && !RSPBase) {
++          continue;
++        }
++
+         // An escalated instruction orders all its accesses; plain ops get barriers around them
+-        const bool Ordered_ = Site.Ordered || Escalated;
+-        const bool Fenced = Escalated && !Site.Ordered;
++        const bool Ordered_ = Site.Ordered || Escalated || Fallback;
++        const bool Fenced = (Escalated || Fallback) && !Site.Ordered;
++
++        if (RSPDirect) {
++          IREmit->ReplaceNodeArgument(CodeNode, Site.Index, Ordered_ ? OrderedRSP(RSPDirect, CodeNode) : RSPDirect);
++          if (Fenced) {
++            IREmit->SetWriteCursorBefore(CodeNode);
++            IREmit->_Fence(FenceType::LoadStore);
++            IREmit->SetWriteCursor(CodeNode);
++            IREmit->_Fence(FenceType::LoadStore);
++          }
++          continue;
++        }
+ 
+         // LoadMem/StoreMem without an offset carry the view in a flag: the backend addresses [addr, x24] at no cost.
+         if (!Ordered_ && IROp->Op == OP_LOADMEM && IROp->C<IROp_LoadMem>()->Offset.IsInvalid()) {
+@@ -239,17 +329,23 @@ namespace {
+             // the index is added to it as before. The access then costs what it costs without views (instead of
+             // one more addition each time).
+             const auto BaseOp = CurrentIR.GetOp<IROp_Header>(AddrOp->Args[0]);
+-            if (BaseOp->Op == OP_LOADREGISTER && BaseOp->C<IROp_LoadRegister>()->Class == RegClass::GPR) {
+-              const uint32_t BaseReg = BaseOp->C<IROp_LoadRegister>()->Reg;
+-              auto& RegCache = Ordered_ ? RegOrdered : RegPlain;
+-              IREmit->SetWriteCursorBefore(CodeNode);
++            if (RSPBase || (BaseOp->Op == OP_LOADREGISTER && BaseOp->C<IROp_LoadRegister>()->Class == RegClass::GPR)) {
+               Ref BaseView {};
+-              if (auto It = RegCache.find(BaseReg); It != RegCache.end() && It->second.Delta == 0) {
+-                BaseView = It->second.View;
++              if (RSPBase) {
++                // RSP holds its view address already
++                BaseView = Ordered_ ? OrderedRSP(RSPBase, CodeNode) : RSPBase;
++                IREmit->SetWriteCursorBefore(CodeNode);
+               } else {
+-                Ref BaseNode = CurrentIR.GetNode(AddrOp->Args[0]);
+-                BaseView = Ordered_ ? IREmit->_ViewOrdered(BaseNode) : IREmit->_ViewPlain(BaseNode);
+-                RegCache[BaseReg] = {BaseView, 0};
++                const uint32_t BaseReg = BaseOp->C<IROp_LoadRegister>()->Reg;
++                auto& RegCache = Ordered_ ? RegOrdered : RegPlain;
++                IREmit->SetWriteCursorBefore(CodeNode);
++                if (auto It = RegCache.find(BaseReg); It != RegCache.end() && It->second.Delta == 0) {
++                  BaseView = It->second.View;
++                } else {
++                  Ref BaseNode = CurrentIR.GetNode(AddrOp->Args[0]);
++                  BaseView = Ordered_ ? IREmit->_ViewOrdered(BaseNode) : IREmit->_ViewPlain(BaseNode);
++                  RegCache[BaseReg] = {BaseView, 0};
++                }
+               }
+               Ref Second = CurrentIR.GetNode(AddrOp->Args[1]);
+               if (AddrOp->Op == OP_ADD) {
+@@ -294,6 +390,16 @@ namespace {
+           }
+         }
+       }
++
++      // Guest values of RSP nobody uses (it only served as an address), and loads nobody uses at all
++      for (auto [Guest, Reg] : RSPGuest) {
++        if (Guest->GetUses() == 0) {
++          IREmit->Remove(Guest);
++          if (Reg->GetUses() == 0) {
++            IREmit->Remove(Reg);
++          }
++        }
++      }
+     }
+   }
+ } // namespace
+diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
+index a7ac53a..b2878ff 100644
+--- a/FEXCore/include/FEXCore/Core/TSOViews.h
++++ b/FEXCore/include/FEXCore/Core/TSOViews.h
+@@ -69,15 +69,6 @@ inline void BeginCompile() {
+ inline bool Fallback() {
+   return FallbackInCompile;
+ }
+-// TSO_VIEWS_FALLBACK_STACK=plain: in the fallback, stack accesses through RSP stay unordered as in FEX's own full
+-// TSO (it treats the stack as private to its thread). Not sound; for measuring what ordering them costs.
+-inline bool PlainStackInFallback() {
+-  static const bool On = [] {
+-    const char* E = getenv("TSO_VIEWS_FALLBACK_STACK");
+-    return E && E[0] == 'p';
+-  }();
+-  return On && Fallback();
+-}
+ 
+ // Exact instruction starts (full register write-back, carry in ABI form, no merges across instructions), needed for
+ // leaving stale code at any instruction start. TSO_VIEWS_NOEXACT=1 turns them off, for measuring their cost only.
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index da2b971..0c99604 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -115,6 +115,10 @@ void SignalDelegator::SpillSRA(FEXCore::Core::InternalThreadState* Thread, void*
+       continue;
+     }
+     Thread->CurrentFrame->State.gregs[i] = ArchHelpers::Context::GetArmReg(ucontext, SRAIdxMap);
++    // tso-arm: the static register of RSP holds the stack pointer as an address in the thread's plain view
++    if (i == FEXCore::X86State::REG_RSP && TSOViewMemory::Get() && Is64BitMode()) {
++      Thread->CurrentFrame->State.gregs[i] -= Thread->CurrentFrame->TSOViewBase;
++    }
+   }
+ 
+   if (SupportsAVX && SupportsSVE256) {
