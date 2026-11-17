@@ -569,3 +569,83 @@ efficiency table shows the build without ordering at the same 84 % as upstream F
 Assessment: the remaining distance to native is many small costs of translating x86 (its register pressure, its
 partial registers and flags), each worth a percent or less. That is FEX's own long-term work, not something a
 memory-ordering project closes; 90 % of native with correct ordering is out of reach on this path.
+
+## 16. Hot functions translated ahead of time (prototype, 2026-11-17)
+
+Section 15 left the distance to native in the translation itself: a JIT that translates one instruction at a time
+keeps x86's register pressure, flags and partial registers. A compiler that sees whole functions removes them. The
+prototype (`aot/`) translates the hot functions of a program ahead of time into C, compiles them with clang for the
+host, and FEX runs them instead of its own translation; everything else stays with FEX.
+
+Where xz spends its time natively (`bench/func_profile.sh`): match finder (`bt_find_func`, `lzma_mf_bt4_find`,
+`bt_skip_func`, `lzma_mf_bt4_skip`, `move_pos`) 59 %, encoder (`lzma_lzma_optimum_normal`, `get_literal_price`,
+`rc_encode`, `lzma_lzma_encode`, `length`, ...) 40 %. Translating `lzma_lzma_optimum_normal` alone would call back
+into the guest once per input position; the unit is the whole call tree below `lzma_lzma_encode`: 13 functions,
+about 3,700 x86 instructions, 99.3 % of native xz's cycles.
+
+**Translator** (`aot/lift.py`, Capstone for decoding):
+
+- A guest function becomes a C function with the System V convention: the six argument registers are parameters,
+  rax the result, stack arguments are read through a pointer to the caller's outgoing area. Registers are C locals,
+  so callee-saved registers survive calls by construction and clang allocates them to host registers. Calls between
+  translated functions are C calls (clang inlines across them); calls to other code go back into the guest through
+  FEX (`aot.h`, `guest_call`); indirect calls check the translated functions first.
+- Flags are C locals written by every flag-setting instruction; clang drops the unused ones. A condition in the
+  same basic block as its compare is computed from the compared values (`a < b` instead of carry).
+- The stack offset is known at every instruction (data flow over the function). Stack slots reached only as
+  `rsp + constant` become a local array, which clang turns into registers: the spills x86's 16 registers force
+  disappear. They cannot be seen by other threads, so their order does not matter.
+- Stack objects whose address is taken or that are indexed (`lea` of `rsp`, `[rsp + reg*4 + c]`): an escape
+  analysis (forward data flow over registers and stack slots, with a summary per argument register of every
+  translated function, to a fixed point over the call graph) decides where they live. If their addresses provably
+  stay in translated code and out of memory, in a host array (reached as `view + address`); otherwise on a stack
+  of the thread's own for translated code, in guest memory, which the thread allocates itself, 2 MiB aligned, alone
+  in its chunk of the page protocol, so it stays private. (The thread stacks themselves end up shared in xz, next to
+  the pthread structures other threads touch: 297 of the 1,952 instructions the protocol escalates in xz are in
+  `lzma_lzma_optimum_normal`, mostly stack accesses.)
+- Read-only segments: constants are read at translation time, tables indexed by a register are read unordered
+  (immutable data cannot be seen out of order).
+- All other memory is guest memory, in two variants of every function. The plain variant goes through the thread's
+  plain view with volatile accesses: the compiler keeps their program order, and the page protocol orders them
+  against other threads as it does FEX's plain accesses. When one of them meets a shared page, the fault handler
+  completes it with barriers (as for FEX's code) and switches the function to its ordered variant from its next call
+  on: the ordered view with `ldapr`/`stlr` (an unaligned access between full barriers). The protocol's fallback to
+  full ordering switches all functions. Atomics (`xchg`, `lock`) are `__atomic` operations on the ordered view.
+
+**FEX side** (`fex/patches/0002-*`): `TSO_AOT=library` loads a table of guest function, size, FNV-1a hash and host
+entry; each entry is checked against the mapped guest code and becomes a custom IR entry point whose block calls a
+thunk bridge. The bridge runs the host function and performs the return (rax, rsp, the return address); calls from
+host code back into the guest use FEX's thunk callback path.
+
+**xz** (Raspberry Pi 5 at 1.8 GHz, `bench/efficiency.sh`, best of three, wall time):
+
+| Configuration | x86 order kept | xz |
+|---|---|---|
+| FEX, TSO off | no | 79 % |
+| tso-arm, with profile | yes | 70 % |
+| ahead of time, TSO off | no | 90 % |
+| ahead of time, all ordered (`ldapr`/`stlr` throughout, FEX full TSO for the rest) | yes, except RSP | 67 % |
+| ahead of time + tso-arm, with profile | yes | 86 % |
+
+Once the code itself is close to native, ordering is the largest cost left: ordering every access of the translated
+functions takes xz from 90 % to 67 %, the page protocol keeps it at 86 %.
+
+- User-mode cycles of the whole run: native 7.21 billion, translated ahead of time 7.38 billion (97.6 %); per part
+  match finder 4.26 vs 4.30, `lzma_lzma_optimum_normal` 2.46 vs 2.50, `rc_encode` faster than native.
+- The wall-time gap that is left is mostly FEX's fixed cost per process (`bench/startup.sh`: xz on an empty input
+  takes 59 ms under FEX, upstream as well, against 0.8 ms natively; about 30 ms of it is CPU time for translating
+  start-up code). On a run of about a second that is five points of efficiency.
+- With the page protocol and a profile the protocol is almost idle: 115 faults in 5 ms, no escalations in
+  translated code.
+
+**Correctness**: xz's output is byte-identical in every configuration. Litmus tests with the thread functions of
+`litmus/mp.c` translated ahead of time (`litmus/run_aot.sh`, 200,000 iterations): without ordering forbidden
+outcomes show (mp 1; rep 4 and repflag 2 in an earlier run), with everything ordered and with the page protocol none
+in any variant. A spin loop on a shared flag in translated code faults on every read until the function returns
+(the switch to the ordered variant takes effect at the next call); the protocol's guard against fault loops now
+counts only faults that make no progress.
+
+Limits of the prototype: only the instruction forms these functions use; the bound of a jump table is found by
+pattern (an index outside it ends in an abort, not silently); indirect calls are assumed to pass no stack
+arguments; the per-thread stack for translated code (2 MiB, 4 MiB reserved) is not freed when a thread ends; guest
+code changed after loading is not noticed (the hash is checked once).

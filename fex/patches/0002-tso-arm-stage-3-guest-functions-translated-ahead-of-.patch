@@ -1,0 +1,490 @@
+From 01d1f974672a0d48d761c1daab65e7d0c0d33af9 Mon Sep 17 00:00:00 2001
+From: DustinHab <142697073+DustinHab@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 19:28:14 +0100
+Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
+
+---
+ FEXCore/Source/Interface/Context/Context.h    |   1 +
+ FEXCore/Source/Interface/Core/Core.cpp        |  16 ++
+ FEXCore/include/FEXCore/Core/Context.h        |   8 +
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |   3 +
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  13 +
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp |  24 +-
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 229 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.h          |  15 ++
+ 8 files changed, 304 insertions(+), 5 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index dc85492..0e2e8c9 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -238,6 +238,7 @@ public:
+   AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandler Handler, void* Creator = nullptr, void* Data = nullptr);
+ 
+   void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) override;
++  void AddAOTEntrypoint(uintptr_t Entrypoint, uintptr_t Hook, const IR::SHA256Sum& Bridge) override;
+ 
+   void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
+ 
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index a1cddcd..97869df 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -1143,6 +1143,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+   return std::nullopt;
+ }
+ 
++void ContextImpl::AddAOTEntrypoint(uintptr_t Entrypoint, uintptr_t Hook, const IR::SHA256Sum& Bridge) {
++  AddCustomIREntrypoint(
++    Entrypoint,
++    [Hook, Bridge](uintptr_t Entrypoint, FEXCore::IR::IREmitter* emit) {
++      auto IRHeader = emit->_IRHeader(emit->Invalid(), Entrypoint, 0, 0, 0, 0);
++      auto Block = emit->CreateCodeNode(true, 0);
++      IRHeader.first->Blocks = emit->WrapNode(Block);
++      emit->SetCurrentCodeBlock(Block);
++      // The bridge runs the whole function and its return; registers come back from the context after the call
++      emit->_Thunk(emit->Constant(Hook), Bridge);
++      auto NewRIP = emit->_LoadContext(IR::OpSize::i64Bit, IR::RegClass::GPR, offsetof(Core::CPUState, rip));
++      emit->_ExitFunction(IR::OpSize::i64Bit, NewRIP, IR::BranchHint::Return, emit->Invalid(), emit->Invalid());
++    },
++    nullptr, (void*)Hook);
++}
++
+ void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
+   LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
+   LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+index ddec229..ffaac6e 100644
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -182,6 +182,14 @@ public:
+    */
+   FEX_DEFAULT_VISIBILITY virtual void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) = 0;
+ 
++  /**
++   * @brief tso-arm: routes calls of the guest function at Entrypoint to host code translated ahead of time
++   *
++   * The block for Entrypoint calls the thunk Bridge with Hook as its argument. The bridge runs the function and
++   * performs its return: it sets RAX and RSP and leaves the return address in the context's rip.
++   */
++  FEX_DEFAULT_VISIBILITY virtual void AddAOTEntrypoint(uintptr_t Entrypoint, uintptr_t Hook, const IR::SHA256Sum& Bridge) = 0;
++
+   /**
+    * @brief Adds additional per-instruction granularity TSO enable/disable information for the given range.
+    *
+diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+index bed03b9..beb3894 100644
+--- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
++++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+@@ -617,6 +617,9 @@ int main(int argc, char** argv, char** const envp) {
+     }
+   }
+ 
++  // tso-arm: guest functions translated ahead of time (TSO_AOT), checked against the mapped guest code
++  ThunkHandler->LoadAOT(CTX.get());
++
+   auto BRKInfo = Loader.GetBRKInfo();
+ 
+   SyscallHandler->DefaultProgramBreak(BRKInfo.Base, BRKInfo.Size);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 41aba2d..712c16d 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -23,6 +23,7 @@ $end_info$
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
+ #include "LinuxSyscalls/TSOViews.h"
++#include "Thunks.h"
+ 
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/Utils/LogManager.h>
+@@ -112,6 +113,7 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+       // Full ordering from now on: all translated code goes, every thread leaves its block at the next
+       // instruction start or at its next plain access to guest memory
+       _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, 0, FEXCore::TSOViews::Window);
++      FEX::HLE::AOTOrderAll();
+       if (InCode) {
+         Thread->CTX->TSOTrapBlockBoundaries(Thread, PC);
+       }
+@@ -122,6 +124,17 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+       auto CTX = Thread->CTX;
+       const uint64_t HostPC = ArchHelpers::Context::GetPc(ucontext);
+       if (!CTX->IsAddressInCodeBuffer(Thread, HostPC)) {
++        // Code translated ahead of time (TSO_AOT) is not translated again: each of its accesses to memory that
++        // another thread writes is completed here, ordered
++        if (FEX::HLE::IsAOTCode(HostPC)) {
++          // ...and the function runs its ordered variant from its next call on
++          FEX::HLE::AOTEscalate(HostPC);
++          const bool Emulated = TSOViewMemory::EmulateAccess(ucontext, *reinterpret_cast<const uint32_t*>(HostPC));
++          TSOViewMemory::NoteAccess(Emulated);
++          if (Emulated) {
++            return Handled();
++          }
++        }
+         LogMan::Msg::EFmt("tso-arm: plain access to shared memory outside translated code, pc {:#x}, address {:#x}", HostPC, FaultAddress);
+         return false;
+       }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
+index 76be33d..942c3de 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
+@@ -95,19 +95,28 @@ namespace {
+   bool PrintStats;
+   uint64_t FallbackAt; // nanoseconds from the start to the fallback
+   void DumpStats() {
+-    fprintf(stderr,
++    // TSO_VIEWS_STATS=1: to stderr; any other value names a file to append to (for programs that close stderr)
++    const char* To = getenv("TSO_VIEWS_STATS");
++    FILE* Out = To && strcmp(To, "1") ? fopen(To, "a") : stderr;
++    if (!Out) {
++      return;
++    }
++    fprintf(Out,
+             "tso-arm: claims %lu, shares %lu, upgrades %lu, lazy %lu, escalations %lu, stale %lu, completed in the handler %lu, "
+             "repeated %lu, boundary exits %lu, pages moved with their chunk %lu, migrations %lu\n",
+             (unsigned long)Count.Claims, (unsigned long)Count.Shares, (unsigned long)Count.Upgrades, (unsigned long)Count.Lazy,
+             (unsigned long)Count.Escalations, (unsigned long)Count.Stale, (unsigned long)Count.Emulated, (unsigned long)Count.Repeated,
+             (unsigned long)Count.BoundaryExits, (unsigned long)Count.Collapsed, (unsigned long)Count.Migrations);
+     const auto& S = FEXCore::TSOViews::Spent;
+-    fprintf(stderr, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)", (unsigned long)S.Faults,
++    fprintf(Out, "tso-arm: handled faults %lu in %.3f s, block compiles %lu in %.3f s (all threads)", (unsigned long)S.Faults,
+             S.FaultNs / 1e9, (unsigned long)S.Compiles, S.CompileNs / 1e9);
+     if (FEXCore::TSOViews::FallbackActive.load()) {
+-      fprintf(stderr, ", fell back to full ordering after %.3f s", FallbackAt / 1e9);
++      fprintf(Out, ", fell back to full ordering after %.3f s", FallbackAt / 1e9);
++    }
++    fprintf(Out, "\n");
++    if (Out != stderr) {
++      fclose(Out);
+     }
+-    fprintf(stderr, "\n");
+   }
+ } // namespace
+ 
+@@ -182,7 +191,7 @@ bool TSOViewMemory::Init() {
+     }
+     SlotUsed[0] = true;
+   }
+-  if (Knob("TSO_VIEWS_STATS")) {
++  if (const char* St = getenv("TSO_VIEWS_STATS"); St && *St && strcmp(St, "0")) {
+     PrintStats = true;
+     atexit(DumpStats);
+   }
+@@ -1069,6 +1078,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+       EnterFallback(Now - StartNs);
+       if (Result == Fault::Escalate) {
+         ++Count.Escalations;
++        LastFault = 0; // completed in the handler: progress, not a fault loop
+       }
+       return Result;
+     }
+@@ -1088,6 +1098,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+       CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
+       if (Result == Fault::Escalate) {
+         ++Count.Escalations;
++        LastFault = 0;
+       }
+       return Result;
+     }
+@@ -1102,6 +1113,9 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+   }
+   if (Result == Fault::Escalate) {
+     ++Count.Escalations;
++    // The access is completed in the handler: the same address faulting again (code translated ahead of time
++    // reading a shared flag in a loop) is progress, not a fault loop
++    LastFault = 0;
+   }
+   return Result;
+ }
+diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
+index 9c018bc..8634c53 100644
+--- a/Source/Tools/LinuxEmulation/Thunks.cpp
++++ b/Source/Tools/LinuxEmulation/Thunks.cpp
+@@ -21,8 +21,19 @@ $end_info$
+ #include <FEXCore/fextl/string.h>
+ #include <FEXCore/fextl/unordered_map.h>
+ 
++#include <FEXCore/Core/Context.h>
++#include <FEXCore/Core/TSOViews.h>
++#include <FEXCore/fextl/vector.h>
++
++#include <atomic>
+ #include <cstdint>
++#include <cstdio>
++#include <cstring>
+ #include <dlfcn.h>
++#include <link.h>
++#include <sys/mman.h>
++#include <sys/uio.h>
++#include <unistd.h>
+ 
+ #include <malloc.h>
+ #include <mutex>
+@@ -72,6 +83,154 @@ namespace FEX::HLE {
+ 
+ static thread_local FEX::HLE::ThreadStateObject* ThreadObject {};
+ 
++// tso-arm: guest functions translated ahead of time (aot/ in the tso-arm repository). TSO_AOT names a library whose
++// table maps guest functions to host code. The block FEX makes for such a function's entry calls AOTBridge, a thunk,
++// which runs the host code and the function's return. The structures match aot/aot.h.
++namespace AOT {
++  struct Context {
++    uint8_t* View; // guest address a is at View + a (the thread's plain view; 0 without views)
++    uint64_t FSBase;
++    uint64_t (*GuestCall)(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args);
++    void* Thread;
++    uint8_t* OView; // the thread's ordered view, for atomics (0 without views)
++  };
++
++  struct Entry {
++    uint64_t RIP;
++    uint64_t Size;
++    uint64_t Hash; // FNV-1a 64 of the guest function's bytes
++    // RSP: the guest stack pointer at the call (return address, stack arguments above it); Stack: where the
++    // translated code keeps what it puts on a guest stack
++    uint64_t (*Fn)(Context* C, uint64_t RSP, uint64_t Stack, const uint64_t* Args);
++    const char* Name;
++  };
++
++  constexpr int ArgRegs[6] = {FEXCore::X86State::REG_RDI, FEXCore::X86State::REG_RSI, FEXCore::X86State::REG_RDX,
++                              FEXCore::X86State::REG_RCX, FEXCore::X86State::REG_R8,  FEXCore::X86State::REG_R9};
++
++  // "tso-arm:aot-bridge", zero padded: the name under which the bridge is a thunk
++  constexpr FEXCore::IR::SHA256Sum BridgeSum = {
++    {'t', 's', 'o', '-', 'a', 'r', 'm', ':', 'a', 'o', 't', '-', 'b', 'r', 'i', 'd', 'g', 'e'}};
++
++  std::atomic<uint64_t> CodeStart {}, CodeEnd {};
++  bool Log {};
++  std::atomic<int> Logged {};
++  // The library's switches to the ordered variants: of the function a host pc lies in, and of all functions
++  void (*EscalateFn)(uint64_t PC) {};
++  void (*OrderAllFn)() {};
++  std::atomic<bool> OrderedAll {};
++
++  // A call from host code back into guest code that was not translated. RSP is the stack pointer the callee starts
++  // with (pointing at its return address slot); FEX's callback path puts its own return address there.
++  uint64_t GuestCall(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args) {
++    auto* Thread = static_cast<FEXCore::Core::InternalThreadState*>(C->Thread);
++    auto& State = Thread->CurrentFrame->State;
++    if (Log && Logged.fetch_add(1) < 20) {
++      fprintf(stderr, "tso-arm aot: guest call %#lx\n", (unsigned long)Target);
++    }
++    const uint64_t SavedRSP = State.gregs[FEXCore::X86State::REG_RSP];
++    for (int i = 0; i < 6; ++i) {
++      State.gregs[ArgRegs[i]] = Args[i];
++    }
++    State.gregs[FEXCore::X86State::REG_RSP] = RSP + 16;
++    Thread->CTX->HandleCallback(Thread, Target);
++    const uint64_t Result = State.gregs[FEXCore::X86State::REG_RAX];
++    State.gregs[FEXCore::X86State::REG_RSP] = SavedRSP;
++    return Result;
++  }
++
++  // Each thread's own stack for translated code: the stack objects whose addresses the translated code hands out, and
++  // the frames of guest functions it calls. The thread allocates it itself, 2 MiB aligned, alone in its chunk of the
++  // page protocol: it stays private to the thread (the thread stacks themselves often end up shared, next to the
++  // pthread structures other threads touch).
++  constexpr uint64_t StackSize = 2ULL << 20;
++  thread_local uint64_t StackLow {}, StackTop {};
++
++  bool OnOwnStack(uint64_t RSP) {
++    return RSP > StackLow && RSP <= StackTop;
++  }
++
++  void Bridge(void* ArgPtr) {
++    const auto* E = static_cast<const Entry*>(ArgPtr);
++    auto* Thread = ThreadObject->Thread;
++    auto* Frame = Thread->CurrentFrame;
++    auto& G = Frame->State.gregs;
++    const uint64_t RSP = G[FEXCore::X86State::REG_RSP];
++    if (!StackTop) {
++      const auto P = reinterpret_cast<uint64_t>(FEX::HLE::_SyscallHandler->GuestMmap(
++        Thread, nullptr, 2 * StackSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
++      if (static_cast<int64_t>(P) < 0 && static_cast<int64_t>(P) > -4096) {
++        ERROR_AND_DIE_FMT("tso-arm aot: no stack for translated code ({})", -static_cast<int64_t>(P));
++      }
++      StackLow = (P + StackSize - 1) & ~(StackSize - 1);
++      StackTop = StackLow + StackSize;
++    }
++    // Nested (translated code called guest code that called translated code again): continue below the caller
++    const uint64_t Stack = OnOwnStack(RSP) ? RSP : StackTop - 64;
++    uint64_t Args[6];
++    for (int i = 0; i < 6; ++i) {
++      Args[i] = G[ArgRegs[i]];
++    }
++    const uint64_t View = Frame->TSOViewBase;
++    Context C {reinterpret_cast<uint8_t*>(View), Frame->State.fs_cached, GuestCall, Thread,
++               reinterpret_cast<uint8_t*>(View ? View | FEXCore::TSOViews::OrderedBit : 0)};
++    // While the host code runs, the guest stack pointer in the context stays below anything in use, so that nothing
++    // put there meanwhile (a guest signal frame) overwrites it
++    G[FEXCore::X86State::REG_RSP] = OnOwnStack(RSP) ? RSP - 65536 : RSP - 4096;
++    const uint64_t Result = E->Fn(&C, RSP, Stack, Args);
++    G[FEXCore::X86State::REG_RAX] = Result;
++    Frame->State.rip = *reinterpret_cast<const uint64_t*>(RSP);
++    G[FEXCore::X86State::REG_RSP] = RSP + 8;
++  }
++
++  // Reads guest memory without faulting on an unmapped address
++  bool ReadGuest(uint64_t Address, void* Out, size_t Size) {
++    iovec Local {Out, Size};
++    iovec Remote {reinterpret_cast<void*>(Address), Size};
++    return process_vm_readv(getpid(), &Local, 1, &Remote, 1, 0) == static_cast<ssize_t>(Size);
++  }
++
++  uint64_t Hash(const uint8_t* P, size_t N) {
++    uint64_t H = 0xcbf29ce484222325ULL;
++    for (size_t i = 0; i < N; ++i) {
++      H = (H ^ P[i]) * 0x100000001b3ULL;
++    }
++    return H;
++  }
++
++  bool Listed(const char* List, const char* Name) {
++    const size_t N = strlen(Name);
++    for (const char* P = List; *P;) {
++      const char* End = strchr(P, ',');
++      const size_t L = End ? size_t(End - P) : strlen(P);
++      if (L == N && !strncmp(P, Name, N)) {
++        return true;
++      }
++      if (!End) {
++        break;
++      }
++      P = End + 1;
++    }
++    return false;
++  }
++} // namespace AOT
++
++bool IsAOTCode(uint64_t PC) {
++  return PC >= AOT::CodeStart.load(std::memory_order_relaxed) && PC < AOT::CodeEnd.load(std::memory_order_relaxed);
++}
++
++void AOTEscalate(uint64_t PC) {
++  if (AOT::EscalateFn) {
++    AOT::EscalateFn(PC);
++  }
++}
++
++void AOTOrderAll() {
++  if (AOT::OrderAllFn && !AOT::OrderedAll.exchange(true)) {
++    AOT::OrderAllFn();
++  }
++}
++
+ struct TrampolineInstanceInfo {
+   void* HostPacker;
+   uintptr_t CallCallback;
+@@ -174,6 +333,76 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+ 
+   void LoadLib(std::string_view Name);
+ 
++  void LoadAOT(FEXCore::Context::Context* CTX) override {
++    const char* Path = getenv("TSO_AOT");
++    if (!Path || !*Path) {
++      return;
++    }
++    AOT::Log = getenv("TSO_AOT_LOG") && getenv("TSO_AOT_LOG")[0] == '1';
++    void* Lib = dlopen(Path, RTLD_NOW | RTLD_LOCAL);
++    if (!Lib) {
++      fprintf(stderr, "tso-arm aot: %s\n", dlerror());
++      return;
++    }
++    const auto* Table = static_cast<const AOT::Entry*>(dlsym(Lib, "aot_table"));
++    if (!Table) {
++      fprintf(stderr, "tso-arm aot: %s has no aot_table\n", Path);
++      return;
++    }
++    // The library's executable range, for the fault handler
++    struct Find {
++      const void* Address;
++      uint64_t Start, End;
++    } F {Table->Fn ? reinterpret_cast<const void*>(Table->Fn) : nullptr, 0, 0};
++    dl_iterate_phdr(
++      [](dl_phdr_info* Info, size_t, void* Data) {
++        auto* F = static_cast<Find*>(Data);
++        for (int i = 0; i < Info->dlpi_phnum; ++i) {
++          const auto& P = Info->dlpi_phdr[i];
++          const uint64_t S = Info->dlpi_addr + P.p_vaddr;
++          if (P.p_type == PT_LOAD && (P.p_flags & PF_X) && reinterpret_cast<uint64_t>(F->Address) >= S &&
++              reinterpret_cast<uint64_t>(F->Address) < S + P.p_memsz) {
++            F->Start = S;
++            F->End = S + P.p_memsz;
++            return 1;
++          }
++        }
++        return 0;
++      },
++      &F);
++    AOT::CodeStart = F.Start;
++    AOT::CodeEnd = F.End;
++    AOT::EscalateFn = reinterpret_cast<void (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
++    AOT::OrderAllFn = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_all"));
++    // TSO_AOT_ORDERED=1: every translated function ordered from the start (x86 order without the page protocol);
++    // the protocol's fallback to full ordering does the same
++    if ((getenv("TSO_AOT_ORDERED") && getenv("TSO_AOT_ORDERED")[0] == '1') || FEXCore::TSOViews::FallbackActive.load()) {
++      AOTOrderAll();
++    }
++
++    {
++      std::unique_lock lk(ThunksMutex);
++      Thunks.emplace(AOT::BridgeSum, &AOT::Bridge);
++    }
++    const char* Only = getenv("TSO_AOT_ONLY");
++    int Count = 0;
++    for (const auto* E = Table; E->RIP; ++E) {
++      if (Only && *Only && !AOT::Listed(Only, E->Name)) {
++        continue;
++      }
++      fextl::vector<uint8_t> Code(E->Size);
++      if (!AOT::ReadGuest(E->RIP, Code.data(), E->Size) || AOT::Hash(Code.data(), E->Size) != E->Hash) {
++        fprintf(stderr, "tso-arm aot: %s at %#lx does not match the guest code, left to the JIT\n", E->Name, (unsigned long)E->RIP);
++        continue;
++      }
++      CTX->AddAOTEntrypoint(E->RIP, reinterpret_cast<uintptr_t>(E), AOT::BridgeSum);
++      ++Count;
++    }
++    if (AOT::Log) {
++      fprintf(stderr, "tso-arm aot: %d functions from %s (code %#lx-%#lx)\n", Count, Path, (unsigned long)F.Start, (unsigned long)F.End);
++    }
++  }
++
+ private:
+   // Bits in a SHA256 sum are already randomly distributed, so truncation yields a suitable hash function
+   struct TruncatingSHA256Hash {
+diff --git a/Source/Tools/LinuxEmulation/Thunks.h b/Source/Tools/LinuxEmulation/Thunks.h
+index 16a89ce..f1cff7c 100644
+--- a/Source/Tools/LinuxEmulation/Thunks.h
++++ b/Source/Tools/LinuxEmulation/Thunks.h
+@@ -7,6 +7,10 @@
+ 
+ #include <span>
+ 
++namespace FEXCore::Context {
++class Context;
++}
++
+ namespace FEX::HLE {
+ struct ThreadStateObject;
+ 
+@@ -20,6 +24,17 @@ public:
+    * @param Definitions A vector of thunk definitions that the frontend controls
+    */
+   virtual void AppendThunkDefinitions(std::span<const FEXCore::IR::ThunkDefinition> Definitions) = 0;
++
++  // tso-arm: routes the guest functions of the library named by TSO_AOT to their host translations (after the guest
++  // binary is mapped)
++  virtual void LoadAOT(FEXCore::Context::Context* CTX) = 0;
+ };
+ fextl::unique_ptr<ThunkHandler> CreateThunkHandler();
++
++// tso-arm: whether a host PC lies in the code of the TSO_AOT library
++bool IsAOTCode(uint64_t PC);
++// tso-arm: the translated function at host PC met shared memory: it runs its ordered variant from its next call on
++void AOTEscalate(uint64_t PC);
++// tso-arm: all translated functions ordered (the page protocol fell back to full ordering)
++void AOTOrderAll();
+ } // namespace FEX::HLE
+-- 
+2.53.0
+

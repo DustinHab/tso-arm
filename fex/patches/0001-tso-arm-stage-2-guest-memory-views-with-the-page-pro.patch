@@ -1,7 +1,8 @@
 From 5d4bf47d83d3d13fc279fccf0cf56002c84af342 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
-Subject: [PATCH] tso-arm: stage 2: guest memory views with the page protocol
+Subject: [PATCH 1/2] tso-arm: stage 2: guest memory views with the page
+ protocol
 
 ---
  FEXCore/Source/CMakeLists.txt                 |    2 +
