@@ -1,0 +1,1223 @@
+From f938e9062439286c96d1f0c47d64f3278c95ba0c Mon Sep 17 00:00:00 2001
+From: DustinHab <142697073+DustinHab@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 10:16:00 +0100
+Subject: [PATCH] tso-arm stage 1: guest memory views, plain view register,
+ address rewriting
+
+---
+ FEXCore/Source/CMakeLists.txt                 |   1 +
+ .../Core/ArchHelpers/Arm64Emitter.cpp         |  15 +-
+ .../Interface/Core/ArchHelpers/Arm64Emitter.h |   3 +
+ .../Source/Interface/Core/JIT/MemoryOps.cpp   | 102 ++++-
+ .../Interface/Core/OpcodeDispatcher.cpp       |   4 +-
+ FEXCore/Source/Interface/IR/IR.json           |  12 +
+ FEXCore/Source/Interface/IR/PassManager.cpp   |   6 +
+ FEXCore/Source/Interface/IR/Passes.h          |   1 +
+ .../Interface/IR/Passes/GuestViewPass.cpp     |  94 ++++
+ FEXCore/include/FEXCore/Core/CoreState.h      |   3 +
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  43 ++
+ Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   5 +
+ Source/Tools/LinuxEmulation/CMakeLists.txt    |   1 +
+ .../LinuxSyscalls/Syscalls/Memory.cpp         |   9 +
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  33 +-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 433 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  56 +++
+ .../LinuxSyscalls/ThreadManager.cpp           |  14 +
+ .../Tools/LinuxEmulation/VDSO_Emulation.cpp   |   5 +
+ 19 files changed, 830 insertions(+), 10 deletions(-)
+ create mode 100644 FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+ create mode 100644 FEXCore/include/FEXCore/Core/TSOViews.h
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
+
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index 61385d2..f07180d 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -66,6 +66,7 @@ set(SRCS
+   Interface/IR/Passes/IRDumperPass.cpp
+   Interface/IR/Passes/IRValidation.cpp
+   Interface/IR/Passes/RedundantFlagCalculationElimination.cpp
++  Interface/IR/Passes/GuestViewPass.cpp
+   Interface/IR/Passes/RegisterAllocationPass.cpp
+   Interface/IR/Passes/x87StackOptimizationPass.cpp
+   Utils/LongJump.cpp
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 09828be..8b060b1 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -4,6 +4,7 @@
+ #include "Interface/Context/Context.h"
+ 
+ #include <FEXCore/Core/CoreState.h>
++#include <FEXCore/Core/TSOViews.h>
+ #include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/MathUtils.h>
+@@ -79,6 +80,12 @@ namespace x64 {
+     ARMEmitter::Reg::r24, ARMEmitter::Reg::r30, ARMEmitter::Reg::r18,
+   };
+ 
++  // tso-arm: without r24, which holds the plain view base (REG_VIEW)
++  constexpr std::array<ARMEmitter::Register, 6> RA_Views = {
++    ARMEmitter::Reg::r20, ARMEmitter::Reg::r21, ARMEmitter::Reg::r22,
++    ARMEmitter::Reg::r23, ARMEmitter::Reg::r30, ARMEmitter::Reg::r18,
++  };
++
+   constexpr unsigned RAPairs = 4;
+ 
+   // Dynamic GPRs
+@@ -387,7 +394,8 @@ Arm64Emitter::Arm64Emitter(FEXCore::Context::ContextImpl* ctx, void* EmissionPtr
+   // Number of register available is dependent on what operating mode the proccess is in.
+   if (EmitterCTX->Config.Is64BitMode()) {
+     StaticRegisters = x64::SRA;
+-    GeneralRegisters = x64::RA;
++    GeneralRegisters = FEXCore::TSOViews::Enabled() ? std::span<const ARMEmitter::Register>(x64::RA_Views) :
++                                                      std::span<const ARMEmitter::Register>(x64::RA);
+     GeneralRegistersNotPreserved = x64::NotPreserved_Dynamic;
+     StaticFPRegisters = x64::SRAFPR;
+     GeneralFPRegisters = x64::RAFPR;
+@@ -812,6 +820,11 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
+ #endif
+ 
+   ldr(REG_CALLRET_SP, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
++#ifndef ARCHITECTURE_arm64ec
++  if (FEXCore::TSOViews::Enabled() && EmitterCTX->Config.Is64BitMode()) {
++    ldr(REG_VIEW, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, TSOViewBase));
++  }
++#endif
+ 
+   if (Options.NZCV) {
+     // Regardless of what GPRs/FPRs we're filling, we need to fill NZCV since it
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+index 02d22e1..a65d037 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+@@ -47,6 +47,9 @@ constexpr auto REG_AF = ARMEmitter::Reg::r27;
+ 
+ constexpr auto REG_CALLRET_SP = ARMEmitter::XReg::x25;
+ 
++// tso-arm: base of the thread's plain view of guest memory. Taken out of register allocation when views are on.
++constexpr auto REG_VIEW = ARMEmitter::XReg::x24;
++
+ // Vector temporaries
+ constexpr auto VTMP1 = ARMEmitter::VReg::v0;
+ constexpr auto VTMP2 = ARMEmitter::VReg::v1;
+diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+index d7b716c..0488eb1 100644
+--- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+@@ -5,6 +5,7 @@ tags: backend|arm64
+ $end_info$
+ */
+ 
++#include "FEXCore/Core/TSOViews.h"
+ #include "FEXCore/Core/X86Enums.h"
+ #include "FEXCore/Utils/LogManager.h"
+ #include "Interface/Context/Context.h"
+@@ -1478,6 +1479,35 @@ DEF_OP(VBroadcastFromMem) {
+   }
+ }
+ 
++// tso-arm: guest address -> plain view (+ REG_VIEW) or ordered view (| OrderedBase)
++DEF_OP(ViewPlain) {
++  const auto Op = IROp->C<IR::IROp_ViewPlain>();
++  const auto Dst = GetReg(Node);
++  uint64_t Const;
++  if (IsInlineConstant(Op->Addr, &Const)) {
++    LoadConstant(ARMEmitter::Size::i64Bit, Dst, Const);
++    add(ARMEmitter::Size::i64Bit, Dst, Dst, REG_VIEW.R());
++  } else {
++    add(ARMEmitter::Size::i64Bit, Dst, GetReg(Op->Addr), REG_VIEW.R());
++  }
++}
++
++DEF_OP(ViewOrdered) {
++  const auto Op = IROp->C<IR::IROp_ViewOrdered>();
++  const auto Dst = GetReg(Node);
++  uint64_t Const;
++  if (IsInlineConstant(Op->Addr, &Const)) {
++    LoadConstant(ARMEmitter::Size::i64Bit, Dst, Const | FEXCore::TSOViews::OrderedBase);
++  } else {
++    orr(ARMEmitter::Size::i64Bit, Dst, GetReg(Op->Addr), FEXCore::TSOViews::OrderedBase);
++  }
++}
++
++// Views on for this (64-bit) guest: stack and string operations address guest memory through them.
++static bool ViewsOn(const FEXCore::Context::ContextImpl* CTX) {
++  return FEXCore::TSOViews::Enabled() && CTX->Config.Is64BitMode();
++}
++
+ DEF_OP(Push) {
+   const auto Op = IROp->C<IR::IROp_Push>();
+   const auto ValueSize = IR::OpSizeToSize(Op->ValueSize);
+@@ -1485,6 +1515,20 @@ DEF_OP(Push) {
+   const auto AddrSrc = GetReg(Op->Addr);
+   const auto Dst = GetReg(Node);
+ 
++  if (ViewsOn(CTX)) {
++    // Store through the view from the old pointer first, so that pushing the pointer itself stores the old value
++    add(ARMEmitter::Size::i64Bit, TMP2, AddrSrc.X(), REG_VIEW.R());
++    switch (ValueSize) {
++    case 1: sturb(Src.W(), TMP2, -ValueSize); break;
++    case 2: sturh(Src.W(), TMP2, -ValueSize); break;
++    case 4: stur(Src.W(), TMP2, -ValueSize); break;
++    case 8: stur(Src.X(), TMP2, -ValueSize); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    sub(IROp->Size == IR::OpSize::i64Bit ? ARMEmitter::Size::i64Bit : ARMEmitter::Size::i32Bit, Dst, AddrSrc, ValueSize);
++    return;
++  }
++
+   bool NeedsMoveAfterwards = false;
+   if (Dst != AddrSrc) {
+     if (Dst == Src) {
+@@ -1570,6 +1614,17 @@ DEF_OP(PushTwo) {
+   auto Src2 = GetReg(Op->Value2);
+   const auto Dst = GetReg(Op->Addr);
+ 
++  if (ViewsOn(CTX)) {
++    add(ARMEmitter::Size::i64Bit, TMP2, Dst.X(), REG_VIEW.R());
++    switch (ValueSize) {
++    case 4: stp<ARMEmitter::IndexType::OFFSET>(Src1.W(), Src2.W(), TMP2, -2 * ValueSize); break;
++    case 8: stp<ARMEmitter::IndexType::OFFSET>(Src1.X(), Src2.X(), TMP2, -2 * ValueSize); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    sub(ARMEmitter::Size::i64Bit, Dst, Dst, 2 * ValueSize);
++    return;
++  }
++
+   switch (ValueSize) {
+   case 4: {
+     stp<ARMEmitter::IndexType::PRE>(Src1.W(), Src2.W(), Dst, -2 * ValueSize);
+@@ -1594,6 +1649,20 @@ DEF_OP(Pop) {
+ 
+   LOGMAN_THROW_A_FMT(Dst != Addr, "Invalid");
+ 
++  if (ViewsOn(CTX)) {
++    add(ARMEmitter::Size::i64Bit, TMP2, Addr.X(), REG_VIEW.R());
++    const auto Mem = ARMEmitter::ExtendedMemOperand(TMP2, ARMEmitter::IndexType::OFFSET, 0);
++    switch (Size) {
++    case 1: ldrb(Dst, Mem); break;
++    case 2: ldrh(Dst, Mem); break;
++    case 4: ldr(Dst.W(), Mem); break;
++    case 8: ldr(Dst.X(), Mem); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i64Bit, Addr, Addr, Size);
++    return;
++  }
++
+   switch (Size) {
+   case 1: {
+     ldrb<ARMEmitter::IndexType::POST>(Dst.W(), Addr, Size);
+@@ -1633,6 +1702,17 @@ DEF_OP(PopTwo) {
+   LOGMAN_THROW_A_FMT(Dst1 != Addr && Dst2 != Addr, "Invalid");
+   LOGMAN_THROW_A_FMT(Dst1 != Dst2, "Invalid");
+ 
++  if (ViewsOn(CTX)) {
++    add(ARMEmitter::Size::i64Bit, TMP2, Addr.X(), REG_VIEW.R());
++    switch (Size) {
++    case 4: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.W(), Dst2.W(), TMP2, 0); break;
++    case 8: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.X(), Dst2.X(), TMP2, 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i64Bit, Addr, Addr, 2 * Size);
++    return;
++  }
++
+   switch (Size) {
+   case 4: {
+     ldp<ARMEmitter::IndexType::POST>(Dst1.W(), Dst2.W(), Addr, 2 * Size);
+@@ -1864,7 +1944,8 @@ DEF_OP(StoreMemTSO) {
+ DEF_OP(MemSet) {
+   const auto Op = IROp->C<IR::IROp_MemSet>();
+ 
+-  const bool IsAtomic = CTX->IsMemcpyAtomicTSOEnabled();
++  // tso-arm: with views the per-instruction decision travels in the op
++  const bool IsAtomic = ViewsOn(CTX) ? Op->IsAtomic : CTX->IsMemcpyAtomicTSOEnabled();
+   const auto Size = IR::OpSizeToSize(Op->Size);
+   const auto MemReg = GetReg(Op->Addr);
+   const auto Value = GetZeroableReg(Op->Value);
+@@ -1895,6 +1976,13 @@ DEF_OP(MemSet) {
+     const auto Prefix = GetReg(Op->Prefix);
+     add(TMP2, Prefix.X(), MemReg.X());
+   }
++  if (ViewsOn(CTX)) {
++    if (IsAtomic) {
++      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBase);
++    } else {
++      add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
++    }
++  }
+ 
+   if (!DirectionIsInline) {
+     // Backward or forwards implementation depends on flag
+@@ -2099,7 +2187,8 @@ DEF_OP(MemSet) {
+ DEF_OP(MemCpy) {
+   const auto Op = IROp->C<IR::IROp_MemCpy>();
+ 
+-  const bool IsAtomic = CTX->IsMemcpyAtomicTSOEnabled();
++  // tso-arm: with views the per-instruction decision travels in the op
++  const bool IsAtomic = ViewsOn(CTX) ? Op->IsAtomic : CTX->IsMemcpyAtomicTSOEnabled();
+   const auto Size = IR::OpSizeToSize(Op->Size);
+   const auto MemRegDest = GetReg(Op->Dest);
+   const auto MemRegSrc = GetReg(Op->Src);
+@@ -2129,6 +2218,15 @@ DEF_OP(MemCpy) {
+   mov(TMP1, Length.X());
+   mov(TMP2, MemRegDest.X());
+   mov(TMP3, MemRegSrc.X());
++  if (ViewsOn(CTX)) {
++    if (IsAtomic) {
++      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBase);
++      orr(ARMEmitter::Size::i64Bit, TMP3, TMP3, FEXCore::TSOViews::OrderedBase);
++    } else {
++      add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
++      add(ARMEmitter::Size::i64Bit, TMP3, TMP3, REG_VIEW.R());
++    }
++  }
+ 
+   // TMP1 = Length
+   // TMP2 = Dest
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 901a922..5443244 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -3336,7 +3336,7 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
+ 
+     Ref Counter = LoadGPRRegister(X86State::REG_RCX);
+ 
+-    auto Result = _MemSet(CTX->IsAtomicTSOEnabled(), Size, Segment ?: InvalidNode, Dest, Src, Counter, LoadDir(1));
++    auto Result = _MemSet(IsTSOEnabled(RegClass::GPR) && CTX->IsMemcpyAtomicTSOEnabled(), Size, Segment ?: InvalidNode, Dest, Src, Counter, LoadDir(1));
+     StoreGPRRegister(X86State::REG_RCX, Constant(0));
+     StoreGPRRegister(X86State::REG_RDI, Result);
+   }
+@@ -3370,7 +3370,7 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
+ 
+     Ref Result_Src = _AllocateGPR(false);
+     Ref Result_Dst = _AllocateGPR(false);
+-    _MemCpy(CTX->IsAtomicTSOEnabled(), Size, DstAddr, SrcAddr, Counter, LoadDir(1), Result_Dst, Result_Src);
++    _MemCpy(IsTSOEnabled(RegClass::GPR) && CTX->IsMemcpyAtomicTSOEnabled(), Size, DstAddr, SrcAddr, Counter, LoadDir(1), Result_Dst, Result_Src);
+ 
+     if (DstSegment) {
+       Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
+diff --git a/FEXCore/Source/Interface/IR/IR.json b/FEXCore/Source/Interface/IR/IR.json
+index 6c1a345..880afa8 100644
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -390,6 +390,18 @@
+       }
+     },
+     "Memory": {
++      "GPR = ViewPlain GPR:$Addr": {
++        "Desc": ["tso-arm: address of a guest address in the thread's plain view",
++                 "Dest = Addr + per-thread plain view base"
++                ],
++        "DestSize": "OpSize::i64Bit"
++      },
++      "GPR = ViewOrdered GPR:$Addr": {
++        "Desc": ["tso-arm: address of a guest address in the ordered view",
++                 "Dest = Addr | ordered view base"
++                ],
++        "DestSize": "OpSize::i64Bit"
++      },
+       "SSA = LoadContext OpSize:#ByteSize, RegisterClass:$Class, u32:$Offset": {
+         "Desc": ["Loads a value from the context with offset",
+                  "Dest = Ctx[Offset]"
+diff --git a/FEXCore/Source/Interface/IR/PassManager.cpp b/FEXCore/Source/Interface/IR/PassManager.cpp
+index 5d3bcec..99f0b47 100644
+--- a/FEXCore/Source/Interface/IR/PassManager.cpp
++++ b/FEXCore/Source/Interface/IR/PassManager.cpp
+@@ -13,6 +13,7 @@ $end_info$
+ #include "Interface/IR/Passes/RegisterAllocationPass.h"
+ 
+ #include <FEXCore/Config/Config.h>
++#include <FEXCore/Core/TSOViews.h>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/Profiler.h>
+ 
+@@ -77,6 +78,11 @@ void PassManager::AddDefaultPasses(Context::ContextImpl* ctx) {
+     InsertPass(CreateDeadFlagCalculationEliminination());
+   }
+ 
++  // tso-arm: not an optimisation, so it runs regardless of DisablePasses
++  if (FEXCore::TSOViews::Enabled() && FEXCore::TSOViews::RewritePass() && ctx->Config.Is64BitMode) {
++    InsertPass(CreateGuestViewPass(), "GuestView");
++  }
++
+   InsertPass(IR::CreateRegisterAllocationPass(&ctx->CPUID), "RA");
+ 
+ #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
+diff --git a/FEXCore/Source/Interface/IR/Passes.h b/FEXCore/Source/Interface/IR/Passes.h
+index 213967a..32c490d 100644
+--- a/FEXCore/Source/Interface/IR/Passes.h
++++ b/FEXCore/Source/Interface/IR/Passes.h
+@@ -14,6 +14,7 @@ class Pass;
+ fextl::unique_ptr<Pass> CreateDeadFlagCalculationEliminination();
+ fextl::unique_ptr<Pass> CreateRegisterAllocationPass(const CPUIDEmu* CPUID);
+ fextl::unique_ptr<Pass> CreateX87StackOptimizationPass(const HostFeatures&, OpSize GPROpSize);
++fextl::unique_ptr<Pass> CreateGuestViewPass();
+ 
+ namespace Validation {
+   fextl::unique_ptr<Pass> CreateIRValidation();
+diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+new file mode 100644
+index 0000000..a4f89e5
+--- /dev/null
++++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: ir|opts
++desc: tso-arm: routes guest memory accesses through the plain or ordered view of guest memory
++$end_info$
++*/
++
++// Every IR op that addresses guest memory gets its address replaced by the address in a view:
++// - plain accesses (LoadMem, StoreMem, vector loads and stores, ...) use the thread's plain view, whose page
++//   protections only allow the thread's own private pages and shared read-only pages;
++// - ordered accesses (LoadMemTSO, StoreMemTSO, atomics) use the ordered view.
++// Push/Pop and MemCpy/MemSet return updated addresses and are handled in the backend instead.
++
++#include "Interface/IR/IREmitter.h"
++#include "Interface/IR/PassManager.h"
++#include "Interface/IR/Passes.h"
++
++#include <FEXCore/IR/IR.h>
++#include <FEXCore/Utils/Profiler.h>
++
++namespace FEXCore::IR {
++namespace {
++  class GuestViewPass final : public FEXCore::IR::Pass {
++  public:
++    void Run(IREmitter* IREmit) override;
++  };
++
++  struct ViewSite {
++    int Index; // SSA argument holding the guest address, -1: not a guest memory access
++    bool Ordered;
++  };
++
++  ViewSite SiteOf(IROps Op) {
++    switch (Op) {
++    // plain
++    case OP_LOADMEM: return {IROp_LoadMem::Addr_Index, false};
++    case OP_STOREMEM: return {IROp_StoreMem::Addr_Index, false};
++    case OP_LOADMEMPAIR: return {IROp_LoadMemPair::Addr_Index, false};
++    case OP_STOREMEMPAIR: return {IROp_StoreMemPair::Addr_Index, false};
++    case OP_LOADMEMX87SVEOPTPREDICATE: return {IROp_LoadMemX87SVEOptPredicate::Addr_Index, false};
++    case OP_STOREMEMX87SVEOPTPREDICATE: return {IROp_StoreMemX87SVEOptPredicate::Addr_Index, false};
++    case OP_VLOADVECTORMASKED: return {IROp_VLoadVectorMasked::Addr_Index, false};
++    case OP_VSTOREVECTORMASKED: return {IROp_VStoreVectorMasked::Addr_Index, false};
++    case OP_VLOADVECTORGATHERMASKED: return {IROp_VLoadVectorGatherMasked::AddrBase_Index, false};
++    case OP_VLOADVECTORGATHERMASKEDQPS: return {IROp_VLoadVectorGatherMaskedQPS::AddrBase_Index, false};
++    case OP_VLOADVECTORELEMENT: return {IROp_VLoadVectorElement::Addr_Index, false};
++    case OP_VSTOREVECTORELEMENT: return {IROp_VStoreVectorElement::Addr_Index, false};
++    case OP_VBROADCASTFROMMEM: return {IROp_VBroadcastFromMem::Address_Index, false};
++    case OP_VSTORENONTEMPORAL: return {IROp_VStoreNonTemporal::Addr_Index, false};
++    case OP_VSTORENONTEMPORALPAIR: return {IROp_VStoreNonTemporalPair::Addr_Index, false};
++    case OP_VLOADNONTEMPORAL: return {IROp_VLoadNonTemporal::Addr_Index, false};
++    case OP_STORESTACKMEM: return {IROp_StoreStackMem::Addr_Index, false};
++    // ordered
++    case OP_LOADMEMTSO: return {IROp_LoadMemTSO::Addr_Index, true};
++    case OP_STOREMEMTSO: return {IROp_StoreMemTSO::Addr_Index, true};
++    case OP_CAS: return {IROp_CAS::Addr_Index, true};
++    case OP_CASPAIR: return {IROp_CASPair::Addr_Index, true};
++    case OP_ATOMICSWAP: return {IROp_AtomicSwap::Addr_Index, true};
++    case OP_ATOMICFETCHADD: return {IROp_AtomicFetchAdd::Addr_Index, true};
++    case OP_ATOMICFETCHSUB: return {IROp_AtomicFetchSub::Addr_Index, true};
++    case OP_ATOMICFETCHAND: return {IROp_AtomicFetchAnd::Addr_Index, true};
++    case OP_ATOMICFETCHCLR: return {IROp_AtomicFetchCLR::Addr_Index, true};
++    case OP_ATOMICFETCHOR: return {IROp_AtomicFetchOr::Addr_Index, true};
++    case OP_ATOMICFETCHXOR: return {IROp_AtomicFetchXor::Addr_Index, true};
++    case OP_ATOMICFETCHNEG: return {IROp_AtomicFetchNeg::Addr_Index, true};
++    default: return {-1, false};
++    }
++  }
++
++  void GuestViewPass::Run(IREmitter* IREmit) {
++    FEXCORE_PROFILE_SCOPED("PassManager::GuestView");
++
++    auto CurrentIR = IREmit->ViewIR();
++    for (auto [Block, BlockHeader] : CurrentIR.GetBlocks()) {
++      for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
++        const auto Site = SiteOf(IROp->Op);
++        if (Site.Index < 0 || IROp->Args[Site.Index].IsInvalid()) {
++          continue;
++        }
++
++        Ref Addr = CurrentIR.GetNode(IROp->Args[Site.Index]);
++        IREmit->SetWriteCursorBefore(CodeNode);
++        Ref View = Site.Ordered ? IREmit->_ViewOrdered(Addr) : IREmit->_ViewPlain(Addr);
++        IREmit->ReplaceNodeArgument(CodeNode, Site.Index, View);
++      }
++    }
++  }
++} // namespace
++
++fextl::unique_ptr<Pass> CreateGuestViewPass() {
++  return fextl::make_unique<GuestViewPass>();
++}
++} // namespace FEXCore::IR
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 2112073..19ae82f 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -474,6 +474,9 @@ struct CpuStateFrame {
+ 
+   InternalThreadState* Thread;
+ 
++  // tso-arm: base of this thread's plain view of guest memory (0 when views are off)
++  uint64_t TSOViewBase {};
++
+ #ifdef _WIN32
+   // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
+   uint32_t SuspendDoorbell {};
+diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
+new file mode 100644
+index 0000000..bff861d
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Core/TSOViews.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: MIT
++// tso-arm: layout of the guest memory views used to elide TSO ordering for memory that only one thread uses.
++//
++// Guest memory lives in [0, Window). Every guest mapping is shared memory and is mapped again
++// - in the ordered view at OrderedBase + guest address,
++// - in one plain view per thread at Slot * Window + guest address.
++// Translated code reaches guest memory only through the views; the identity mapping stays for the kernel and the
++// runtime. Since every view base is a multiple of Window, (view address & (Window - 1)) is the guest address.
++#pragma once
++#include <cstdint>
++#include <cstdlib>
++
++namespace FEXCore::TSOViews {
++constexpr uint64_t WindowBits = 34;
++constexpr uint64_t Window = 1ULL << WindowBits;  // 16 GB
++constexpr uint64_t OrderedBase = 1ULL << 37;     // slot 8; a single bit, so `orr` forms ordered addresses
++constexpr uint64_t AllocLow = 1ULL << 32;        // non-fixed guest mappings are placed in [4 GB, Window)
++constexpr int Slots = 16;                         // slots 1..15 except OrderedBase / Window
++constexpr int OrderedSlot = OrderedBase / Window;
++
++inline bool Enabled() {
++  static const bool On = [] {
++    const char* E = getenv("TSO_VIEWS");
++    return E && E[0] == '1';
++  }();
++  return On;
++}
++
++// Measurement knobs. TSO_VIEWS_IDENTITY=1: every thread's plain view base is 0 (the identity mapping), so the
++// address arithmetic runs but no view is used. TSO_VIEWS_NOPASS=1: the address rewriting pass is not run.
++inline bool Knob(const char* Name) {
++  const char* E = getenv(Name);
++  return E && E[0] == '1';
++}
++inline bool IdentityBase() {
++  static const bool On = Knob("TSO_VIEWS_IDENTITY");
++  return On;
++}
++inline bool RewritePass() {
++  static const bool On = !Knob("TSO_VIEWS_NOPASS");
++  return On;
++}
++} // namespace FEXCore::TSOViews
+diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+index 5850c83..9cedb60 100644
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+@@ -8,6 +8,7 @@
+ #include "FEXCore/Utils/Allocator.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "VDSO_Emulation.h"
++#include <FEXCore/Core/TSOViews.h>
+ #include "Linux/Utils/ELFParser.h"
+ 
+ #include <cstring>
+@@ -464,6 +465,10 @@ public:
+ 
+       // Calculate the highest point the stack could go.
+       StackHint = (1ULL << VABits) - FULL_STACK_SIZE;
++      if (FEXCore::TSOViews::Enabled()) {
++        // tso-arm: guest memory stays in the window below the views
++        StackHint = FEXCore::TSOViews::Window - FULL_STACK_SIZE;
++      }
+     } else {
+       // Needs to be under the 4GB VA space.
+       StackHint = 0x1'0000'0000ULL - FULL_STACK_SIZE;
+diff --git a/Source/Tools/LinuxEmulation/CMakeLists.txt b/Source/Tools/LinuxEmulation/CMakeLists.txt
+index 715a8f1..7f5214e 100644
+--- a/Source/Tools/LinuxEmulation/CMakeLists.txt
++++ b/Source/Tools/LinuxEmulation/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_library(LinuxEmulation STATIC
+   LinuxSyscalls/Syscalls.cpp
+   LinuxSyscalls/SyscallsSMCTracking.cpp
+   LinuxSyscalls/SyscallsVMATracking.cpp
++  LinuxSyscalls/TSOViews.cpp
+   LinuxSyscalls/ThreadManager.cpp
+   LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+   LinuxSyscalls/Utils/Threads.cpp
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Memory.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Memory.cpp
+index 9397c9e..9f1d760 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Memory.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Memory.cpp
+@@ -8,6 +8,7 @@ $end_info$
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
++#include "LinuxSyscalls/TSOViews.h"
+ 
+ #include <FEXCore/Debug/InternalThreadState.h>
+ 
+@@ -25,6 +26,14 @@ void RegisterMemory(FEX::HLE::SyscallHandler* Handler) {
+   });
+ 
+   REGISTER_SYSCALL_IMPL(madvise, [](FEXCore::Core::CpuStateFrame* Frame, void* addr, size_t length, int32_t advice) -> uint64_t {
++    if (auto* Views = TSOViewMemory::Get()) {
++      // tso-arm: guest private memory is shared memory here; discarding it must zero it
++      const int64_t R = Views->Madvise(reinterpret_cast<uint64_t>(addr), length, advice);
++      if (R == 0) {
++        FEX::HLE::_SyscallHandler->TrackMadvise(Frame->Thread, (uintptr_t)addr, length, advice);
++      }
++      return R;
++    }
+     uint64_t Result = ::madvise(addr, length, advice);
+ 
+     if (Result != -1) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 94bdd37..786169f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -21,6 +21,7 @@ $end_info$
+ 
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/TSOViews.h"
+ 
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/Utils/LogManager.h>
+@@ -326,6 +327,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+         return reinterpret_cast<void*>(Result);
+       }
+       LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
++    } else if (auto* Views = TSOViewMemory::Get()) {
++      Result = Views->Mmap(reinterpret_cast<uint64_t>(addr), length, prot, flags, fd, offset);
++      if (FEX::HLE::HasSyscallError(Result)) {
++        return reinterpret_cast<void*>(Result);
++      }
+     } else {
+       Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
+       if (Result == ~0ULL) {
+@@ -366,7 +372,12 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+     // To be more optimal the frontend should provide this code with a valid Thread object earlier.
+     auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
+ 
+-    if (reinterpret_cast<uintptr_t>(addr) < 0x1'0000'0000ULL) {
++    if (auto* Views = Is64Bit ? TSOViewMemory::Get() : nullptr) {
++      Result = Views->Munmap(reinterpret_cast<uint64_t>(addr), length);
++      if (FEX::HLE::HasSyscallError(Result)) {
++        return Result;
++      }
++    } else if (reinterpret_cast<uintptr_t>(addr) < 0x1'0000'0000ULL) {
+       Result = Get32BitAllocator()->Munmap(addr, length);
+       if (FEX::HLE::HasSyscallError(Result)) {
+         return Result;
+@@ -396,7 +407,12 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
+-    if (Is64Bit) {
++    if (auto* Views = Is64Bit ? TSOViewMemory::Get() : nullptr) {
++      Result = Views->Mremap(reinterpret_cast<uint64_t>(old_address), old_size, new_size, flags, reinterpret_cast<uint64_t>(new_address));
++      if (FEX::HLE::HasSyscallError(Result)) {
++        return Result;
++      }
++    } else if (Is64Bit) {
+       Result = reinterpret_cast<uint64_t>(::mremap(old_address, old_size, new_size, flags, new_address));
+       if (Result == -1) {
+         return -errno;
+@@ -473,9 +489,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
+-    Result = ::mprotect(addr, len, prot);
+-    if (Result == -1) {
+-      return -errno;
++    if (auto* Views = TSOViewMemory::Get()) {
++      Result = Views->Mprotect(reinterpret_cast<uint64_t>(addr), len, prot);
++      if (FEX::HLE::HasSyscallError(Result)) {
++        return Result;
++      }
++    } else {
++      Result = ::mprotect(addr, len, prot);
++      if (Result == -1) {
++        return -errno;
++      }
+     }
+ 
+     TrackMprotect(Thread, addr, len, prot);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
+new file mode 100644
+index 0000000..611009d
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
+@@ -0,0 +1,433 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: LinuxSyscalls|syscalls-shared
++desc: tso-arm: guest memory views
++$end_info$
++*/
++
++#include "LinuxSyscalls/TSOViews.h"
++
++#include <FEXCore/Utils/LogManager.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <cstring>
++#include <iterator>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <vector>
++
++namespace FEX::HLE {
++using namespace FEXCore::TSOViews;
++
++namespace {
++  constexpr uint64_t PageMask = 4095;
++  uint64_t PageUp(uint64_t X) {
++    return (X + PageMask) & ~PageMask;
++  }
++  uint64_t SlotBase(int Slot) {
++    return uint64_t(Slot) * Window;
++  }
++  constexpr int ReserveFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
++  // Flags the guest may pass that make no sense for the shared memory behind a private mapping
++  constexpr int DropFlags = MAP_PRIVATE | MAP_SHARED | MAP_SHARED_VALIDATE | MAP_FIXED_NOREPLACE | MAP_GROWSDOWN | MAP_ANONYMOUS;
++} // namespace
++
++TSOViewMemory* TSOViewMemory::Get() {
++  static TSOViewMemory* Instance = []() -> TSOViewMemory* {
++    if (!Enabled()) {
++      return nullptr;
++    }
++    auto M = new TSOViewMemory;
++    if (!M->Init()) {
++      LogMan::Msg::EFmt("tso-arm: views could not be set up");
++      delete M;
++      return nullptr;
++    }
++    return M;
++  }();
++  return Instance;
++}
++
++bool TSOViewMemory::Init() {
++  auto R = ::mmap(reinterpret_cast<void*>(OrderedBase), Window, PROT_NONE, ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
++  if (R != reinterpret_cast<void*>(OrderedBase)) {
++    return false;
++  }
++  int Usable = 0;
++  for (int S = 1; S < Slots; ++S) {
++    if (S == OrderedSlot) {
++      continue;
++    }
++    auto P = ::mmap(reinterpret_cast<void*>(SlotBase(S)), Window, PROT_NONE, ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
++    SlotUsable[S] = P == reinterpret_cast<void*>(SlotBase(S));
++    if (!SlotUsable[S] && P != MAP_FAILED) {
++      ::munmap(P, Window);
++    }
++    Usable += SlotUsable[S];
++  }
++  LogMan::Msg::IFmt("tso-arm: views on, window {:#x}, ordered view {:#x}, {} thread slots", Window, OrderedBase, Usable);
++  return Usable > 0;
++}
++
++bool TSOViewMemory::IsFree(uint64_t Addr, uint64_t Length) const {
++  auto It = Ranges.upper_bound(Addr);
++  if (It != Ranges.begin() && std::prev(It)->second.End > Addr) {
++    return false;
++  }
++  return It == Ranges.end() || It->first >= Addr + Length;
++}
++
++uint64_t TSOViewMemory::ChooseAddress(uint64_t Hint, uint64_t Length) const {
++  if (Hint >= 0x10000 && Hint + Length <= Window && IsFree(Hint, Length)) {
++    return Hint;
++  }
++  // Highest gap in [AllocLow, Window)
++  uint64_t Top = Window;
++  for (auto It = Ranges.rbegin(); It != Ranges.rend(); ++It) {
++    if (It->first >= Top) {
++      continue;
++    }
++    const uint64_t End = std::min(It->second.End, Top);
++    if (Top - End >= Length && Top - Length >= AllocLow) {
++      return Top - Length;
++    }
++    Top = It->first;
++    if (Top < AllocLow + Length) {
++      return 0;
++    }
++  }
++  return Top >= AllocLow + Length ? Top - Length : 0;
++}
++
++void TSOViewMemory::Erase(uint64_t Addr, uint64_t End) {
++  auto It = Ranges.lower_bound(Addr);
++  if (It != Ranges.begin() && std::prev(It)->second.End > Addr) {
++    --It;
++  }
++  while (It != Ranges.end() && It->first < End) {
++    const uint64_t Start = It->first;
++    const Range R = It->second;
++    It = Ranges.erase(It);
++    if (Start < Addr) {
++      Ranges[Start] = {Addr, R.Prot, R.K};
++    }
++    if (R.End > End) {
++      Ranges[End] = {R.End, R.Prot, R.K};
++    }
++  }
++}
++
++void TSOViewMemory::Insert(uint64_t Addr, uint64_t End, int Prot, Kind K) {
++  Erase(Addr, End);
++  Ranges[Addr] = {End, Prot, K};
++}
++
++bool TSOViewMemory::Alias(uint64_t Addr, uint64_t Length, uint64_t Base, int Prot) {
++  auto R = ::mremap(reinterpret_cast<void*>(Addr), 0, Length, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(Base + Addr));
++  if (R == MAP_FAILED) {
++    LogMan::Msg::EFmt("tso-arm: alias of {:#x}+{:#x} at view {:#x} failed: {}", Addr, Length, Base, strerror(errno));
++    return false;
++  }
++  ::mprotect(R, Length, Prot);
++  return true;
++}
++
++void TSOViewMemory::Reserve(uint64_t Base, uint64_t Length) {
++  ::mmap(reinterpret_cast<void*>(Base), Length, PROT_NONE, ReserveFlags | MAP_FIXED, -1, 0);
++}
++
++void TSOViewMemory::AliasEverywhere(uint64_t Addr, uint64_t Length, int Prot) {
++  Alias(Addr, Length, OrderedBase, Prot);
++  for (int S = 1; S < Slots; ++S) {
++    if (SlotUsed[S]) {
++      Alias(Addr, Length, SlotBase(S), Prot);
++    }
++  }
++}
++
++void TSOViewMemory::ReserveEverywhere(uint64_t Addr, uint64_t Length) {
++  if (Addr >= Window) {
++    return;
++  }
++  Length = std::min(Length, Window - Addr);
++  Reserve(OrderedBase + Addr, Length);
++  for (int S = 1; S < Slots; ++S) {
++    if (SlotUsed[S]) {
++      Reserve(SlotBase(S) + Addr, Length);
++    }
++  }
++}
++
++void TSOViewMemory::ProtectEverywhere(uint64_t Addr, uint64_t Length, int Prot) {
++  if (Addr >= Window) {
++    return;
++  }
++  Length = std::min(Length, Window - Addr);
++  ::mprotect(reinterpret_cast<void*>(OrderedBase + Addr), Length, Prot);
++  for (int S = 1; S < Slots; ++S) {
++    if (SlotUsed[S]) {
++      ::mprotect(reinterpret_cast<void*>(SlotBase(S) + Addr), Length, Prot);
++    }
++  }
++}
++
++int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags, int Fd, off_t Offset) {
++  std::lock_guard lk(Mutex);
++  const uint64_t L = PageUp(Length);
++  if (L == 0) {
++    return -EINVAL;
++  }
++  const bool Fixed = Flags & MAP_FIXED;
++  const bool NoReplace = Flags & MAP_FIXED_NOREPLACE;
++  const bool Anon = Flags & MAP_ANONYMOUS;
++  const bool Shared = (Flags & MAP_SHARED) || (Flags & MAP_SHARED_VALIDATE) == MAP_SHARED_VALIDATE;
++
++  uint64_t A = Addr;
++  if (Fixed || NoReplace) {
++    if (A + L > Window || A + L < A) {
++      return -ENOMEM;
++    }
++    if (NoReplace && !IsFree(A, L)) {
++      return -EEXIST;
++    }
++  }
++
++  const int HostFlags = (Flags & ~DropFlags) | MAP_FIXED;
++  for (int Attempt = 0; Attempt < 64; ++Attempt) {
++    if (!Fixed && !NoReplace) {
++      A = ChooseAddress(Attempt == 0 ? Addr : 0, L);
++      if (!A) {
++        return -ENOMEM;
++      }
++    }
++    // A chosen address may hold something the guest did not map (a host mapping); never replace it.
++    const int Place = (Fixed && !NoReplace) ? MAP_FIXED : MAP_FIXED_NOREPLACE;
++    const int F = (HostFlags & ~MAP_FIXED) | Place;
++
++    void* R = MAP_FAILED;
++    Kind K = Kind::Private;
++    if (Anon && !Shared) {
++      R = ::mmap(reinterpret_cast<void*>(A), L, Prot, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++    } else if (Anon) {
++      R = ::mmap(reinterpret_cast<void*>(A), L, Prot, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++      K = Kind::SharedAnon;
++    } else if (!Shared) {
++      // Private file mapping: a copy of the file in shared memory
++      R = ::mmap(reinterpret_cast<void*>(A), L, PROT_READ | PROT_WRITE, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++      if (R != MAP_FAILED) {
++        uint64_t Done = 0;
++        while (Done < Length) {
++          const auto N = ::pread(Fd, static_cast<char*>(R) + Done, Length - Done, Offset + Done);
++          if (N <= 0) {
++            break;
++          }
++          Done += N;
++        }
++        ::mprotect(R, L, Prot);
++      }
++    } else {
++      R = ::mmap(reinterpret_cast<void*>(A), L, Prot, F | MAP_SHARED, Fd, Offset);
++      K = Kind::SharedFile;
++    }
++
++    if (R == MAP_FAILED) {
++      if (errno == EEXIST && !Fixed && !NoReplace) {
++        // Something unknown to us lives there: remember it as taken and try the next gap
++        Ranges[A] = {A + L, PROT_NONE, Kind::SharedFile};
++        continue;
++      }
++      return -errno;
++    }
++
++    Insert(A, A + L, Prot, K);
++    AliasEverywhere(A, L, Prot);
++    return A;
++  }
++  return -ENOMEM;
++}
++
++int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
++  std::lock_guard lk(Mutex);
++  const uint64_t L = PageUp(Length);
++  if (::munmap(reinterpret_cast<void*>(Addr), L) == -1) {
++    return -errno;
++  }
++  ReserveEverywhere(Addr, L);
++  Erase(Addr, Addr + L);
++  return 0;
++}
++
++int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
++  std::lock_guard lk(Mutex);
++  const uint64_t L = PageUp(Length);
++  if (::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
++    return -errno;
++  }
++  ProtectEverywhere(Addr, L, Prot);
++
++  // Split the bookkeeping at the borders and record the new protection
++  std::vector<std::pair<uint64_t, Range>> Pieces;
++  auto It = Ranges.lower_bound(Addr);
++  if (It != Ranges.begin() && std::prev(It)->second.End > Addr) {
++    --It;
++  }
++  for (; It != Ranges.end() && It->first < Addr + L; ++It) {
++    const uint64_t S = std::max(It->first, Addr);
++    const uint64_t E = std::min(It->second.End, Addr + L);
++    Pieces.push_back({S, {E, Prot, It->second.K}});
++  }
++  for (auto& [S, R] : Pieces) {
++    Insert(S, R.End, R.Prot, R.K);
++  }
++  return 0;
++}
++
++int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize, int Flags, uint64_t New) {
++  std::lock_guard lk(Mutex);
++  const uint64_t OldL = PageUp(OldSize);
++  const uint64_t NewL = PageUp(NewSize);
++
++  auto It = Ranges.upper_bound(Old);
++  if (It == Ranges.begin() || std::prev(It)->second.End <= Old) {
++    return -EFAULT;
++  }
++  const Range Src = std::prev(It)->second;
++
++  if (OldL == 0) {
++    // The guest asks for a second mapping of shared memory
++    uint64_t T = (Flags & MREMAP_FIXED) ? New : ChooseAddress(0, NewL);
++    if (!T || T + NewL > Window) {
++      return -ENOMEM;
++    }
++    auto R = ::mremap(reinterpret_cast<void*>(Old), 0, NewL, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(T));
++    if (R == MAP_FAILED) {
++      return -errno;
++    }
++    Insert(T, T + NewL, Src.Prot, Src.K);
++    AliasEverywhere(T, NewL, Src.Prot);
++    return T;
++  }
++
++  if (NewL <= OldL && !(Flags & MREMAP_FIXED)) {
++    // Shrink in place
++    if (NewL < OldL) {
++      if (::munmap(reinterpret_cast<void*>(Old + NewL), OldL - NewL) == -1) {
++        return -errno;
++      }
++      ReserveEverywhere(Old + NewL, OldL - NewL);
++      Erase(Old + NewL, Old + OldL);
++    }
++    return Old;
++  }
++
++  if (Src.K == Kind::Private) {
++    // Shared memory objects cannot grow under an existing mapping: a tail object in place, or a moved copy
++    if (!(Flags & MREMAP_FIXED) && IsFree(Old + OldL, NewL - OldL)) {
++      auto R = ::mmap(reinterpret_cast<void*>(Old + OldL), NewL - OldL, Src.Prot, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
++      if (R != MAP_FAILED) {
++        Insert(Old + OldL, Old + NewL, Src.Prot, Kind::Private);
++        AliasEverywhere(Old + OldL, NewL - OldL, Src.Prot);
++        return Old;
++      }
++    }
++    if (!(Flags & (MREMAP_MAYMOVE | MREMAP_FIXED))) {
++      return -ENOMEM;
++    }
++    const uint64_t T = (Flags & MREMAP_FIXED) ? New : ChooseAddress(0, NewL);
++    if (!T || T + NewL > Window) {
++      return -ENOMEM;
++    }
++    auto R = ::mmap(reinterpret_cast<void*>(T), NewL, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
++    if (R == MAP_FAILED) {
++      return -errno;
++    }
++    memcpy(R, reinterpret_cast<void*>(Old), std::min(OldL, NewL));
++    ::mprotect(R, NewL, Src.Prot);
++    ::munmap(reinterpret_cast<void*>(Old), OldL);
++    ReserveEverywhere(Old, OldL);
++    Erase(Old, Old + OldL);
++    Insert(T, T + NewL, Src.Prot, Kind::Private);
++    AliasEverywhere(T, NewL, Src.Prot);
++    return T;
++  }
++
++  // Shared memory of the guest's own: the kernel moves or grows it
++  uint64_t T = (Flags & MREMAP_FIXED) ? New : Old;
++  int HostFlags = Flags | MREMAP_FIXED | MREMAP_MAYMOVE;
++  if (!(Flags & MREMAP_FIXED) && !IsFree(Old + OldL, NewL - OldL)) {
++    if (!(Flags & MREMAP_MAYMOVE)) {
++      return -ENOMEM;
++    }
++    T = ChooseAddress(0, NewL);
++  }
++  if (!T || T + NewL > Window) {
++    return -ENOMEM;
++  }
++  void* R = (T == Old) ? ::mremap(reinterpret_cast<void*>(Old), OldL, NewL, 0) :
++                         ::mremap(reinterpret_cast<void*>(Old), OldL, NewL, HostFlags, reinterpret_cast<void*>(T));
++  if (R == MAP_FAILED) {
++    return -errno;
++  }
++  ReserveEverywhere(Old, OldL);
++  Erase(Old, Old + OldL);
++  Insert(T, T + NewL, Src.Prot, Src.K);
++  AliasEverywhere(T, NewL, Src.Prot);
++  return T;
++}
++
++int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
++  std::lock_guard lk(Mutex);
++  if (Advice != MADV_DONTNEED && Advice != MADV_FREE) {
++    return ::madvise(reinterpret_cast<void*>(Addr), Length, Advice) == -1 ? -errno : 0;
++  }
++  const uint64_t End = Addr + PageUp(Length);
++  auto It = Ranges.upper_bound(Addr);
++  if (It != Ranges.begin()) {
++    --It;
++  }
++  for (; It != Ranges.end() && It->first < End; ++It) {
++    const uint64_t S = std::max(It->first, Addr);
++    const uint64_t E = std::min(It->second.End, End);
++    if (S >= E) {
++      continue;
++    }
++    const int A = It->second.K == Kind::Private ? MADV_REMOVE : Advice;
++    if (::madvise(reinterpret_cast<void*>(S), E - S, A) == -1) {
++      return -errno;
++    }
++  }
++  return 0;
++}
++
++uint64_t TSOViewMemory::AttachThread() {
++  if (IdentityBase()) {
++    return 0;
++  }
++  std::lock_guard lk(Mutex);
++  for (int S = 1; S < Slots; ++S) {
++    if (!SlotUsable[S] || SlotUsed[S]) {
++      continue;
++    }
++    SlotUsed[S] = true;
++    for (auto& [Start, R] : Ranges) {
++      if (R.Prot != PROT_NONE || R.K != Kind::SharedFile) {
++        Alias(Start, R.End - Start, SlotBase(S), R.Prot);
++      }
++    }
++    return SlotBase(S);
++  }
++  return 0;
++}
++
++void TSOViewMemory::DetachThread(uint64_t Base) {
++  if (!Base) {
++    return;
++  }
++  std::lock_guard lk(Mutex);
++  const int S = Base / Window;
++  Reserve(Base, Window);
++  SlotUsed[S] = false;
++}
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
+new file mode 100644
+index 0000000..222c8a4
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
+@@ -0,0 +1,56 @@
++// SPDX-License-Identifier: MIT
++// tso-arm: guest memory as shared memory, mapped again in an ordered view and in one plain view per thread.
++// Layout and switch: FEXCore/include/FEXCore/Core/TSOViews.h
++#pragma once
++#include <FEXCore/Core/TSOViews.h>
++
++#include <cstdint>
++#include <map>
++#include <mutex>
++#include <sys/types.h>
++
++namespace FEX::HLE {
++class TSOViewMemory {
++public:
++  // nullptr if views are off or could not be set up
++  static TSOViewMemory* Get();
++
++  // Guest mmap for a 64-bit guest. Places non-fixed mappings in the window, backs private memory with shared
++  // memory and maps it into every view. Returns the address or -errno.
++  int64_t Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags, int Fd, off_t Offset);
++  int64_t Munmap(uint64_t Addr, uint64_t Length);
++  int64_t Mprotect(uint64_t Addr, uint64_t Length, int Prot);
++  int64_t Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize, int Flags, uint64_t New);
++  // MADV_DONTNEED and MADV_FREE on memory that is private for the guest: shared memory keeps its contents under
++  // MADV_DONTNEED, so the pages are removed instead (they read as zero afterwards, as private memory would)
++  int64_t Madvise(uint64_t Addr, uint64_t Length, int Advice);
++
++  // A new thread's plain view; 0 if no slot is free (the thread then cannot run with views)
++  uint64_t AttachThread();
++  void DetachThread(uint64_t Base);
++
++private:
++  enum class Kind : uint8_t { Private, SharedAnon, SharedFile };
++  struct Range {
++    uint64_t End;
++    int Prot;
++    Kind K;
++  };
++
++  bool Init();
++  uint64_t ChooseAddress(uint64_t Hint, uint64_t Length) const;
++  bool IsFree(uint64_t Addr, uint64_t Length) const;
++  void Insert(uint64_t Addr, uint64_t End, int Prot, Kind K);
++  void Erase(uint64_t Addr, uint64_t End);
++  void AliasEverywhere(uint64_t Addr, uint64_t Length, int Prot);
++  void ReserveEverywhere(uint64_t Addr, uint64_t Length);
++  void ProtectEverywhere(uint64_t Addr, uint64_t Length, int Prot);
++  static bool Alias(uint64_t Addr, uint64_t Length, uint64_t Base, int Prot);
++  static void Reserve(uint64_t Base, uint64_t Length);
++
++  std::recursive_mutex Mutex;
++  std::map<uint64_t, Range> Ranges; // guest mappings by start address, split where the protection differs
++  bool SlotUsed[FEXCore::TSOViews::Slots] {};
++  bool SlotUsable[FEXCore::TSOViews::Slots] {};
++};
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index 69e10b3..6a0dada 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -5,6 +5,7 @@
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
+ #include "LinuxSyscalls/Seccomp/SeccompEmulator.h"
++#include "LinuxSyscalls/TSOViews.h"
+ 
+ #include <FEXHeaderUtils/Syscalls.h>
+ #include <FEXCore/Utils/Allocator.h>
+@@ -181,6 +182,14 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+   ThreadStateObject->Thread = CTX->CreateThread(NewThreadState);
+   auto Frame = ThreadStateObject->Thread->CurrentFrame;
+ 
++  // tso-arm: every thread reaches guest memory through its own plain view
++  if (auto* Views = TSOViewMemory::Get()) {
++    Frame->TSOViewBase = Views->AttachThread();
++    if (!Frame->TSOViewBase && !FEXCore::TSOViews::IdentityBase()) {
++      ERROR_AND_DIE_FMT("tso-arm: no free view slot for a new thread");
++    }
++  }
++
+   // Allocate the call-ret stack with guard pages on both sides
+   auto AllocBase =
+     reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CALLRET_STACK_ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+@@ -292,6 +301,11 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
+     FEXCore::Allocator::UninstallTLSData(Thread->Thread);
+   }
+ 
++  // tso-arm: give back the thread's plain view
++  if (auto* Views = TSOViewMemory::Get()) {
++    Views->DetachThread(Thread->Thread->CurrentFrame->TSOViewBase);
++  }
++
+   // Free the call-ret stack
+   FEXCore::Allocator::munmap(reinterpret_cast<void*>(Thread->GetCallRetStackInfo().AllocationBase), CALLRET_STACK_ALLOC_SIZE);
+ 
+diff --git a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+index 50a9bae..28db981 100644
+--- a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
++++ b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: MIT
++#include <FEXCore/Core/TSOViews.h>
+ #include "VDSO_Emulation.h"
+ 
+ #include "LinuxSyscalls/Syscalls.h"
+@@ -815,6 +816,10 @@ VDSOMapping LoadVDSOThunks(FEXCore::Core::InternalThreadState* Thread, bool Is64
+ 
+         // Calculate the highest point the vdso could go.
+         VDSOHint = (1ULL << VABits) - Mapping.VDSOSize;
++        if (FEXCore::TSOViews::Enabled()) {
++          // tso-arm: below the guest stack, inside the window
++          VDSOHint = FEXCore::TSOViews::Window - 256 * 1024 * 1024 - Mapping.VDSOSize;
++        }
+       } else {
+         VDSOHint = 0x1'0000'0000ULL - Mapping.VDSOSize;
+       }
+-- 
+2.53.0
+

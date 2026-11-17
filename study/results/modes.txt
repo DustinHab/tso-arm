@@ -88,3 +88,9 @@ faults: (free first touches 1162)  share 17660  upgrade 130 (revokes 337)  lazy 
 load              42247957262    39.21%    46.85%    41.44%    38.08%
 store             18891060196    22.55%    37.19%    25.01%    30.29%
 vector store        344843963    18.37%    19.40%    20.92%   100.00%
+== 7zz global
+mode global   transitions 18143   escalated instructions 11626   locked/xchg 366120   non-temporal 0
+faults: (free first touches 235)  share 18104  upgrade 39 (revokes 43)  lazy 348  lazy-o 0  escal. 11626
+load              42247964438     5.91%     5.94%     7.40%    38.08%
+store             18891065476     0.00%     0.00%     0.00%    30.29%
+vector store        344844014     0.00%     0.00%     0.00%   100.00%

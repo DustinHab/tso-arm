@@ -1,0 +1,10 @@
+process 7zz   main module instructions with memory accesses: plain 2760, ordered 11607
+threads 43   page size 4096   pages: private 128, shared read-only 48, shared read-write 6388
+mode global   transitions 18143   escalated instructions 11626   locked/xchg 366120   non-temporal 0
+faults: (free first touches 235)  share 18104  upgrade 39 (revokes 43)  lazy 348  lazy-o 0  escal. 11626
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load              42247964438     5.91%     5.94%     7.40%    38.08%
+vector load         335813270     0.15%     0.15%     0.20%   100.00%
+store             18891065476     0.00%     0.00%     0.00%    30.29%
+vector store        344844014     0.00%     0.00%     0.00%   100.00%

@@ -241,6 +241,43 @@ remaining fault cost. Such programs need a process-wide fallback to full TSO whe
 Decision: **check** design, 4 KB pages, regions owned by their mapping thread, stacks owned by their thread, rate
 brake, and a fallback to full TSO.
 
+## 9. Stage 1 in FEX: views without protection (2026-11-17)
+
+`fex/patches/0001-tso-arm-stage-1-*.patch` (on FEX be66e03, branch `tso-views`, built to `~/opt/fex-views`,
+switched on with `TSO_VIEWS=1`):
+
+- `FEXCore/include/FEXCore/Core/TSOViews.h`: layout. Guest window [0, 16 GB), ordered view at 2^37, thread slots
+  at multiples of 16 GB (14 usable on the 39-bit Pi), so `view address & (2^34 - 1)` is the guest address.
+- `CpuStateFrame::TSOViewBase`, loaded into x24 (`REG_VIEW`) in `FillStaticRegs`; x24 leaves the register
+  allocator (`x64::RA_Views`) only when views are on.
+- IR ops `ViewPlain` (`add dst, addr, x24`) and `ViewOrdered` (`orr dst, addr, #2^37`); the `GuestViewPass` runs
+  before register allocation and replaces the address of every guest memory op (29 kinds) with the view address,
+  ordered ops and atomics with the ordered one.
+- `Push`/`Pop`/`PushTwo`/`PopTwo`/`MemCpy`/`MemSet` return updated addresses; the backend forms the view address
+  in a temporary instead (store before the pointer moves, so `push rsp` stores the old value). `rep movs/stos`
+  ordering is decided per instruction now (`IsTSOEnabled(GPR) && MemcpySetTSO`).
+- `LinuxSyscalls/TSOViews.cpp`: guest mmap/munmap/mprotect/mremap/madvise for 64-bit guests. Private memory becomes
+  `MAP_SHARED|MAP_ANONYMOUS`, private file mappings become copies in shared memory, everything is aliased into the
+  ordered view and every thread's view with `mremap(old, 0, ...)`. Non-fixed mappings are placed top-down in
+  [4 GB, 16 GB); the ELF loader's stack hint and the vDSO hint move into the window. `MADV_DONTNEED`/`MADV_FREE` on
+  private guest memory become `MADV_REMOVE` (shared memory keeps its contents otherwise, and glibc's `calloc`
+  relies on discarded heap memory reading as zero). Growing a private mapping with `mremap` maps a second object
+  behind it, or copies when it has to move (shared memory objects do not grow under a mapping).
+- Threads get a slot in `ThreadManager::CreateThread` and give it back on deletion.
+
+Result: every litmus variant and every workload output is correct, with all accesses plain through the threads'
+views (TSO off) and with all ordered through the ordered view (full TSO). Cost of the views alone (wall time, best
+of 3, 1.8 GHz):
+
+| Workload | TSO off | views, TSO off | full TSO | views, full TSO |
+|---|---|---|---|---|
+| xz | 1.35 s | 1.53 s (+13 %) | 1.55 s | 1.72 s |
+| zstd | 0.60 s | 0.64 s (+7 %) | 0.74 s | 0.77 s |
+| pigz | 1.14 s | 1.26 s (+11 %) | 1.68 s | 1.76 s |
+
+That overhead would eat the gain for xz. The kernel has no transparent huge pages, so shared memory does not lose
+huge pages here; the breakdown follows.
+
 Open questions before building it:
 
 1. How much of the time FEX spends on TSO is spent on stores and vector accesses to memory that stays private?
