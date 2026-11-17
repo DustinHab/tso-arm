@@ -146,6 +146,10 @@ Same static binaries as in the study, Pi 5 at a fixed 1.8 GHz, 4 worker threads,
 | pigz -p 4, 100 MB | 1.14 s | 1.58 s (+39 %) | 1.64 s (+44 %) | **1.19 s (+4 %)** | 1.15 s (+1 %) |
 | xz -T4 -6, 8 MB | 1.34 s | 1.52 s (+13 %) | 1.56 s (+16 %) | **1.38 s (+3 %)** | 1.37 s (+2 %) |
 | zstd -T4 -3, 100 MB | 0.58 s | 0.68 s (+17 %) | 0.73 s (+26 %) | **0.67 s (+16 %)** | 0.64 s (+10 %) |
+| 7zz b 1 -mmt4 -md20 | 36.8 s | 39.0 s (+6 %) | 39.6 s (+8 %) | 39.4 s (+7 %) | 38.7 s (+5 %) |
+
+7-Zip's benchmark is register-bound and loses little to TSO; its list (from the first, cruder study model with only
+2 % plain stores) changes nothing. Rerun with `pigz -n`: output identical to x86 in every configuration.
 
 User processor time shows the same (pigz: 4.27 s off, 6.02 s default, 6.30 s full, 4.46 s full + list). zstd and xz
 produce the same bytes as natively on x86 in every configuration; pigz's gzip header holds the input file's name and
@@ -197,6 +201,45 @@ RIP to the forced-TSO set and invalidates its code, so the next translation orde
 
 Not covered at first: `fork` (shared mappings would stay shared with the child), file-backed `MAP_SHARED` memory
 (treated as shared from the start), 32-bit guests.
+
+## 8. Which design (study, `-mode` and policies, 2026-11-17)
+
+The study client now models what the real mechanism would do: pages of a region belong to the thread that mapped
+it (`mmap`, `brk`) without a fault; a new thread's stack belongs to it from its start; `munmap` resets pages. Fault
+accounting distinguishes sharing transitions, upgrades (shared read-only to read-write, with one revocation per view
+that had the page), lazy mappings of shared read-only pages into plain views, lazy mappings into per-thread ordered
+views, and escalations. Three designs:
+
+- **views**: one ordered view per thread (its own private pages accessible in it).
+- **global**: one ordered view for all threads, private pages inaccessible in it. An ordered access by the owner
+  shares the page. This ratchets: once an instruction is ordered, it shares every private page it touches, which
+  escalates the plain instructions using those pages, and so on. Private buffers end with 0.06 % plain stores
+  instead of 100 %. Ruled out.
+- **check**: one ordered view, plus a software owner check in ordered instructions only: if the page-owner table says
+  the page is the thread's own, the access takes the plain view. The MMU stays the guard (a stale check result ends
+  in a fault on the plain view), the table only picks the path. No per-thread ordered views, no lazy mappings into
+  them, and escalated instructions regain the plain path on private data.
+
+Stores left plain and estimated fault cost (A76 costs from section 4 of `bench/fault_cost.c`; escalation assumed at
+30 microseconds), 4 KB pages:
+
+| Workload | views: stores plain | views: events | check: stores plain | check: est. cost | check + brake 30: stores | est. cost |
+|---|---|---|---|---|---|---|
+| pigz | 89.1 % | 5,200 | 99.97 % | 55 ms | 99.97 % | 55 ms |
+| xz | 99.80 % | 6,800 | 99.85 % | 65 ms | 99.85 % | 65 ms |
+| zstd | 72.8 % | 107,000 | 90.2 % (78 % in another run) | 435 ms | 71.3 % | 179 ms |
+
+Granularity: 64 KB tracking cuts faults by 10 to 15 but destroys the result through false sharing (xz: 39 % plain
+stores). A fixed per-chunk threshold (collapse a 2 MB chunk to shared after N transitions) helps zstd and ruins xz
+(41 to 56 %). What separates the programs is the rate: zstd causes about 93 transitions per million accesses, xz
+1.8, pigz 0.6. The brake (`-brake R`: a thread that caused more than R transitions per million of its accesses in
+its last million collapses the chunks it touches in the next) leaves pigz and xz untouched at R = 30.
+
+zstd stays a loss: its whole TSO overhead in FEX is 0.15 s and the list-based optimum saves 0.06 s, less than the
+remaining fault cost. Such programs need a process-wide fallback to full TSO when the fault cost passes a budget.
+
+Decision: **check** design, 4 KB pages, regions owned by their mapping thread, stacks owned by their thread, rate
+brake, and a fallback to full TSO.
 
 Open questions before building it:
 

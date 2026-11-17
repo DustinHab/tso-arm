@@ -1,0 +1,12 @@
+process pigz   main module instructions with memory accesses: plain 4229, ordered 1782
+threads 6   page size 4096   pages: private 272, shared read-only 0, shared read-write 1492
+mode check   transitions 119   escalated instructions 1782   locked/xchg 118384   non-temporal 0
+faults: (free first touches 385)  share 112  upgrade 7 (revokes 13)  lazy 18  lazy-o 0  escal. 1782
+accesses of escalated instructions sent down the plain path by the owner check: 34278711
+collapsed chunks 4 (after 16 transitions)   estimated fault cost 54.7 ms
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load               2814003523    94.30%    94.30%    94.55%     3.62%
+vector load          56363516    96.35%    96.35%    98.97%   100.00%
+store               939553267    99.97%    99.97%    99.97%    10.86%
+vector store         58157232    99.57%    99.57%    99.99%   100.00%

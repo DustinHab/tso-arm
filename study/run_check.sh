@@ -1,6 +1,7 @@
 #!/bin/sh
-# Runs workloads in 'check' mode at several tracking granularities. Results: study/results/check-NAME-SHIFT.txt
-#   wsl.exe -d Ubuntu -- sh /mnt/c/Users/dusti/tso-arm/study/run_check.sh "12 16" zstd pigz xz
+# Runs workloads in 'check' mode for combinations of tracking granularity and collapse threshold.
+# Results: study/results/check-NAME-SHIFT-COLLAPSE.txt, lists build/lists/NAME-check-SHIFT-COLLAPSE.plain
+#   wsl.exe -d Ubuntu -- sh /mnt/c/Users/dusti/tso-arm/study/run_check.sh "12" "none c4 b20" zstd pigz xz
 SRC=$(cd "$(dirname "$0")" && pwd)
 R=$(dirname "$SRC")
 B=$HOME/study/build-check
@@ -23,18 +24,30 @@ cmd_of() {
     esac
 }
 
+# policies: none, cN (collapse a chunk after N transitions), bR (brake at R transitions per million accesses)
+policy_opts() {
+    case $1 in
+    none) echo "" ;;
+    c*) echo "-collapse ${1#c}" ;;
+    b*) echo "-brake ${1#b}" ;;
+    esac
+}
+
 shifts=$1
-shift
+collapses=$2
+shift 2
 for name in "$@"; do
     for s in $shifts; do
-        rm -f $T/r.* $T/l.*
-        timeout 5400 $DR/bin64/drrun -c $B/libpagestate.so -mode check -page_shift $s -out $T/r -list $T/l -- \
-            $(cmd_of $name) >/dev/null 2>&1
-        app=$(cmd_of $name | cut -d' ' -f1 | xargs basename)
-        cp "$(ls -S $T/r.$app.*.txt | head -n 1)" $SRC/results/check-$name-$s.txt
-        lst=$(ls -S $T/l.$app.*.plain 2>/dev/null | head -n 1)
-        [ -n "$lst" ] && sort "$lst" >$R/build/lists/$name-check-$s.plain
-        echo "== $name check page_shift $s"
-        grep -E '^(mode|faults|accesses of|store |vector store|load |vector load)' $SRC/results/check-$name-$s.txt
+        for c in $collapses; do
+            rm -f $T/r.* $T/l.*
+            timeout 5400 $DR/bin64/drrun -c $B/libpagestate.so -mode check -page_shift $s $(policy_opts $c) \
+                -out $T/r -list $T/l -- $(cmd_of $name) >/dev/null 2>&1
+            app=$(cmd_of $name | cut -d' ' -f1 | xargs basename)
+            cp "$(ls -S $T/r.$app.*.txt | head -n 1)" $SRC/results/check-$name-$s-$c.txt
+            lst=$(ls -S $T/l.$app.*.plain 2>/dev/null | head -n 1)
+            [ -n "$lst" ] && sort "$lst" >$R/build/lists/$name-check-$s-$c.plain
+            echo "== $name check page_shift $s policy $c"
+            grep -E '^(faults|collapsed|store |vector store|load )' $SRC/results/check-$name-$s-$c.txt
+        done
     done
 done

@@ -1,0 +1,12 @@
+process zstd   main module instructions with memory accesses: plain 5925, ordered 3594
+threads 7   page size 4096   pages: private 7, shared read-only 3, shared read-write 2148
+mode check   transitions 695   escalated instructions 3603   locked/xchg 60100   non-temporal 0
+faults: (free first touches 16996)  share 654  upgrade 41 (revokes 53)  lazy 62  lazy-o 0  escal. 3603
+accesses of escalated instructions sent down the plain path by the owner check: 108925829
+collapsed chunks 41 (after 16 transitions)   estimated fault cost 115.9 ms
+plain accesses:
+class                accesses    sticky   dynamic      page       fex
+load                530096824    63.86%    63.90%    76.52%    39.59%
+vector load          13286451    53.68%    53.74%     6.15%   100.00%
+store               200742947    79.57%    79.57%    73.98%    38.06%
+vector store         10225477    71.28%    71.28%    39.71%   100.00%

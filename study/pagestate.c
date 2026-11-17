@@ -34,7 +34,8 @@
 //          -list PREFIX   also write PREFIX.APP.PID.plain: addresses of the executed instructions of the main
 //                         module that never had to be ordered (input for the oracle experiment in FEX)
 //          -page_shift N  page size 2^N (default 12)
-//          -mode views|global
+//          -mode views|global|check
+//          -collapse N    a 2 MB chunk becomes shared read-write as a whole after N transitions in it
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -86,7 +87,9 @@ typedef struct {
     uint32_t idx;
     uint64_t total[NCLASS], sticky[NCLASS], dynamic[NCLASS], fex[NCLASS];
     uint64_t atomics, nontemporal, transitions, escalations;
-    uint64_t f_first, f_share, f_upgrade, f_lazy, f_lazy_o, revokes, checked;
+    uint64_t f_first, f_share, f_upgrade, f_lazy, f_lazy_o, revokes, checked, collapses;
+    uint64_t win_acc, win_faults;
+    int braking;
     int sc;           // system call in flight and its parameters (saved before the call)
     uintptr_t p[5];
 } tls_t;
@@ -170,6 +173,7 @@ static void reset_pages(uintptr_t s, uintptr_t e, int only_private) {
         if (only_private && (w & 3) != ST_PRIV) continue;
         __atomic_store_n(&pg->word, 0, __ATOMIC_RELEASE);
         pg->ro_mask = pg->o_mask = 0;
+        pg->pad = 0;
     }
 }
 
@@ -232,6 +236,32 @@ static uint32_t touch(page_t *pg, uintptr_t pn, uint32_t me, int write, int as_f
     }
 }
 
+// Cost brake: a 2 MB chunk whose pages changed state 'collapse_after' times becomes shared read-write as a whole
+// (one mprotect of the range per view instead of a fault per page from then on).
+// Rate brake (-brake R): a thread that caused more than R transitions per million of its accesses in its last
+// window of a million accesses collapses the chunk of every transition it causes in the next window.
+#define CHUNK_SHIFT 21
+#define WINDOW 1000000
+static uint32_t collapse_after;
+static uint32_t brake_rate;
+
+static void note_churn(tls_t *tl, uintptr_t pn) {
+    uintptr_t head = (pn << page_shift) >> CHUNK_SHIFT << CHUNK_SHIFT >> page_shift;
+    page_t *h = page_of(head);
+    tl->win_faults++;
+    uint32_t n = __atomic_add_fetch(&h->pad, 1, __ATOMIC_RELAXED);
+    if (!(tl->braking || (collapse_after && n == collapse_after))) return;
+    if (__atomic_load_n(&h->pad, __ATOMIC_RELAXED) > 0x7fffffff) return;  // already collapsed
+    __atomic_store_n(&h->pad, 0x80000000u, __ATOMIC_RELAXED);
+    uintptr_t count = (uintptr_t)1 << (CHUNK_SHIFT - page_shift);
+    for (uintptr_t p = head; p < head + count; p++) {
+        page_t *pg = page_of(p);
+        __atomic_store_n(&pg->word, ST_SRW, __ATOMIC_RELEASE);
+        pg->ro_mask = 0;
+    }
+    tl->collapses++;
+}
+
 static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
     tls_t *tl = drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
     uint32_t me = tl->idx + 1;
@@ -257,7 +287,10 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
             break;
         }
         }
-        if (kind != TR_NONE && kind != TR_FIRST) tl->transitions++;
+        if (kind != TR_NONE && kind != TR_FIRST) {
+            tl->transitions++;
+            if (collapse_after || brake_rate) note_churn(tl, pn);
+        }
         if (!((st == ST_PRIV && (w >> 2) == me) || (st == ST_SRO && !write))) ok = 0;
         if (!(st == ST_PRIV && (w >> 2) == me)) own = 0;
         if (st == ST_SRO && !write && !via_ordered && !(__atomic_load_n(&pg->ro_mask, __ATOMIC_RELAXED) & bit)) {
@@ -280,6 +313,10 @@ static void on_access(insn_t *in, uintptr_t addr, uint32_t info) {
         return;
     }
     if (!in->executed) in->executed = 1;
+    if (brake_rate && ++tl->win_acc >= WINDOW) {
+        tl->braking = tl->win_faults > brake_rate;
+        tl->win_acc = tl->win_faults = 0;
+    }
     tl->total[c]++;
     if (ok) tl->dynamic[c]++;
     if ((info & (INFO_VEC | INFO_RSP | INFO_STR)) != 0) tl->fex[c]++;
@@ -491,6 +528,7 @@ static void event_thread_exit(void *dc) {
     sum.f_lazy_o += tl->f_lazy_o;
     sum.revokes += tl->revokes;
     sum.checked += tl->checked;
+    sum.collapses += tl->collapses;
     if (tl->idx + 1 > max_threads_seen) max_threads_seen = tl->idx + 1;
     dr_mutex_unlock(merge_lock);
     dr_thread_free(dc, tl, sizeof *tl);
@@ -559,6 +597,12 @@ static void event_exit(void) {
     if (mode == MODE_CHECK)
         dr_fprintf(f, "accesses of escalated instructions sent down the plain path by the owner check: %llu\n",
                    (unsigned long long)sum.checked);
+    // Cost model from bench/fault_cost.c on the A76 at 1.8 GHz: fault + 1 mprotect 5.4 us, fault + 2 mprotect
+    // 9 us, mprotect alone 3 us; a retranslation is assumed to cost 30 us.
+    double est = sum.f_share * 9.0 + sum.f_upgrade * 5.4 + sum.revokes * 3.0 + sum.f_lazy * 5.4 +
+                 sum.f_lazy_o * 5.4 + sum.escalations * 30.0 + sum.collapses * (5.4 + 3.0 * (nthreads + 1));
+    dr_fprintf(f, "collapsed chunks %llu (after %u transitions, brake %u per million)   estimated fault cost %.1f ms\n",
+               (unsigned long long)sum.collapses, collapse_after, brake_rate, est / 1000.0);
     dr_fprintf(f, "plain accesses:\n");
     dr_fprintf(f, "%-13s %15s %9s %9s %9s %9s\n", "class", "accesses", "sticky", "dynamic", "page", "fex");
     for (int c = 0; c < NCLASS; c++)
@@ -583,6 +627,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
             list = open_named(argv[++i], "plain");
         else if (strcmp(argv[i], "-page_shift") == 0 && i + 1 < argc)
             page_shift = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-collapse") == 0 && i + 1 < argc)
+            collapse_after = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-brake") == 0 && i + 1 < argc)
+            brake_rate = atoi(argv[++i]);
         else if (strcmp(argv[i], "-mode") == 0 && i + 1 < argc)
         {
             i++;
