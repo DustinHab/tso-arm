@@ -743,3 +743,55 @@ Efficiency (`bench/efficiency.sh`, best of three, README table):
 
 Without ordering the translation is past 90 %. With x86 order kept the page protocol leaves 6 to 10 points for pigz
 and xz; zstd hands its data between threads and pays for full ordering (66 %, as FEX's full TSO).
+
+## 19. What the protocol costs translated code (2026-11-18)
+
+`aot/protocol_cost.sh`: the same translated program without ordering and under the page protocol with a profile
+(median of 5, fixed clock). At the start pigz paid 150 ms (1,077 -> 1,227 ms), all of it user time (4.09 -> 4.41 s);
+the protocol's own work was small (327 faults, 38 ms over all threads). Where it went (`aot/protocol_where.sh`,
+`aot/hot_stubs.sh`):
+
+- **glibc's memmove in FEX's JIT**, 0.29 billion cycles. Under the protocol FEX is run with
+  `FEX_MEMCPYSETTSOENABLED=1`, and with it reports no ERMS in CPUID, so glibc picks `__memmove_avx_unaligned`
+  instead of the ERMS variant that was translated. The variants share one body and jump into each other; the
+  translator now takes a region with an entry inside it (`NAME=ENTRY:START:END`, `aot/strings_specs.sh` for every
+  memmove/mempcpy/memset entry). String functions are translated as units (`--strings`): one `dmb ish` on entry and
+  before each return, their own accesses plain through the ordered view in any order. The C library leaves that
+  order unspecified (glibc itself copies the tail first or in overlapping blocks), so no program can depend on it;
+  it is how FEX orders `rep movs` with that option. They are routed for every caller, FEX's code included.
+- **Patched accesses**: 72 sites, 5.5 % of all cycles in their stubs. Integer loads without writeback now get a fast
+  stub: the address into the destination register, bit 38 set, `ldapr` (as cheap as a plain load on the A76) if
+  aligned, the barrier path otherwise. The alignment test uses `tbnz`, not `tst`: the first version broke pigz and
+  zstd, because clang may keep a comparison's flags live across a load.
+- **Read-only data made shared read-write**: the hottest stubs read zlib's constant Huffman tables. A program's
+  read-only segment lies in the same 2 MB chunk as its `.data`, `.bss` and heap start, which every thread touches;
+  after four transitions the chunk collapsed to shared read-write, read-only data included, and every read of it
+  was ordered (FEX's own code was escalated for it as well). A collapse now makes pages the guest cannot write shared
+  read-only, readable in all plain views; a later mprotect that allows writing is covered, since the first write
+  faults and upgrades the page.
+
+pigz: 150 ms -> 58 ms (1,102 -> 1,160 ms), stubs 5.5 % -> 2.4 %, 57 patched sites. The rest is mostly
+`crc32_z` reading the input buffer, which the reading thread fills: data that really moves between threads.
+
+xz pays 45 ms (1,153 -> 1,198 ms) with the same user cycles (7.57 against 7.56 billion). It is all kernel time:
+guest memory under the protocol is shared memory mapped into several views, so every first touch of a page is a
+shmem fault and a page clearing (`clear_page`, `shmem_fault`), 1,315 `mprotect` calls (21 ms) and slower `read`
+into shared memory (22 against 3 ms). That is the memory management of the views, not translated code; transparent
+huge pages for shmem would cut the faults but need a kernel setting (`shmem_enabled`), left alone here.
+
+Correctness: outputs identical everywhere; litmus tests with translated thread functions (forbidden outcomes only
+without ordering: rep 2, vecflag 2, vecwait 1) and FEX's own litmus tests under the protocol (500,000 iterations,
+none) after the change to collapsing chunks.
+
+Measuring: one session had native xz 5 % slow (1.13 s against 1.07 s; the chip was still warm from the litmus
+runs), which made translated xz look 94 % efficient. `bench/efficiency.sh` now cools down below 60 °C before every
+run, not only before every round. Efficiency (best of three):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 61 % | 69 % | 67 % | 66 % |
+| tso-arm, with profile | yes | 75 % | 71 % | 65 % | 70 % |
+| ahead of time, TSO off | no | 92 % | 93 % | 87 % | 91 % |
+| ahead of time + tso-arm, with profile | yes | 86 % | 88 % | 68 % | 80 % |
+
+The page protocol now costs translated pigz and xz 5 to 6 points; zstd pays full ordering for its shared data.

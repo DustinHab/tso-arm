@@ -62,6 +62,8 @@ run_config() {
     esac
     # FEXENV: settings for every FEX configuration (FEX reads its options from the environment)
     [ $cfg != native ] && [ -n "$FEXENV" ] && set -- env $FEXENV "$@"
+    # every run starts cool, the native ones included (a warm chip made native xz 5 % slower in one session)
+    cooldown
     timeout 600 /usr/bin/time -f '%e %U %S' -o /dev/shm/eff-time "$@" $(args_of $w) >/dev/shm/eff-out 2>/dev/shm/eff-err
     rc=$?
     sum=$(md5sum </dev/shm/eff-out | cut -c1-8)
@@ -76,12 +78,12 @@ trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/eff-out /dev/shm/eff-t
 # Profiles start empty for every measurement
 rm -f $HOME/.cache/tso-arm/*.prof
 sh tools/freq.sh fix $KHZ >/dev/null
-# The test machine has no fan: start every round below COOL degrees (at most two minutes of waiting)
+# The test machine has no fan: start every run below COOL degrees (at most two minutes of waiting)
 cooldown() {
     i=0
     while [ $i -lt 24 ]; do
         t=$(vcgencmd measure_temp | sed 's/[^0-9.]//g' | cut -d. -f1)
-        [ "$t" -lt ${COOL:-65} ] && return
+        [ "$t" -lt ${COOL:-60} ] && return
         sleep 5
         i=$((i + 1))
     done

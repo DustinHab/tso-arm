@@ -130,15 +130,27 @@ def cc_of(mnemonic, prefix):
 class Function:
     def __init__(self, elf, spec):
         self.elf = elf
-        name, (self.start, self.size) = elf.lookup(spec)
-        # C name: a shared name gets its address
-        self.name = name if len(elf.all.get(name, [])) == 1 else f"{name}_{self.start:x}"
+        if "=" in spec:
+            # NAME=ENTRY:START:END (hex): code from START to END entered at ENTRY, jumps anywhere inside it internal
+            # (glibc's string functions: several entry points into shared bodies)
+            name, rng = spec.split("=", 1)
+            self.start, lo, hi = (int(x, 16) for x in rng.split(":"))
+            self.name = name
+        else:
+            name, (self.start, size) = elf.lookup(spec)
+            lo, hi = self.start, self.start + size
+            # C name: a shared name gets its address
+            self.name = name if len(elf.all.get(name, [])) == 1 else f"{name}_{self.start:x}"
+        self.region = (lo, hi)
+        # what FEX checks against the guest code: from the entry to the end of the region
+        self.size = hi - self.start
+        self.hashed = elf.read(self.start, self.size)
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         md.detail = True
-        self.code = elf.read(self.start, self.size)
-        self.insns = list(md.disasm(self.code, self.start))
-        if sum(i.size for i in self.insns) != self.size:
-            raise LiftError(f"{name}: decoding stopped early")
+        self.code = elf.read(lo, hi - lo)
+        self.insns = list(md.disasm(self.code, lo))
+        if sum(i.size for i in self.insns) != hi - lo:
+            raise LiftError(f"{self.name}: decoding stopped early")
         self.at = {i.address: i for i in self.insns}
         self.analyse()
 
@@ -146,7 +158,7 @@ class Function:
         return LiftError(f"{self.name}+{insn.address - self.start:#x} ({insn.address:#x}: {insn.mnemonic} {insn.op_str}): {msg}")
 
     def inside(self, a):
-        return self.start <= a < self.start + self.size
+        return self.region[0] <= a < self.region[1]
 
     def jump_table(self, insn):
         # notrack jmp [idx*8 + table], bounded by an earlier "cmp idx, n; ja default" in the same block
@@ -521,6 +533,14 @@ class Lifter:
         else:
             decl.append(f"    if (__builtin_expect(aot_mode[{f.index}], 0))")
             decl.append(f"        return o_{f.name}(c, V, gsp, A, {self.call_args()});")
+            if f.unit:
+                decl.append("    uint8_t *O = c->oview;")
+        if f.unit:
+            # a string function as one unit: ordered against everything before it and after it, its own accesses in
+            # any order (the C library leaves their order unspecified), through the ordered view so that shared
+            # pages do not fault; without views and without ordering (O == V, the plain variant) no barriers
+            decl.append("    const bool unit_fence = O != V" + (" || 1" if ordered else "") + ";")
+            decl.append("    if (unit_fence) __asm__ volatile(\"dmb ish\" ::: \"memory\");")
         locs = [r for r in GPRS if r not in ARGS]
         decl.append("    uint64_t " + ", ".join(f"{r} = 0" for r in locs) + ";")
         decl.append("    u128 " + ", ".join(f"x{i} = {{0, 0}}" for i in range(16)) + ";")
@@ -533,6 +553,8 @@ class Lifter:
         decl.append("    (void)c; (void)V; (void)gsp; (void)A;")
         for ty, n in self.temps:
             decl.append(f"    {ty} {n};")
+        if f.start != f.region[0]:
+            decl.append(f"    goto L_{f.start:x}; // the entry lies inside the region")
         return head + decl + self.out + ["}"]
 
     def e(self, s):
@@ -661,6 +683,8 @@ class Lifter:
             return f"hld{bits}({expr})"
         if kind == "r":
             return f"rld{bits}(V, {expr})"
+        if kind == "g" and self.f.unit:
+            return f"gld{bits}(O, {expr})"
         if kind == "g" and self.ordered:
             return f"old{bits}(O, V, {expr})"
         if kind == "s":
@@ -670,6 +694,8 @@ class Lifter:
     def st(self, kind, bits, expr, value):
         if kind == "h":
             return f"hst{bits}({expr}, {value});"
+        if kind == "g" and self.f.unit:
+            return f"gst{bits}(O, {expr}, {value});"
         if kind == "g" and self.ordered:
             return f"ost{bits}(O, V, {expr}, {value});"
         if kind == "s":
@@ -1193,6 +1219,8 @@ class Lifter:
     def i_ret(self, insn, ops):
         if ops:
             raise self.err("ret with operand")
+        if self.f.unit:
+            self.e("if (unit_fence) __asm__ volatile(\"dmb ish\" ::: \"memory\");")
         self.e("return rax;")
 
     # --- atomics and fences ----------------------------------------------------------------------------------------
@@ -1698,7 +1726,7 @@ class Lifter:
         for f in self.funcs.values():
             if roots and f.name not in roots and f.name.rsplit("_", 1)[0] not in roots:
                 continue
-            out.append(f"    {{{f.start:#x}ULL, {f.size}, {fnv(f.code):#x}ULL, e_{f.name}, \"{f.name}\"}},")
+            out.append(f"    {{{f.start:#x}ULL, {f.size}, {fnv(f.hashed):#x}ULL, e_{f.name}, \"{f.name}\"}},")
         out.append("    {0, 0, 0, 0, 0},")
         out.append("};")
         return "\n".join(out) + "\n"
@@ -1827,16 +1855,27 @@ def main():
         k = names.index("--roots")
         roots = set(names[k + 1:])
         names = names[:k]
-    # --internal NAME...: translated and called from translated code, but not routed for FEX's code (a call from
-    # the JIT would pay the bridge; glibc's string functions are called often with little to do)
-    if "--internal" in names:
-        k = names.index("--internal")
-        internal = names[k + 1:]
-        names = names[:k] + internal
-        roots = set(n.split("@")[0] for n in names[:k]) if roots is None else roots
+    # String functions (glibc's memmove, memset): translated as units, ordered against what comes before and after
+    # them, their own accesses in any order (see Lifter.lift). --strings NAME...: routed for FEX's code as well;
+    # --internal NAME...: called from translated code only (a call from the JIT pays the bridge)
+    units = set()
+    for opt in ("--strings", "--internal"):
+        if opt in names:
+            k = names.index(opt)
+            rest = names[k + 1:]
+            stop = next((i for i, n in enumerate(rest) if n.startswith("--")), len(rest))
+            listed = rest[:stop]
+            names = names[:k] + rest[stop:] + listed
+            units.update(listed)
+            if opt == "--internal":
+                internal = set(listed)
+                keep = [n for n in names if n not in internal]
+                roots = set(n.split("@")[0] for n in keep) if roots is None else roots
     elf = Elf(binary)
     try:
         funcs = [Function(elf, n) for n in names]
+        for f, n in zip(funcs, names):
+            f.unit = n in units
         lifter = Lifter(elf, funcs)
         text = lifter.program(roots)
     except LiftError as e:

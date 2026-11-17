@@ -20,20 +20,20 @@ rows run the program's hot functions translated ahead of time (`aot/`, a prototy
 Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-17T23:32, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-18T00:27, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.08 s, 100 % | 0.50 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.14 s, 88 % | 1.37 s, 79 % | 0.60 s, 83 % | 83 % |
-| tso-arm build, TSO off | no | 1.16 s, 86 % | 1.36 s, 79 % | 0.58 s, 86 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.52 s, 71 % | 0.69 s, 72 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.55 s, 70 % | 0.75 s, 67 % | 66 % |
-| tso-arm, first run | yes | 1.48 s, 68 % | 1.62 s, 67 % | 1.00 s, 50 % | 61 % |
-| tso-arm, with profile | yes | 1.35 s, 74 % | 1.53 s, 71 % | 0.76 s, 66 % | 70 % |
-| ahead of time, TSO off | no | 1.07 s, 93 % | 1.16 s, 93 % | 0.56 s, 89 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.78 s, 56 % | 1.65 s, 65 % | 0.78 s, 64 % | 62 % |
-| ahead of time + tso-arm, with profile | yes | 1.21 s, 83 % | 1.24 s, 87 % | 0.76 s, 66 % | 78 % |
+| native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.14 s, 88 % | 1.35 s, 79 % | 0.57 s, 86 % | 84 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
+| FEX default | no | 1.57 s, 64 % | 1.52 s, 70 % | 0.68 s, 72 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.65 s, 61 % | 1.54 s, 69 % | 0.73 s, 67 % | 66 % |
+| tso-arm, first run | yes | 1.44 s, 69 % | 1.57 s, 68 % | 1.05 s, 47 % | 60 % |
+| tso-arm, with profile | yes | 1.34 s, 75 % | 1.50 s, 71 % | 0.75 s, 65 % | 70 % |
+| ahead of time, TSO off | no | 1.09 s, 92 % | 1.15 s, 93 % | 0.56 s, 87 % | 91 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.65 s, 65 % | 0.72 s, 68 % | 63 % |
+| ahead of time + tso-arm, with profile | yes | 1.16 s, 86 % | 1.22 s, 88 % | 0.72 s, 68 % | 80 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 <!-- efficiency:end -->
