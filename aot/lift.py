@@ -1789,9 +1789,13 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
 
 // guest memory in the ordered variant: the ordered view, x86 order kept. Loads acquire (`ldapr`), stores release
 // (`stlr`); unaligned, a load is followed by `dmb ishld` and a store preceded by `dmb ish`, which orders them the
-// same way. With views, guest addresses lie below 2^34; a larger value is the address of a stack object kept in
+// same way. (Reading the covering aligned words with `ldapr` instead was slower for zstd: 725 -> 782 ms, notes
+// section 21.) With views, guest addresses lie below 2^34; a larger value is the address of a stack object kept in
 // host memory (relative to the plain view, private to the thread): plain.
 #define HOSTOBJ(a) __builtin_expect(((a) >> 34) != 0 && O != V, 0)
+#ifndef AOT_WORDS
+#define AOT_WORDS 0 // unaligned loads of this many bytes and more read the covering aligned words with ldapr
+#endif
 #define ORDERED(bits, T)                                                                                               \
     static inline T old##bits(uint8_t *O, uint8_t *V, uint64_t a)                                                      \
     {                                                                                                                  \
@@ -1799,6 +1803,15 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
             return *(volatile T##u *)(V + a);                                                                          \
         if (__builtin_expect((a & (bits / 8 - 1)) == 0, 1))                                                            \
             return __atomic_load_n((T *)(O + a), __ATOMIC_ACQUIRE);                                                    \
+        if (AOT_WORDS && bits / 8 >= AOT_WORDS) {                                                                      \
+            const uint64_t lo = a & ~7ULL;                                                                             \
+            const unsigned sh = (unsigned)(a & 7) * 8;                                                                 \
+            const uint64_t w0 = __atomic_load_n((uint64_t *)(O + lo), __ATOMIC_ACQUIRE);                               \
+            if ((a & 7) + bits / 8 <= 8)                                                                               \
+                return (T)(w0 >> sh);                                                                                  \
+            const uint64_t w1 = __atomic_load_n((uint64_t *)(O + lo + 8), __ATOMIC_ACQUIRE);                           \
+            return (T)((w0 >> sh) | (w1 << (64 - sh)));                                                                \
+        }                                                                                                              \
         T v = *(volatile T##u *)(O + a);                                                                               \
         __asm__ volatile("dmb ishld" ::: "memory");                                                                    \
         return v;                                                                                                      \

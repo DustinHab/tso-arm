@@ -820,6 +820,37 @@ functions, ordered and under the protocol: no forbidden outcome. Efficiency (bes
 Native xz varies between sessions and rounds (1.07 to 1.15 s, cooled below 60 °C each time; 1.09 s best here),
 so its efficiency carries about three points either way; translated xz with the protocol took 1.19 to 1.26 s.
 
+## 21. zstd: where full ordering is the best on offer (2026-11-18)
+
+zstd is the program that keeps the mean below 90 %: 89 % translated without ordering, 68 % with it. It falls back to
+full ordering in every run; the alternatives, with its functions translated ahead of time
+(`aot/zstd_fallback.sh`, median of 5, profile of each setting's own):
+
+| Setting | Wall | Faults |
+|---|---|---|
+| fallback to full ordering (as measured) | 725 ms | - |
+| protocol, no fallback (`TSO_VIEWS_BUDGET=0`) | 946 ms | 3,003 in 53 ms, 35,343 pages moved with their chunk |
+| the same without chunks (`TSO_VIEWS_CHUNK=0`) | 1,119 ms | 34,267 in 347 ms |
+| the same with migratory ownership (`TSO_VIEWS_MIGRATE=1`) | 761 ms | 5,447 in 441 ms, 1,471 migrations |
+
+Without the fallback the chunk collapses make zstd's hash tables shared read-write: its compression contexts and
+buffers go from one worker to the next (they come from pools), one thread at a time. Migrating them instead works
+with the views mapped on first use better than before (section 13: 0.97 s against 0.99 s), 761 ms against 946 ms,
+but each change of hands still costs about 80 microseconds of `mprotect` and TLB shootdowns: ordering the data
+remains cheaper than moving it.
+
+Within full ordering (`aot/ordered_hot.sh`): in the ordered `ZSTD_compressBlock_doubleFast` 22 % of the samples sit
+on barriers, almost all `dmb ishld` after unaligned loads (three sites 19 %: the input read at byte positions), 7 %
+on `stlr`, 0.4 % on `ldapr`. Reading the aligned words that cover an unaligned load with `ldapr` instead
+(`AOT_WORDS`, `aot/words_sweep.sh`): 745 ms with barriers, 738 ms for 8-byte loads, 769 and 776 ms for 4 and 2
+bytes (all sizes at once: 782 ms). zstd is memory-bound, and the barriers wait on cache misses that cost the same
+time either way; kept as it was.
+
+So on this core zstd's ordering costs about as much as FEX's full TSO (67 to 69 %), whatever is translated how.
+What would change it is hardware: FEAT_LRCPC2 (`ldapur`, ordered loads with offsets and without the alignment
+fault) and FEAT_LRCPC3 (ordered vector accesses) remove the barriers from unaligned and vector loads; the A76 has
+neither.
+
 Correctness: outputs identical everywhere; litmus tests with translated thread functions (forbidden outcomes only
 without ordering: rep 2, vecflag 2, vecwait 1) and FEX's own litmus tests under the protocol (500,000 iterations,
 none) after the change to collapsing chunks.
