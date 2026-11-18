@@ -40,6 +40,10 @@ Efficiency = native time / time; 100 % is native speed. Throttling flags after t
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
 <!-- efficiency:end -->
 
+Box64 on the same machine and programs (`bench/box64.sh`, notes section 25; it needs dynamically linked builds):
+by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forbidden litmus outcomes) and reaches
+58 and 47 % (geometric mean); with x86 order kept (`STRONGMEM=4`) 23 %.
+
 ## Layout
 
 | Path | Contents |

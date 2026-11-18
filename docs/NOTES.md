@@ -1026,3 +1026,21 @@ contexts really move between threads; ordering them or moving the pages costs th
 would shrink on newer cores is the barrier after each unaligned load (19 % of zstd's ordered match finder):
 FEAT_LRCPC2 (`ldapur`) and FEAT_LSE2 (unaligned `ldapr` within 16 bytes) make those loads as cheap as aligned ones;
 the A76 has neither.
+
+## 25. Box64 on the same machine (2026-11-18)
+
+Box64 refuses static binaries, so it runs dynamically linked builds of the same sources with the same options
+(`study/build_dynamic.sh`: zlib, liblzma and libzstd linked in, only the C library dynamic, which Box64 runs as
+native Arm code). `bench/box64.sh`, one session, best of three at 1.8 GHz, outputs checked:
+
+| | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| native | - | 1.01 s | 1.07 s | 0.49 s | 100 % |
+| Box64, default (`STRONGMEM=0`) | no (litmus `stack`: 44 forbidden) | 77 % | 30 % | 86 % | 58 % |
+| Box64, `STRONGMEM=1` | no (litmus `vec`: 123 forbidden) | 56 % | 28 % | 66 % | 47 % |
+| Box64, `STRONGMEM=4` (TSO like QEMU) | yes (litmus clean) | 21 % | 17 % | 36 % | 23 % |
+| tso-arm, ahead of time + protocol | yes | 87 % | 90 % | 68 % | 81 % |
+
+(pigz under tso-arm landed in its slower group in this session; 90 % in the README's best of five.) xz under Box64
+is slow in every setting. Box64's ordered mode costs it three quarters of its speed; its default and its first
+level are not correct for multithreaded x86 programs on this core.
