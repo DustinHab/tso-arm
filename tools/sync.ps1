@@ -10,7 +10,8 @@ try {
     if (Test-Path $tar) { Remove-Item $tar }
     & tar.exe -cf $tar -T $list
     & scp.exe -q $tar "${HostName}:/tmp/tso-arm.tar"
-    & ssh.exe $HostName "mkdir -p ~/tso-arm && tar -xf /tmp/tso-arm.tar -C ~/tso-arm && find ~/tso-arm -name '*.sh' -exec sed -i 's/\r$//' {} + && rm /tmp/tso-arm.tar"
+    # tar from Windows carries no execute bits: the command gets its own back
+    & ssh.exe $HostName "mkdir -p ~/tso-arm && tar -xf /tmp/tso-arm.tar -C ~/tso-arm && find ~/tso-arm -name '*.sh' -exec sed -i 's/\r$//' {} + && chmod +x ~/tso-arm/bin/tso-arm && rm /tmp/tso-arm.tar"
 } finally {
     Pop-Location
 }

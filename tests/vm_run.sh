@@ -4,6 +4,7 @@
 # server on the host and running tests/vm_guest.sh; the TSOTEST lines of the console end up in out/vm-MODEL.log.
 # Correctness only: emulated cores have no real timing.
 #   tests/vm_run.sh MODEL...      (e.g. cortex-a53 cortex-a72 neoverse-v1 cortex-a710)
+#   GUEST=vm_diag.sh: another script for the guest; REBUILD=1: the payload made anew
 cd "$(dirname "$0")/.."
 R=$PWD
 V=$HOME/vm
@@ -13,7 +14,9 @@ mkdir -p $S/payload out
 if [ ! -f $S/payload.tar.gz ] || [ "${REBUILD:-}" = 1 ]; then
     rm -rf $S/payload/*
     cp -a $HOME/opt/fex-generic $S/payload/fex
-    cp build/threads-x86 build/mp-x86 build/x86/pigz tests/vm_guest.sh $S/payload/
+    cp -a $HOME/opt/fex $S/payload/fex-up # upstream FEX (built for the A76: only for cores that have its features)
+    cp build/threads-x86 build/mp-x86 build/x86/pigz $S/payload/
+    cp tests/${GUEST:-vm_guest.sh} $S/payload/vm_guest.sh
     head -c 1000000 build/corpus.tar >$S/payload/in.tar
     build/arm64/pigz -n -p 4 -c $S/payload/in.tar | md5sum | cut -c1-8 >$S/payload/want.md5
     AOT_NORCPC=1 sh aot/pigz.sh >/dev/null && cp out/aot/pigz.so $S/payload/pigz-v80.so

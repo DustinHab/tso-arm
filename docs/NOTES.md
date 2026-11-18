@@ -1118,3 +1118,35 @@ Open: on the V1 model the test with 20 threads (more than the view slots: the fa
 the V1 is the only model with 256-bit SVE, which FEX uses for AVX (`FEX_HOSTFEATURES=disablesve` turns it off, for
 narrowing it down). On `max` FEX fails without the views as well (FEX's full TSO), so that is FEX or QEMU's model,
 not the protocol; to be confirmed with upstream FEX there.
+
+Followed up (`tests/vm_diag.sh`, `tests/vm_stress.sh`, `tests/threads_stress.sh`): on the V1 model the test with 20
+threads ran 86 more times without a crash (40 with SVE, 40 without, 6 in the diagnosis), on the Pi 150 times; the one
+crash did not come back. On `max`, upstream FEX crashes as well (full TSO, no views: threads, litmus, pigz), and
+everything of tso-arm runs with `FEX_HOSTFEATURES=disablesve`: QEMU's `max` has 2048-bit SVE, a vector length FEX does
+not handle.
+
+## 28. From prototype to a command (2026-11-18)
+
+- **`bin/tso-arm`**: `run` (modes `tso`, `full`, `unordered`; the learned library used when there is one), `learn`
+  (`aot/auto.py` on the user's program and arguments, the library cached under `~/.cache/tso-arm/aot/` by a hash of
+  the program file), `status`, `forget`, `check` (`tools/board_check.sh`, now with Capstone's version and the
+  installed FEX), `install` (`fex/install.sh`: FEX fetched from its repository, set to the commit the patches apply to,
+  patched without commits, built and installed to `~/.local/opt/tso-arm`; `--generic` for any Armv8.0 core),
+  `rootfs` (FEX's own fetcher), `version` (`VERSION`, 0.1.0). A dynamically linked program without an x86-64 root file
+  system gets told what is missing instead of failing inside FEX.
+- **Dynamically linked programs** under the page protocol, for the first time (`tests/dynamic_check.sh`, a minimal
+  root file system of glibc's loader and libraries, `tests/mini_rootfs.sh`): pigz, xz and zstd correct, as under
+  FEX's full TSO.
+- **`aot/auto.py`** profiles with the patched FEX as well (its block names reach perf: `tests/perf_names.sh`, 76 %
+  of pigz's samples in named blocks against 78 % with upstream FEX), reads perf's numbers in the C locale and gives
+  the program an empty stdin.
+- **A ring buffer that relies on x86 order** (`tests/spsc.c`, plain `mov`s, no barriers): 20 million messages under
+  FEX on the Pi, 31 arrived wrong without ordering, none with FEX's full TSO or with tso-arm
+  (`tests/spsc_check.sh`).
+- **CI** on GitHub's Arm runners (`.github/workflows/ci.yml`, `tests/ci.sh`): FEX with the patches built by
+  `tso-arm install --generic` (cached by the patches' hash), the x86-64 test programs built with a cross compiler, then
+  through `tso-arm run`: struct fields and a shared stack against FEX's full TSO, 8, 16 and 40 threads, the litmus
+  tests under the protocol and with translated thread functions, a dynamically linked program with the cross
+  compiler's C library as root file system, the ring buffer. The same script on the Pi: all passed.
+- **README** rewritten as the project's front page: what it is, the result, a quick start, why the order matters,
+  how it works, the measurements, correctness, where it runs, the commands.

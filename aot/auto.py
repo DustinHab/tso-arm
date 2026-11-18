@@ -26,8 +26,9 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIFT = os.path.join(ROOT, "aot", "lift.py")
-FEX_UPSTREAM = os.path.expanduser("~/opt/fex/bin/FEX")
-FEX_VIEWS = os.path.expanduser("~/opt/fex-views/bin/FEX")
+# FEX with the tso-arm patches (TSO_ARM_FEX, as `tso-arm learn` sets it); it also names its blocks for perf
+FEX_VIEWS = os.environ.get("TSO_ARM_FEX") or os.path.expanduser("~/opt/fex-views/bin/FEX")
+FEX_PROFILE = os.environ.get("TSO_ARM_PROFILE_FEX") or FEX_VIEWS
 STRING_FUNCS = re.compile(r"^__(mem(move|cpy|pcpy|set)|wmemset)_")
 
 
@@ -57,10 +58,11 @@ def load_base(binary):
 def profile(binary, args, syms, work):
     data = os.path.join(work, "profile.data")
     # block by block: a block named by its start then lies within one function (a multiblock spans many)
-    env = dict(os.environ, FEX_TSOENABLED="0", FEX_BLOCKJITNAMING="1", FEX_DISABLETELEMETRY="1", FEX_MULTIBLOCK="0")
-    subprocess.run(["perf", "record", "-q", "-e", "cycles:u", "-o", data, FEX_UPSTREAM, binary, *args], env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    report = run(["perf", "report", "-i", data, "--sort", "sym", "--stdio"]).stdout
+    env = dict(os.environ, FEX_TSOENABLED="0", FEX_BLOCKJITNAMING="1", FEX_DISABLETELEMETRY="1", FEX_MULTIBLOCK="0",
+               LC_ALL="C")
+    subprocess.run(["perf", "record", "-q", "-e", "cycles:u", "-o", data, FEX_PROFILE, binary, *args], env=env,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    report = run(["perf", "report", "-i", data, "--sort", "sym", "--stdio"], env=dict(os.environ, LC_ALL="C")).stdout
     base = load_base(binary)
     addrs = [a for a, _ in syms]
     pat = re.compile(re.escape(os.path.basename(binary)) + r"\+0x([0-9a-f]+)")
@@ -92,7 +94,7 @@ def try_lift(binary, name, work):
 
 
 def output_hash(env, binary, args):
-    r = subprocess.run([FEX_VIEWS, binary, *args], env=env, capture_output=True, timeout=1800)
+    r = subprocess.run([FEX_VIEWS, binary, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=1800)
     return hashlib.md5(r.stdout).hexdigest(), r.returncode
 
 

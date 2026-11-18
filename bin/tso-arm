@@ -1,0 +1,195 @@
+#!/bin/sh
+# tso-arm: x86-64 Linux programs on 64-bit Arm with x86's memory order kept, and fast: FEX with the page protocol
+# (only memory that threads really share is ordered) and hot functions translated ahead of time.
+# https://github.com/DustinHab/tso-arm
+set -e
+REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+PREFIX=${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm
+
+die() {
+    echo "tso-arm: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<EOF
+usage: tso-arm COMMAND [...]
+
+  run [--mode MODE] [--aot LIBRARY] PROGRAM [ARGS...]
+        run an x86-64 Linux program. MODE: tso (default; x86 memory order kept, with the page protocol and what
+        'learn' translated), full (FEX's own full ordering), unordered (fastest, not correct for programs whose
+        threads share data without locks). --aot: a library of translated functions other than the learned one
+  learn PROGRAM [ARGS...]
+        profile a static x86-64 program, translate its hot functions ahead of time and check them against a run
+        without; later runs use them. Runs the program several times with these arguments: give it an input
+        whose processing has no side effects (stdin is empty, the output is compared)
+  status [PROGRAM]      what tso-arm has learned
+  forget PROGRAM        drop what it learned about PROGRAM
+  check                 whether this machine can run tso-arm
+  install [--generic]   build FEX with the tso-arm patches into $PREFIX (--generic: for any Armv8.0 core)
+  rootfs                fetch an x86-64 root file system for dynamically linked programs (FEX's own tool)
+  version
+EOF
+}
+
+fex() {
+    for f in "$TSO_ARM_FEX" "$PREFIX/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
+        if [ -n "$f" ] && [ -x "$f" ]; then
+            echo "$f"
+            return
+        fi
+    done
+    die "FEX with the tso-arm patches not found: run 'tso-arm install' (or set TSO_ARM_FEX)"
+}
+
+# static | pie | dynamic | other: what kind of program the file is
+kind() {
+    command -v readelf >/dev/null || die "readelf not found (binutils)"
+    h=$(readelf -h "$1" 2>/dev/null) || {
+        echo other
+        return
+    }
+    echo "$h" | grep -q 'Machine:.*X86-64' || {
+        echo other
+        return
+    }
+    if readelf -lW "$1" 2>/dev/null | grep -q 'INTERP'; then
+        echo dynamic
+    elif echo "$h" | grep -q 'Type:.*DYN'; then
+        echo pie
+    else
+        echo static
+    fi
+}
+
+# the name the ahead-of-time library of a program is kept under: its file name and a hash of its contents
+key() {
+    p=$(readlink -f "$1")
+    echo "$(basename "$p")-$(sha256sum "$p" | cut -c1-16)"
+}
+
+cmd_run() {
+    mode=tso
+    aot=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+        --mode)
+            mode=$2
+            shift 2
+            ;;
+        --aot)
+            aot=$(readlink -f "$2")
+            [ -f "$aot" ] || die "no library $2"
+            shift 2
+            ;;
+        --mode=*)
+            mode=${1#*=}
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+        esac
+    done
+    [ $# -ge 1 ] || die "run: which program?"
+    prog=$1
+    shift
+    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $1"
+    k=$(kind "$prog")
+    [ "$k" = other ] && die "$prog is not an x86-64 Linux program"
+    if [ "$k" = dynamic ] && [ -z "$FEX_ROOTFS" ] && ! grep -qs '"RootFS"' "$HOME/.fex-emu/Config.json"; then
+        die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
+    fi
+    F=$(fex)
+    lib=${aot:-"$CACHE/aot/$(key "$prog").so"}
+    export FEX_DISABLETELEMETRY=${FEX_DISABLETELEMETRY:-1}
+    case $mode in
+    tso)
+        export TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1
+        if [ -f "$lib" ]; then
+            export TSO_AOT="$lib" FEX_MULTIBLOCK=0
+        fi
+        ;;
+    full)
+        export FEX_TSOENABLED=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1
+        ;;
+    unordered)
+        export FEX_TSOENABLED=0
+        if [ -f "$lib" ]; then
+            export TSO_AOT="$lib" FEX_MULTIBLOCK=0
+        fi
+        ;;
+    *) die "unknown mode $mode (tso, full, unordered)" ;;
+    esac
+    exec "$F" "$prog" "$@"
+}
+
+cmd_learn() {
+    [ $# -ge 1 ] || die "learn: which program?"
+    prog=$1
+    shift
+    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $1"
+    case $(kind "$prog") in
+    static) ;;
+    pie | dynamic) die "$prog is not a static, non-PIE x86-64 program: ahead-of-time translation does not take it yet; 'tso-arm run' runs it with the page protocol alone" ;;
+    *) die "$prog is not an x86-64 Linux program" ;;
+    esac
+    for t in python3 clang perf; do
+        command -v $t >/dev/null || die "learn needs $t"
+    done
+    python3 -c 'import capstone' 2>/dev/null || die "learn needs the Python module capstone (pip install capstone)"
+    mkdir -p "$CACHE/aot"
+    out="$CACHE/aot/$(key "$prog").so"
+    TSO_ARM_FEX=$(fex) python3 "$REPO/aot/auto.py" "$prog" "$out" -- "$@"
+    echo "tso-arm: learned $(wc -l <"$out.list") functions of $(basename "$prog"); 'tso-arm run' uses them from now on"
+}
+
+cmd_status() {
+    if [ $# -ge 1 ]; then
+        lib="$CACHE/aot/$(key "$1").so"
+        if [ -f "$lib" ]; then
+            echo "$(basename "$1"): $(wc -l <"$lib.list") functions translated ahead of time"
+        else
+            echo "$(basename "$1"): nothing translated ahead of time"
+        fi
+        n=$(ls "$CACHE"/"$(basename "$1")"-*.prof 2>/dev/null | wc -l)
+        echo "$(basename "$1"): $n page protocol profile(s)"
+        return
+    fi
+    echo "translated ahead of time ($CACHE/aot):"
+    for l in "$CACHE"/aot/*.so.list; do
+        [ -f "$l" ] && echo "  $(basename "$l" .so.list): $(wc -l <"$l") functions"
+    done
+    echo "page protocol profiles: $(ls "$CACHE"/*.prof 2>/dev/null | wc -l)"
+}
+
+cmd_forget() {
+    [ $# -ge 1 ] || die "forget: which program?"
+    rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.list" "$CACHE/aot/$(key "$1").c"
+    rm -f "$CACHE"/"$(basename "$1")"-*.prof
+    echo "tso-arm: forgot $(basename "$1")"
+}
+
+cmd_rootfs() {
+    F=$(fex)
+    fetcher="$(dirname "$F")/FEXRootFSFetcher"
+    [ -x "$fetcher" ] || die "FEXRootFSFetcher not found next to $F"
+    exec "$fetcher" "$@"
+}
+
+case ${1:-} in
+run) shift && cmd_run "$@" ;;
+learn) shift && cmd_learn "$@" ;;
+status) shift && cmd_status "$@" ;;
+forget) shift && cmd_forget "$@" ;;
+check) exec sh "$REPO/tools/board_check.sh" ;;
+install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
+rootfs) shift && cmd_rootfs "$@" ;;
+version) echo "tso-arm $(cat "$REPO/VERSION" 2>/dev/null || echo unknown)$(git -C "$REPO" describe --always --dirty 2>/dev/null | sed 's/^/ (/; s/$/)/')" ;;
+-h | --help | help | "") usage ;;
+*) usage >&2 && exit 1 ;;
+esac

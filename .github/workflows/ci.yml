@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  arm64:
+    name: Correctness on an Arm runner
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 python3-pip binutils \
+            gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          # Ubuntu 24.04 packages Capstone 4; the translator is written against 5
+          python3 -m pip install --user --break-system-packages 'capstone>=5,<6'
+
+      - name: FEX with the tso-arm patches (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+
+      - name: Build FEX
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: bin/tso-arm install --generic
+
+      - name: Machine
+        run: bin/tso-arm check
+
+      - name: Correctness tests
+        run: sh tests/ci.sh

@@ -23,10 +23,24 @@ say "FEAT_LRCPC (ldapr)" "$(has lrcpc) (no: ldar instead, slower)"
 say "FEAT_LRCPC2 (ldapur)" "$(has ilrcpc) (yes: unaligned ordered loads could be cheaper; not used yet)"
 say "FEAT_LSE2 (unaligned atomics)" "$(has uscat)"
 say "FEAT_LSE (atomics)" "$(has atomics)"
-for t in clang python3 perf cmake ninja git; do
+for t in clang ld.lld python3 cmake ninja git readelf; do
     command -v $t >/dev/null && say "tool $t" "found" || bad "tool $t" "missing"
 done
-python3 -c 'import capstone' 2>/dev/null && say "python capstone" "found" || bad "python capstone" "missing (pip install capstone)"
+cv=$(python3 -c 'import capstone; print(capstone.__version__)' 2>/dev/null)
+case $cv in
+5.* | [6-9].*) say "python capstone" "$cv" ;;
+"") say "python capstone" "missing (only 'tso-arm learn' needs it: pip install --user capstone)" ;;
+*) say "python capstone" "$cv (only 'tso-arm learn' needs it, version 5: pip install --user capstone)" ;;
+esac
+command -v perf >/dev/null || say "perf" "missing (only 'tso-arm learn' needs it)"
+fex=""
+for f in "$TSO_ARM_FEX" "${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
+    if [ -n "$f" ] && [ -x "$f" ]; then
+        fex=$f
+        break
+    fi
+done
+say "FEX with the tso-arm patches" "${fex:-not installed yet ('tso-arm install')}"
 [ $ok = 1 ] && echo "=> tso-arm can run here" || echo "=> missing requirements"
 
 if [ "$1" = --run ] && [ $ok = 1 ]; then
