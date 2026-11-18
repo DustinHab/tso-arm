@@ -3,7 +3,7 @@
 #   efficiency = native wall time / wall time of the x86-64 build under the configuration
 # Same inputs, same thread count, fixed clock. Every output is checked against the x86-64 reference checksum.
 # Raw lines: out/efficiency_runs.txt; table for the README: out/efficiency.md
-#   bench/efficiency.sh [workload ...]      (ROUNDS=3, KHZ=1800000,
+#   bench/efficiency.sh [workload ...]      (ROUNDS=5, KHZ=1800000,
 #       CONFIGS="native off ours-off default full protocol-cold protocol aot-off aot-full aot")
 # The aot configurations need the workload's library of functions translated ahead of time (out/aot/WORKLOAD.so,
 # from aot/WORKLOAD.sh); without it they are left out.
@@ -13,12 +13,15 @@ FEXV=$HOME/opt/fex-views/bin/FEX
 X=$PWD/build/x86
 N=$PWD/build/arm64
 C=$PWD/build
-ROUNDS=${ROUNDS:-3}
+# Five rounds: under FEX, pigz's wall time falls into two groups about 40 ms apart from run to run (notes section
+# 22), and the profile configurations learn in the first round
+ROUNDS=${ROUNDS:-5}
 KHZ=${KHZ:-1800000}
 raw=out/efficiency_runs.txt
 mkdir -p out
 WORKLOADS=${*:-zstd pigz xz}
 CONFIGS=${CONFIGS:-native off ours-off default full protocol-cold protocol aot-off aot-full aot}
+FEXENV=${FEXENV-FEX_DISABLETELEMETRY=1}
 stamp=$(date +%Y-%m-%dT%H:%M)
 
 args_of() {
@@ -60,7 +63,9 @@ run_config() {
         fi
         ;;
     esac
-    # FEXENV: settings for every FEX configuration (FEX reads its options from the environment)
+    # FEXENV: settings for every FEX configuration (FEX reads its options from the environment). By default FEX's
+    # telemetry is off in all of them: FEX writes its telemetry file at every exit with an fsync, 7 ms per process on
+    # the test machine's SD card (bench/startup_aot.sh), which has nothing to do with translation
     [ $cfg != native ] && [ -n "$FEXENV" ] && set -- env $FEXENV "$@"
     # every run starts cool, the native ones included (a warm chip made native xz 5 % slower in one session)
     cooldown
@@ -99,7 +104,7 @@ done
 throttled=$(vcgencmd get_throttled | cut -d= -f2)
 
 # Table from this session's runs: best wall time per workload and configuration
-LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" '
+LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" -v fexenv="$FEXENV" '
   $1 == s && $9 == "ok" { k = $2 " " $3; if (!(k in best) || $5 < best[k]) best[k] = $5; w[$2] = 1 }
   $1 == s && $9 != "ok" { bad[$2 " " $3] = $9 }
   END {
@@ -132,4 +137,5 @@ LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" 
       if (cnt == m) printf " %.0f %% |\n", 100 * exp(lg / cnt); else printf " - |\n";
     }
     printf "\nEfficiency = native time / time; 100 %% is native speed. Throttling flags after the run: %s.\n", thr;
+    if (fexenv != "") printf "Every FEX configuration ran with %s.\n", fexenv;
   }' $raw | tee out/efficiency.md

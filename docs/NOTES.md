@@ -867,3 +867,96 @@ run, not only before every round. Efficiency (best of three):
 | ahead of time + tso-arm, with profile | yes | 86 % | 88 % | 68 % | 80 % |
 
 The page protocol now costs translated pigz and xz 5 to 6 points; zstd pays full ordering for its shared data.
+
+## 22. A thread's end walked the whole window; start-up; rep stos (2026-11-18)
+
+**crc32_z ordered from the start** instead of its patched loads (`aot/lift.py --ordered NAME`, the function's
+ordered variant chosen at load; `aot_order_reset` puts it back when FEX runs without ordering): 1,166 against
+1,163 ms for pigz (`aot/ordered_cmp.sh`, median of 5), no difference. Kept as an option, not used.
+
+**Thread end.** Under the page protocol each pigz worker spent about 0.08 billion cycles more than without
+ordering, in FEX and in code at the start of an anonymous executable mapping. perf on a FEX linked without
+`--strip-all` (`fex/link_symbols.sh`: same code and addresses, with a symbol table) named the FEX part:
+`TSOViewMemory::DetachThread`, 1 % of all cycles. When a thread ended, it cleared the thread's bit in the state of
+every page of the 16 GB window, 4 million pages, under the protocol's lock, and wrote every `ROMask` entry whether
+it changed or not, which made the kernel back all 8 MB of that table with real pages. Several milliseconds per
+thread, one thread after the other at the end of the program. Page states exist only inside guest mappings (a
+mapping sets them, an unmapping clears them), so it now walks the mappings only and writes only what changes.
+The other part was the patched access stubs (`aot/hot_stubs.sh`: 2.2 % of cycles, mostly crc32_z).
+
+The serial walk is gone from every thread's end; what it was worth in wall time is hard to state for pigz, whose
+runs fall into two groups (below). `aot/output_cost.sh` (median of 5, fixed clock) puts the protocol's cost at
+about 35 ms for pigz after the change (1,077 to 1,091 ms without ordering, 1,109 to 1,113 ms under the protocol),
+against 58 ms before (`aot/protocol_cost.sh`, section 19); xz paid 45 ms before and 3 ms in one session after
+(1,197 against 1,200 ms). Correct in every test: the views matrix (shared stacks, twelve threads), outputs of all
+three programs with and without ordering, FEX's litmus tests under the protocol and the litmus tests with
+translated thread functions (200,000 iterations each, no forbidden outcome).
+
+**Start-up** (`bench/startup_aot.sh`, empty input, median of 15, 1.8 GHz): native pigz 1.2 ms; translated without
+ordering 29.4 ms, under the protocol 31.5 ms; the library itself adds less than 1 ms. Of FEX's part, 13 ms are
+1,453 blocks compiled (glibc's start), 7 ms FEX's telemetry file, written at every exit with an `fsync` (on the
+Pi's SD card). The efficiency table now runs every FEX configuration with `FEX_DISABLETELEMETRY=1`, FEX's own
+included: it has nothing to do with translation. The protocol's statistics took two clock reads per compiled block
+and per fault even when nobody asked for them (3 % of the start-up's cycles); only with `TSO_VIEWS_STATS` now.
+
+**rep stos.** Without ordering FEX reports ERMS, glibc picks `__memset_avx2_unaligned_erms`, and its `rep stosb`
+was translated as one volatile byte store per iteration: 0.21 billion cycles in pigz, 2.8 % of all (under the
+protocol FEX hides ERMS and glibc uses the vector stores). The stores of one string instruction may happen in any
+order among themselves (x86 fast strings), so `rep stos` now fills 16 bytes per store; still the library's own
+stores, not a call to `memset`, so that a fault under the protocol comes from translated code and can be patched.
+Ordered: a `dmb ish` before (every later store is a release or follows a barrier).
+
+**Code quality** (`aot/vs_native.sh`, user cycles per function, native build against the translation without
+ordering): pigz 6.96 against 7.37 billion (+6 %), of it `longest_match` 3.74 against 4.13 (+10 %), `compress_block`
++11 %, `deflate_slow` and `slide_hash` faster than native. xz 7.23 against 7.57 (+5 %), `lzma_lzma_optimum_normal`
++10 %, the match finders +2 %. The hot chain loop of `longest_match` (`aot/annotate_vs.sh`) is 13 instructions
+translated against 11 native (two register copies, an extending compare) and waits on the same loads; the byte
+comparisons after it take an extra `add` each, since guest addresses are formed relative to the view's base.
+
+**Addresses as view + base + displacement** (tried, taken out): `V + (base + disp)` cannot be split by clang (the
+integer sum may wrap), so every access computed its own address. Formed as `(V + base) + disp` instead, accesses
+shared the base register and used immediate offsets. User cycles unchanged (`aot/ab_cycles.sh`, median of 5,
+without ordering): pigz 7.363 against 7.374 billion, xz 7.495 against 7.485. The extra `add`s are not on the
+critical path; the A76 has the arithmetic units to spare.
+
+**A wrong patch stub** turned up with it: zstd crashed under the protocol. `ldr w15, [x2, x18]`, x2 the view plus
+`ip`, x18 the negative `1 - offset_1`: the stub took bit 38 of the offset register as the sign of a host address and
+ran the access plainly on a page another thread writes (found with `TSO_AOT_PATCH_MAX`, `aot/patch_bisect.sh`). The
+old address form could meet the same split, since clang's backend reassociates the integer additions freely; it had
+not happened to. Stubs now compute the address and decide by its bit 38: loads into their destination register as
+before (`ldapr` when aligned, the instruction there with `dmb ishld` when not), everything else (stores, vector and
+pair accesses, a destination that is also base or offset, writeback) through a scratch register saved on the host
+stack, with the instruction converted to that base and the writeback applied after. Stores whose data register is
+the base can now be patched as well. Correct with every load on the general path too (`TSO_AOT_NOFAST=1`,
+`aot/stub_check.sh`), in the views matrix and both litmus series.
+
+**crc32_z ordered** against its patched loads once more, by user cycles under the protocol (`CFG=protocol
+aot/ab_cycles.sh`, median of 6): 7.475 against 7.435 billion, half a percent less. Real, but it needs a choice per
+program, and a rule such as "functions with many patched sites start ordered" would order `deflate_slow` as well,
+whose stores would all become `stlr`. Not used.
+
+**Two groups of wall times.** pigz under FEX lands either near 1.07 s or near 1.11 s without ordering, near 1.11 s or
+1.16 s under the protocol, from run to run (`aot/bimodal.sh`, `aot/output_cost.sh`); natively 1.00 s with one outlier
+in ten. User and system time are the same in both groups; the slow runs have more involuntary context switches and
+more ranges mapped into a view on first use (140 against 127 to 132), so it is how six threads share four cores, not
+work done. `bench/efficiency.sh` now takes the best of five rounds (the profile configurations learn in the first).
+The output's destination makes no difference (`/dev/null` against `/dev/shm`: 1,109 against 1,113 ms).
+
+**What the start-up compiles** (`bench/startup_blocks.sh`): xz on an empty input compiles 2,213 blocks in 291 guest
+functions, the largest `init_cpu_features` with 87; glibc's start, locale, malloc and option parsing. Nothing there
+to translate ahead of time in one piece.
+
+Efficiency (`bench/efficiency.sh`, best of five, telemetry off in every FEX configuration, README table):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 61 % | 70 % | 68 % | 66 % |
+| tso-arm, with profile | yes | 79 % | 72 % | 68 % | 73 % |
+| ahead of time, TSO off | no | 91 % | 93 % | 89 % | 91 % |
+| ahead of time + tso-arm, with profile | yes | 89 % | 90 % | 69 % | 82 % |
+
+With x86 order kept, pigz and xz are at 89 and 90 % (xz's protocol runs fall into two groups as well: 1.19 s once,
+1.25 to 1.26 s in the other three profile rounds). What is left between them and native: the start-up (25 and
+36 ms, mostly FEX compiling glibc's start block by block), code quality of the translation (5 to 6 % more user
+cycles, `longest_match` and `lzma_lzma_optimum_normal` about 10 %), and for pigz the patched loads of crc32_z on
+the input buffer the reading thread fills.

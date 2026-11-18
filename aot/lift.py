@@ -1311,12 +1311,17 @@ class Lifter:
         self.e("__asm__ volatile(\"yield\" ::: \"memory\");")
 
     def rep_stos(self, insn, ops):
-        bits = {"b": 8, "w": 16, "d": 32, "q": 64}[insn.mnemonic[-1]]
-        self.e("while (rcx) {")
-        self.e("    " + self.st("g", bits, "rdi", f"({T[bits]})rax"))
-        self.e(f"    rdi += {bits // 8};")
-        self.e("    rcx--;")
-        self.e("}")
+        # one string instruction: its stores may happen in any order among themselves (x86 fast strings), so the
+        # bulk is written 16 bytes at a time
+        size = {"b": 1, "w": 2, "d": 4, "q": 8}[insn.mnemonic[-1]]
+        if self.f.unit:
+            self.e(f"gfill(O, rdi, rax, {size}, rcx);")
+        elif self.ordered:
+            self.e(f"ofill(O, V, rdi, rax, {size}, rcx);")
+        else:
+            self.e(f"gfill(V, rdi, rax, {size}, rcx);")
+        self.e(f"rdi += rcx * {size};")
+        self.e("rcx = 0;")
 
     # SSE: 128-bit registers as clang vectors (u128 = two 64-bit lanes, cast to other lane types per operation), so
     # that they stay in NEON registers and lane operations become NEON instructions
@@ -1670,7 +1675,8 @@ class Lifter:
         funcs = list(self.funcs.values())
         for k, f in enumerate(funcs):
             f.index = k
-        out.append(f"static volatile uint8_t aot_mode[{len(funcs)}]; // 1: the function runs its ordered variant")
+        init = ", ".join("1" if getattr(f, "start_ordered", False) else "0" for f in funcs)
+        out.append(f"static volatile uint8_t aot_mode[{len(funcs)}] = {{{init}}}; // 1: the function runs its ordered variant")
         params = ", ".join(f"uint64_t {a}" for a in ARGS)
         for pre in ("f_", "o_"):
             for f in funcs:
@@ -1714,6 +1720,12 @@ class Lifter:
         out.append("{")
         out.append(f"    for (int k = 0; k < {len(funcs)}; k++)")
         out.append("        aot_mode[k] = 1;")
+        out.append("}")
+        out.append("// without ordering (FEX's TSO off): no function starts ordered")
+        out.append("void aot_order_reset(void)")
+        out.append("{")
+        out.append(f"    for (int k = 0; k < {len(funcs)}; k++)")
+        out.append("        aot_mode[k] = 0;")
         out.append("}")
         # entry points for FEX: guest rsp at the call (stack arguments above it), the thread's own guest stack for
         # translated code, the argument registers
@@ -1769,6 +1781,25 @@ static inline void gst16(uint8_t *V, uint64_t a, uint16_t v) { *(volatile u16u *
 static inline void gst32(uint8_t *V, uint64_t a, uint32_t v) { *(volatile u32u *)(V + a) = v; }
 static inline void gst64(uint8_t *V, uint64_t a, uint64_t v) { *(volatile u64u *)(V + a) = v; }
 static inline void gst128(uint8_t *V, uint64_t a, u128 v) { *(volatile u128u *)(V + a) = v; }
+// rep stos: n elements of size bytes (the low bytes of v), 16 bytes per store; the stores stay the library's own
+// (volatile, not a call to memset), so that a fault under the page protocol comes from translated code
+static inline void gfill(uint8_t *B, uint64_t a, uint64_t v, unsigned size, uint64_t n)
+{
+    const uint64_t bytes = n * size;
+    const uint64_t pat = size == 1   ? (v & 0xff) * 0x0101010101010101ULL
+                         : size == 2 ? (v & 0xffff) * 0x0001000100010001ULL
+                         : size == 4 ? (v & 0xffffffffULL) * 0x0000000100000001ULL
+                                     : v;
+    const u128 q = {pat, pat};
+    uint8_t *p = B + a;
+    uint64_t i = 0;
+    for (; i + 16 <= bytes; i += 16)
+        *(volatile u128u *)(p + i) = q;
+    for (; i + 8 <= bytes; i += 8)
+        *(volatile u64u *)(p + i) = pat;
+    for (; i < bytes; i++)
+        *(volatile uint8_t *)(p + i) = (uint8_t)(pat >> ((i & 7) * 8)); // the pattern repeats within 8 bytes
+}
 // read-only guest data (tables in read-only segments): immutable, so neither ordered nor through the views
 static inline uint8_t rld8(uint8_t *V, uint64_t a) { (void)V; return *(const uint8_t *)(uintptr_t)a; }
 static inline uint16_t rld16(uint8_t *V, uint64_t a) { (void)V; return *(const u16u *)(uintptr_t)a; }
@@ -1848,6 +1879,17 @@ static inline void ost128(uint8_t *O, uint8_t *V, uint64_t a, u128 v)
     ost64(O, V, a, v[0]);
     ost64(O, V, a + 8, v[1]);
 }
+// rep stos ordered: the string's stores after every earlier access, in any order among themselves; every later
+// store is a release or follows a barrier, which keeps them before it
+static inline void ofill(uint8_t *O, uint8_t *V, uint64_t a, uint64_t v, unsigned size, uint64_t n)
+{
+    if (HOSTOBJ(a)) {
+        gfill(V, a, v, size, n);
+        return;
+    }
+    __asm__ volatile("dmb ish" ::: "memory");
+    gfill(O, a, v, size, n);
+}
 
 __attribute__((noreturn, cold)) void aot_unreachable(uint64_t rip);
 
@@ -1871,6 +1913,15 @@ def main():
     # String functions (glibc's memmove, memset): translated as units, ordered against what comes before and after
     # them, their own accesses in any order (see Lifter.lift). --strings NAME...: routed for FEX's code as well;
     # --internal NAME...: called from translated code only (a call from the JIT pays the bridge)
+    # --ordered NAME...: these (listed among the functions as well) start in their ordered variant, for functions
+    # that read shared data throughout (one inline ldapr per access instead of a patched stub each)
+    start_ordered = set()
+    if "--ordered" in names:
+        k = names.index("--ordered")
+        rest = names[k + 1:]
+        stop = next((i for i, n in enumerate(rest) if n.startswith("--")), len(rest))
+        start_ordered = set(rest[:stop])
+        names = names[:k] + rest[stop:]
     units = set()
     for opt in ("--strings", "--internal"):
         if opt in names:
@@ -1889,6 +1940,7 @@ def main():
         funcs = [Function(elf, n) for n in names]
         for f, n in zip(funcs, names):
             f.unit = n in units
+            f.start_ordered = n in start_ordered
         lifter = Lifter(elf, funcs)
         text = lifter.program(roots)
     except LiftError as e:
