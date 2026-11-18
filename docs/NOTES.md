@@ -960,3 +960,47 @@ With x86 order kept, pigz and xz are at 89 and 90 % (xz's protocol runs fall int
 36 ms, mostly FEX compiling glibc's start block by block), code quality of the translation (5 to 6 % more user
 cycles, `longest_match` and `lzma_lzma_optimum_normal` about 10 %), and for pigz the patched loads of crc32_z on
 the input buffer the reading thread fills.
+
+## 23. zstd: what a fault costs, and migration once more (2026-11-18)
+
+The start-up is not where zstd's points go: on an empty input it stops at once (30 ms, FEX's start and glibc's);
+a FEXServer started anew for every run (it exits one second after its last client, so runs with a pause between them
+start it again) costs 2 to 2.5 ms (`bench/startup_server.sh`). FEX's own code cache is filled in the background by
+`FEXOfflineCompiler`, which knows nothing of the views, the escalated instructions or the profile; tying it in is a
+project of its own.
+
+With the thread end fixed (section 22), migratory ownership without the fallback (`TSO_VIEWS_MIGRATE=1
+TSO_VIEWS_BUDGET=0`) came out ahead of the fallback in one session (705 against 727 ms, `aot/zstd_fallback.sh`).
+`TSO_VIEWS_STATS` now also counts the protocol's `mprotect` calls, the time faults wait for its lock and the time
+spent moving chunks. zstd with migration:
+
+| | |
+|---|---|
+| faults handled | 4,444 in 0.305 s (all threads) |
+| of it waiting for the lock | 0.161 s |
+| mprotect | 36,677 calls, 1.96 million pages, 0.095 s |
+| moving chunks | 0.064 s |
+
+Two changes against it, both measured and taken out again:
+
+- Moving a chunk re-protected all 512 pages in every view. Only the pages that moved, only in the views whose rights
+  change: 1.31 instead of 1.96 million pages, the same wall time (707 ms).
+- A right a view may hold but was not given yet (2,995 such faults, one page each) given for the whole chunk at
+  once: 296 of them, half the faults, the same handling time (0.357 s) and no better wall time.
+
+The cost is in few expensive faults, chunk moves whose `mprotect` the kernel does while the other threads wait for the
+lock, not in the number of faults. Side by side (`aot/ab_env.sh`, six runs each, alternating): fallback best 739,
+median 782 ms; migration with the budget 732 / 766 ms (it still falls back); migration without the budget 699 /
+764 ms, with 3.27 instead of 3.99 billion user cycles. The spread is larger than the difference: handing zstd's
+buffers and contexts from thread to thread costs about what ordering them costs. Left as it was.
+
+Efficiency after these changes (only the statistics are new in FEX; best of five, README table):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 60 % | 70 % | 69 % | 66 % |
+| tso-arm, with profile | yes | 79 % | 72 % | 69 % | 73 % |
+| ahead of time, TSO off | no | 93 % | 93 % | 91 % | 92 % |
+| ahead of time + tso-arm, with profile | yes | 90 % | 90 % | 67 % | 82 % |
+
+For a mean of 90 % with pigz and xz where they are, zstd would need 91 %, which it reaches only without ordering.
