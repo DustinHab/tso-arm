@@ -773,11 +773,13 @@ the protocol's own work was small (327 faults, 38 ms over all threads). Where it
 pigz: 150 ms -> 58 ms (1,102 -> 1,160 ms), stubs 5.5 % -> 2.4 %, 57 patched sites. The rest is mostly
 `crc32_z` reading the input buffer, which the reading thread fills: data that really moves between threads.
 
-xz pays 45 ms (1,153 -> 1,198 ms) with the same user cycles (7.57 against 7.56 billion). It is all kernel time:
-guest memory under the protocol is shared memory mapped into several views, so every first touch of a page is a
-shmem fault and a page clearing (`clear_page`, `shmem_fault`), 1,315 `mprotect` calls (21 ms) and slower `read`
-into shared memory (22 against 3 ms). That is the memory management of the views, not translated code; transparent
-huge pages for shmem would cut the faults but need a kernel setting (`shmem_enabled`), left alone here.
+xz pays 45 ms (1,153 -> 1,198 ms) with the same user cycles (7.57 against 7.56 billion). It is kernel time: guest
+memory under the protocol is shared memory mapped into the views of every thread in use, and each new guest mapping
+costs an `mremap` per view plus `mprotect` calls for the rights (494 and 1,315 calls in one run, about 26 ms of
+system calls), and `read` into shared memory is slower (22 against 3 ms). Page faults are not the problem
+(`aot/protocol_faults.sh`, 2.4 GHz: 55,763 without ordering, 41,224 with the protocol, whose shared memory the
+kernel maps around a fault). Transparent huge pages would not change much and are not available anyway: the
+4 KB-page kernel FEX needs here (`rpi-v8`) is built without them.
 
 Correctness: outputs identical everywhere; litmus tests with translated thread functions (forbidden outcomes only
 without ordering: rep 2, vecflag 2, vecwait 1) and FEX's own litmus tests under the protocol (500,000 iterations,
