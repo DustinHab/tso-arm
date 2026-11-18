@@ -781,6 +781,45 @@ system calls), and `read` into shared memory is slower (22 against 3 ms). Page f
 kernel maps around a fault). Transparent huge pages would not change much and are not available anyway: the
 4 KB-page kernel FEX needs here (`rpi-v8`) is built without them.
 
+## 20. Views mapped on first use (2026-11-18)
+
+Until now every guest mapping went into the plain and the ordered view of every thread at once (an `mremap` per
+view), and a new thread mapped every existing range into its views; each change of rights then took an `mprotect` in
+every view. Now a range carries a mask of the slots whose views map it. A mapping goes into the views of the thread
+that makes it; another thread meets the reservation (`PROT_NONE`) at its first access, and the fault handler maps the
+range into that thread's two views with its rights and lets the access run again (it may fault once more for its
+page's state). Rights are only ever set in views that map the range; a thread that ends clears its bit; stage 1,
+which has no fault handling, and `TSO_VIEWS_EAGER=1` map everything at once as before.
+
+Correct in every test (the views matrix with shared stacks and twelve threads, outputs, both litmus series), and the
+system calls drop by half (`aot/lazy_views.sh`, one run each):
+
+| | mprotect | mremap | wall, median of 5 |
+|---|---|---|---|
+| xz, at once | 1,368 | 494 | 1,212 ms |
+| xz, on first use | 660 | 162 | 1,214 ms |
+| pigz, at once | 3,368 | 596 | 1,174 ms |
+| pigz, on first use | 1,788 | 380 | 1,172 ms |
+
+The wall time does not move: these calls were never the cost (strace's own overhead had made them look like
+26 ms). Kept anyway, since a thread no longer maps every existing range when it starts, which matters for programs
+with many threads and mappings. What xz still pays (`aot/protocol_stat.sh`): user cycles equal (7.53 against 7.54
+billion), kernel cycles +0.07 billion (about 10 ms of wall time over five threads), the rest on the serial path of
+its main thread (reading, handing out blocks, writing), which runs FEX's own code with ordering.
+
+Litmus tests after the change: FEX's own under the protocol (500,000 iterations) and with translated thread
+functions, ordered and under the protocol: no forbidden outcome. Efficiency (best of three, README table):
+
+| Configuration | x86 order kept | pigz | xz | zstd | mean |
+|---|---|---|---|---|---|
+| FEX full TSO | yes, except RSP | 61 % | 70 % | 69 % | 67 % |
+| tso-arm, with profile | yes | 75 % | 73 % | 67 % | 72 % |
+| ahead of time, TSO off | no | 92 % | 95 % | 89 % | 92 % |
+| ahead of time + tso-arm, with profile | yes | 86 % | 92 % | 68 % | 81 % |
+
+Native xz varies between sessions and rounds (1.07 to 1.15 s, cooled below 60 °C each time; 1.09 s best here),
+so its efficiency carries about three points either way; translated xz with the protocol took 1.19 to 1.26 s.
+
 Correctness: outputs identical everywhere; litmus tests with translated thread functions (forbidden outcomes only
 without ordering: rep 2, vecflag 2, vecwait 1) and FEX's own litmus tests under the protocol (500,000 iterations,
 none) after the change to collapsing chunks.
