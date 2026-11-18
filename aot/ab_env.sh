@@ -22,7 +22,7 @@ k=0
 for s in "$@"; do
     k=$((k + 1))
     rm -f /tmp/abe-$k.prof /tmp/abe-$k.txt
-    env $P TSO_VIEWS_PROFILE=/tmp/abe-$k.prof $(echo "$s" | tr -d -) $HOME/opt/fex-views/bin/FEX $X/$w $args >/dev/null 2>&1
+    env $P TSO_VIEWS_PROFILE=/tmp/abe-$k.prof $( [ "$s" = - ] || echo "$s") $HOME/opt/fex-views/bin/FEX $X/$w $args >/dev/null 2>&1
 done
 sh tools/freq.sh fix 1800000 >/dev/null
 for i in $(seq $n); do
@@ -31,7 +31,7 @@ for i in $(seq $n); do
         k=$((k + 1))
         while [ "$(vcgencmd measure_temp | sed 's/[^0-9.]//g' | cut -d. -f1)" -ge 60 ]; do sleep 5; done
         t0=$(date +%s%N)
-        env $P TSO_VIEWS_PROFILE=/tmp/abe-$k.prof $(echo "$s" | tr -d -) perf stat -x, -e cycles:u -o /tmp/abe-stat.txt \
+        env $P TSO_VIEWS_PROFILE=/tmp/abe-$k.prof $( [ "$s" = - ] || echo "$s") perf stat -x, -e cycles:u -o /tmp/abe-stat.txt \
             $HOME/opt/fex-views/bin/FEX $X/$w $args >/dev/shm/abe-out 2>/dev/null
         t1=$(date +%s%N)
         ok=ok

@@ -14,6 +14,13 @@ __attribute__((noreturn, cold)) void aot_unreachable(uint64_t rip)
     abort();
 }
 EOF
-# +rcpc: acquire loads as LDAPR (x86 loads need no more than release consistency against earlier stores)
-clang ${CFLAGS:--O2} -march=armv8.2-a+rcpc -fPIC -shared -I"$dir" -fno-strict-aliasing -Wno-unused-label -Wno-unused-variable \
+# +rcpc: acquire loads as LDAPR (x86 loads need no more than release consistency against earlier stores), where the
+# core has it (FEAT_LRCPC: Cortex-A55, A75, A76 and later); older cores (Cortex-A53, A72) get LDAR, which orders at
+# least as strongly. AOT_NORCPC=1 builds the latter on any core, for testing.
+if grep -qw lrcpc /proc/cpuinfo && [ -z "$AOT_NORCPC" ]; then
+    march=armv8.2-a+rcpc
+else
+    march=armv8-a
+fi
+clang ${CFLAGS:--O2} -march=$march -fPIC -shared -I"$dir" -fno-strict-aliasing -Wno-unused-label -Wno-unused-variable \
     -Wno-unused-but-set-variable -o "$out" "$in" /tmp/aot-rt.c

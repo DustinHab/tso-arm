@@ -1,0 +1,14 @@
+ZSTD_compressBlock_doubleFast
+ZSTD_encodeSequences_bmi2
+ZSTD_XXH64_update
+ZSTD_seqToCodes
+ZSTD_recordFingerprint_43
+HIST_count_parallel_wksp
+ZSTD_fillDoubleHashTable
+ZSTD_splitBlock
+HUF_buildCTable_wksp
+FSE_buildCTable_wksp
+FSE_writeNCount_generic
+ZSTD_safecopyLiterals@422540
+HIST_add
+HUF_simpleQuickSort

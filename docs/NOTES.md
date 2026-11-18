@@ -1044,3 +1044,55 @@ native Arm code). `bench/box64.sh`, one session, best of three at 1.8 GHz, outpu
 (pigz under tso-arm landed in its slower group in this session; 90 % in the README's best of five.) xz under Box64
 is slow in every setting. Box64's ordered mode costs it three quarters of its speed; its default and its first
 level are not correct for multithreaded x86 programs on this core.
+
+## 26. More threads than views, functions chosen from a profile, older cores (2026-11-18)
+
+**Threads.** A thread with views of its own needs two 16 GB windows; a 39-bit address space holds 15 of them, and
+the 16th thread at once stopped FEX ("no free view slot"). Now a thread that finds no slot starts the fallback to
+full ordering (`FallbackForThread`: every page shared read-write, all translated code thrown away before the new
+thread runs anything, the translated functions switched to their ordered variants) and shares the views of a slot
+in use (`ShareSlot`; a count per slot keeps the views until their last user ends). Sharing is sound there: in the
+fallback nobody owns pages and the ordered views have every right, so two threads on one slot see what one would.
+
+A first version gave such a thread no views (guest memory itself, base 0). zstd with 12 threads (twelve workers and
+its I/O threads) crashed: a patched access in translated code reaches the ordered view through the address with bit
+38 set, which for base 0 is slot 0's ordered view, kept only in a measurement mode. Found with the handler's view of
+the failing fault (`TSO_VIEWS_LOG`: range, rights mask, state). `tests/many_threads.sh`: the threads test with 12,
+15, 16, 32 and 64 threads, pigz, xz and zstd with 32 threads, all correct.
+
+**Functions chosen from a profile** (`aot/auto.py`, `aot/auto.sh`): one run under FEX without ordering, block by
+block (`FEX_MULTIBLOCK=0`: with multiblock a block named by its start spans several functions, and the first
+attempt credited `read_buf` with 45 % of pigz), cycles per guest function from FEX's block names; the functions with
+at least 0.2 % each, every one through the translator and a compile check on its own; then the functions they call
+directly, if they translate; the library, and the output with it, without ordering and under the protocol, against
+a run without it (a function whose library alone changes the output would be left out). The lists go to
+`aot/lists/`, which `aot/WORKLOAD.sh` builds from.
+
+| | chosen | by hand before | guest cycles covered |
+|---|---|---|---|
+| pigz | 21 functions (adler32, crc32, adler32_z more) | 18 | 97.9 % |
+| xz | 13 functions, the same as by hand | 13 | 99.1 % |
+| zstd | 14 (hash table fill, Huffman and FSE tables more; three rarely used ones fewer) | 16 | 91.1 % |
+
+Side by side under the protocol (`aot/auto_vs_hand.sh`, six runs each, best / median): pigz 1,148 / 1,155 ms by hand
+against 1,142 / 1,150 ms chosen; xz 1,216 / 1,233 against 1,205 / 1,221 ms (the same functions: noise); zstd 740 /
+764 against 755 / 764 ms. What the translator could not take: pigz's `compress_thread` (a jump into a split-off
+cold part), zstd's `HUF_compress1X_usingCTable_internal_bmi2` and `ZSTD_compressLiterals`.
+
+**Older cores.** Without FEAT_LRCPC (Cortex-A53, A72) `ldapr` does not exist. The patch stubs now use `ldar` there
+(`getauxval(AT_HWCAP)`, `TSO_AOT_NORCPC=1` forces it), `aot/build.sh` builds the library for Armv8.0 when
+`/proc/cpuinfo` has no `lrcpc` (`AOT_NORCPC=1` forces it), and the views refuse a kernel with pages other than 4 KB,
+leaving FEX's own full ordering. FEX itself is built for the A76 here (`-mcpu=cortex-a76`); `fex/build_generic.sh`
+builds it for any Armv8.0 core. `tests/norcpc.sh`, both forced on the test machine: no `ldapr` left in the
+libraries, all outputs correct, litmus tests with translated thread functions without a forbidden outcome.
+
+Other cores could not be tried: QEMU's user mode (Debian's `qemu-user` 10.0, unpacked, not installed) emulates
+Cortex-A53/A72/A710, Neoverse N1/N2/V1 and more, but FEX does not run under it, upstream FEX neither (`tests/
+qemu_smoke.sh`: segmentation fault at start). A full system emulation would need QEMU installed on the test machine.
+`tools/board_check.sh` lists a board's requirements (architecture, page size, address bits, the ordering features)
+and with `--run` builds, chooses, checks and measures everything there.
+
+Checked before the commit (`tests/full_check.sh`): the patch stubs' general path, the views matrix, FEX's litmus tests
+under the protocol and those with translated thread functions (200,000 iterations, no forbidden outcome), up to 64
+threads, the workloads with 32 threads. Efficiency with the functions chosen from the profile (best of five, README
+table): pigz 90 %, xz 90 %, zstd 69 %, mean 82 %, as with the lists made by hand.
