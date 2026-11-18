@@ -1004,3 +1004,25 @@ Efficiency after these changes (only the statistics are new in FEX; best of five
 | ahead of time + tso-arm, with profile | yes | 90 % | 90 % | 67 % | 82 % |
 
 For a mean of 90 % with pigz and xz where they are, zstd would need 91 %, which it reaches only without ordering.
+
+## 24. What else was tried for the last points (2026-11-18)
+
+- **Ordered stores as `dmb ishst; str`** instead of `stlr` (with every load already acquire, a store needs only
+  store-store order under TSO): 6 cycles against 5 in `bench/order_cost.c` (section 1). No.
+- **The start-up translated ahead of time**: of the 40 guest functions FEX compiles most blocks for at xz's
+  start-up (1,070 of 2,213 blocks), the translator takes none as they are (`aot/startup_liftable.sh`): frame
+  pointer epilogues (`lea rsp, [rbp - 0x28]`), indirect jumps that are not jump tables, jumps into split-off cold
+  parts, returns with the stack pointer moved, system calls. glibc's start code is a project of its own.
+- **Instructions against cycles** (`aot/ipc_vs_native.sh`): translated `longest_match` executes 27 % more
+  instructions than native (6.52 against 5.13 billion) for 10 % more cycles; `lzma_lzma_optimum_normal` 4 % more
+  instructions for 10 % more cycles; zstd's translated code is as fast as native (`doubleFast` 0.98 of its cycles),
+  its gap without ordering is start-up and FEX's own code.
+- **Compiler options for the library** (`aot/ab_tune.sh`, user cycles without ordering, median of 5):
+  `-mtune=cortex-a76` pigz -1.5 %, xz -0.5 %, zstd +1.7 %; `-O3` pigz -0.6 %, xz +0.7 %, zstd +2.2 %. The same
+  build differs by up to 2.4 % between sessions. Left at `-O2`.
+
+Where this leaves the target: with x86 order kept pigz and xz are at 90 %, zstd at 67 to 69 %. zstd's buffers and
+contexts really move between threads; ordering them or moving the pages costs the same on this core. The part that
+would shrink on newer cores is the barrier after each unaligned load (19 % of zstd's ordered match finder):
+FEAT_LRCPC2 (`ldapur`) and FEAT_LSE2 (unaligned `ldapr` within 16 bytes) make those loads as cheap as aligned ones;
+the A76 has neither.
