@@ -1096,3 +1096,25 @@ Checked before the commit (`tests/full_check.sh`): the patch stubs' general path
 under the protocol and those with translated thread functions (200,000 iterations, no forbidden outcome), up to 64
 threads, the workloads with 32 threads. Efficiency with the functions chosen from the profile (best of five, README
 table): pigz 90 %, xz 90 %, zstd 69 %, mean 82 %, as with the lists made by hand.
+
+## 27. Other cores in a full system emulation (2026-11-18)
+
+QEMU 10.0 (`qemu-system-arm`, TCG) on the test machine runs Debian 13's arm64 cloud image (kernel 6.12, 4 KB pages,
+48-bit addresses) with a chosen core model; cloud-init fetches a payload from the host (FEX built for Armv8.0,
+`fex/build_generic.sh`; the threads and litmus tests; pigz with its library for Armv8.0 and for FEAT_LRCPC) and
+`tests/vm_guest.sh` writes the results to the console (`tests/vm_run.sh MODEL...`, two to four minutes a model).
+Correctness only: emulated cores have no real timing.
+
+| Core model | features of note | threads 8 / 20 | litmus mp, stack, lb | pigz: FEX full TSO / protocol / + translated |
+|---|---|---|---|---|
+| Cortex-A53 | no LRCPC, no LSE | ok / ok | 0 forbidden | ok / ok / ok |
+| Cortex-A72 | no LRCPC, no LSE | ok / ok | 0 forbidden | ok / ok / ok |
+| Neoverse N1 | like the A76 | ok / ok | 0 forbidden | ok / ok / ok |
+| Cortex-A710 | LRCPC2, LSE2, SVE2 (128-bit) | ok / ok | 0 forbidden | ok / ok / ok |
+| Neoverse V1 | LRCPC2, LSE2, SVE (256-bit) | ok / **segmentation fault** | 0 forbidden | ok / ok / ok |
+| `max` | everything QEMU knows | crash / crash | glibc assertion | crash / crash / ok |
+
+Open: on the V1 model the test with 20 threads (more than the view slots: the fallback with shared slots) crashed;
+the V1 is the only model with 256-bit SVE, which FEX uses for AVX (`FEX_HOSTFEATURES=disablesve` turns it off, for
+narrowing it down). On `max` FEX fails without the views as well (FEX's full TSO), so that is FEX or QEMU's model,
+not the protocol; to be confirmed with upstream FEX there.
