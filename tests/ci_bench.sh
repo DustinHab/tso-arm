@@ -98,3 +98,11 @@ for w in pigz xz zstd; do
     echo "== learn $w"
     cat $R/build/ci-learn-$w.log
 done
+# why native zstd is slower here than under FEX: its threads, natively and emulated
+echo "== zstd threads"
+for t in 1 4; do
+    s=$(date +%s%N); $N/zstd -T$t -3 -f -q -c $CX >/dev/null; e=$(date +%s%N)
+    s2=$(date +%s%N); $T run --mode unordered --no-aot $X/zstd -T$t -3 -f -q -c $CX >/dev/null; e2=$(date +%s%N)
+    echo "-T$t: native $(( (e - s) / 1000000 )) ms, FEX without ordering $(( (e2 - s2) / 1000000 )) ms"
+done
+file $N/zstd $X/zstd | cut -c1-150

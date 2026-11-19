@@ -1,4 +1,4 @@
-From cc90a48784a85f93a4359732da481a40f49a8acb Mon Sep 17 00:00:00 2001
+From 725ddee1a523185f46ee403518d4db7e06f8dcd3 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -13,12 +13,12 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/include/FEXCore/Core/TSOViews.h       |   8 +
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  15 +
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  45 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 332 +++++++++---
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 332 ++++++++---
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  36 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 497 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 527 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 14 files changed, 956 insertions(+), 87 deletions(-)
+ 14 files changed, 986 insertions(+), 87 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -1051,7 +1051,7 @@ index 01b077e..d0c26a2 100644
      // Before the first thread runs anything: what earlier runs of this program learned
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..6b7a5f0 100644
+index 9c018bc..173f145 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -21,8 +21,20 @@ $end_info$
@@ -1075,7 +1075,7 @@ index 9c018bc..6b7a5f0 100644
  
  #include <malloc.h>
  #include <mutex>
-@@ -72,6 +84,401 @@ namespace FEX::HLE {
+@@ -72,6 +84,431 @@ namespace FEX::HLE {
  
  static thread_local FEX::HLE::ThreadStateObject* ThreadObject {};
  
@@ -1325,9 +1325,39 @@ index 9c018bc..6b7a5f0 100644
 +      auto Tbnz = [&](uint32_t R, uint32_t Bit, int At, int Target) {
 +        return (Bit >= 32 ? 0xB7000000 : 0x37000000) | ((Bit & 31) << 19) | (uint32_t((Target - At) & 0x3FFF) << 5) | R;
 +      };
-+      // Whether the access goes to guest memory is told by its address: bit 38 set is a host address (a stack object
-+      // kept in host memory, reached relative to the plain view), which takes the instruction unchanged. Not by the
-+      // base or the offset register alone: either may hold a negative part of the address.
++      // Whether the access goes to guest memory is told by its address: the plain views lie below 2^38
++      // (OrderedBit), everything at or above is a host address (a stack object kept in host memory, reached relative
++      // to the plain view, or an ordered view), which takes the instruction unchanged. Not by the base or the offset
++      // register alone: either may hold a negative part of the address. With 39-bit addresses that is bit 38 alone
++      // (one tbnz); with more (48 bits: host stacks at 0xffff8... have bit 38 clear) the address is shifted right by
++      // 38 into the register that held it and tested with cbnz, then computed again. Neither touches the flags.
++      // TSO_AOT_WIDE=1 takes the second form on any host (for testing it on a 39-bit one).
++      static const bool Narrow = [] {
++        if (FEXCore::TSOViews::Knob("TSO_AOT_WIDE")) {
++          return false;
++        }
++        void* P = ::mmap(reinterpret_cast<void*>(1ULL << 40), 4096, PROT_NONE,
++                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
++        if (P != MAP_FAILED) {
++          ::munmap(P, 4096);
++          return false;
++        }
++        return errno == ENOMEM; // beyond the address space: at most 40 bits (EEXIST: taken, so it exists)
++      }();
++      // Branches to Plain when the address in R is a host address; R may be clobbered on the way and is the address
++      // again where it falls through (Again computes it into R)
++      auto HostTest = [&](uint32_t R, auto Again) {
++        if (Narrow) {
++          return K++; // tbnz R, #38, Plain
++        }
++        S[K++] = 0xD340FC00 | (38u << 16) | (R << 5) | R; // lsr R, R, #38
++        const int At = K++;                                // cbnz R, Plain
++        Again(R);
++        return At;
++      };
++      auto HostBranch = [&](uint32_t R, int At, int Target) {
++        return Narrow ? Tbnz(R, 38, At, Target) : (0xB5000000 | (uint32_t((Target - At) & 0x7FFFF) << 5) | R);
++      };
 +
 +      // TSO_AOT_NOFAST=1: every load takes the general path (for finding a stub that goes wrong)
 +      static const bool NoFast = FEXCore::TSOViews::Knob("TSO_AOT_NOFAST");
@@ -1338,7 +1368,7 @@ index 9c018bc..6b7a5f0 100644
 +        // ordered view (as cheap as a plain load on the A76), unaligned the instruction there followed by dmb ishld.
 +        // The alignment tests use tbnz: the translated code may hold a comparison's flags across the load
 +        Address(Rt);
-+        const int ToPlain = K++;
++        const int ToPlain = HostTest(Rt, Address);
 +        S[K++] = 0xB25A0000 | (Rt << 5) | Rt; // orr xt, xt, #1<<38
 +        int AlignAt[3] = {-1, -1, -1};
 +        for (uint32_t Bit = 0; Bit < Size; ++Bit) {
@@ -1369,7 +1399,7 @@ index 9c018bc..6b7a5f0 100644
 +        S[K] = Branch(&S[K], Back);
 +        ++K;
 +        const int Plain = K;
-+        S[ToPlain] = Tbnz(Rt, 38, ToPlain, Plain);
++        S[ToPlain] = HostBranch(Rt, ToPlain, Plain);
 +        S[K++] = Insn;
 +        S[K] = Branch(&S[K], Back);
 +        ++K;
@@ -1385,7 +1415,7 @@ index 9c018bc..6b7a5f0 100644
 +        }
 +        S[K++] = 0xF81F0FE0 | X; // str x, [sp, #-16]!
 +        Address(X);
-+        const int ToPlain = K++;
++        const int ToPlain = HostTest(X, Address);
 +        S[K++] = 0xB25A0000 | (X << 5) | X; // orr x, x, #1<<38
 +        if (!Load) {
 +          S[K++] = DmbIsh;
@@ -1401,7 +1431,7 @@ index 9c018bc..6b7a5f0 100644
 +        S[K] = Branch(&S[K], Back);
 +        ++K;
 +        const int Plain = K;
-+        S[ToPlain] = Tbnz(X, 38, ToPlain, Plain);
++        S[ToPlain] = HostBranch(X, ToPlain, Plain);
 +        S[K++] = 0xF84107E0 | X;
 +        S[K++] = Insn;
 +        S[K] = Branch(&S[K], Back);
@@ -1477,7 +1507,7 @@ index 9c018bc..6b7a5f0 100644
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +581,96 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,6 +611,96 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  

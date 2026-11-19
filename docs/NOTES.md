@@ -1233,3 +1233,21 @@ pigz (83 %). Open: xz's translated code is no faster than FEX's own there (80 ag
 the Pi it is (93 against 79 %); the CI now logs what `learn` chose. zstd's run was too short (0.34 s, mostly the
 start); it compresses 1 GB now (the same file four times on one command line made native zstd slower than FEX: 2.26 s
 native, 144 % for FEX without ordering, so one file it is).
+
+## 31. A host address taken for a guest one on 48-bit hosts (2026-11-19)
+
+On the N2, `tso-arm learn` left `ZSTD_compressBlock_doubleFast` out of zstd's library twice: with it, zstd's output
+under the page protocol differed from the run without the library; without ordering it was right. On the Pi the same
+function was right every time (30 runs), also from the runner's own zstd binary, and also compiled by clang 18 (the
+runner's) instead of 19: not the translator, not the compiler, but the machine.
+
+The cause: a plain access of translated code that meets a shared page is patched into a stub (section 26), and the
+stub tells guest from host memory by bit 38 of the address. The plain views lie below 2^38, the ordered views and
+everything of the host above; with 39-bit addresses (the Pi) every host address has bit 38 set. With 48 bits it need
+not: host thread stacks lie at 0xffff8... to 0xffffb..., where bit 38 is clear, so a patched instruction that also
+reaches a stack object in host memory (the translated code keeps some there) had bit 38 set on a host address and
+went to a wrong one. The test is now the whole condition, address at or above 2^38: with at most 40 address bits (an
+`mmap` at 2^40 fails with `ENOMEM`) still the one `tbnz` on bit 38, otherwise `lsr` by 38 into the register that
+held the address, `cbnz`, and the address computed again (no flags touched, two to three more instructions on that
+path). `TSO_AOT_WIDE=1` forces the second form; on the Pi with it: the runner's zstd with the function 8 of 8
+correct, `aot/stub_check.sh` (outputs, the stubs' general path, both litmus series) all correct.
