@@ -1204,3 +1204,31 @@ everything (4 min 53 s with FEX built). The ring buffer without ordering: 507 of
 against 31 on the Pi; with tso-arm none. `tests/ci_bench.sh` measures the efficiency on the runner itself (pigz, xz
 and zstd built from their official sources natively and with an x86-64 cross compiler, a 64 MB corpus of the
 machine's own files, `tso-arm learn` for each) and writes the table into the run's summary.
+
+## 30. Where the dynamically linked build loses; FEX upstream; GitHub's N2 measured (2026-11-19)
+
+- **The 4 to 7 points between static-pie and dynamically linked** (section 29) are not the C library's code: of pigz's
+  guest cycles 1.7 % lie in `libc.so.6`, of xz's 0.07 % (perf by DSO, FEX naming its blocks). At the default clock,
+  learned: static-pie 864 ms, linked dynamically 899 ms; FEX's JIT share 3.6 against 7.2 % of the cycles, the
+  difference mostly `memmove` and `memset`, which the static builds carry and `learn` translates, and the start-up of
+  the dynamic loader. Translating shared libraries ahead of time would win 1 to 2 points here; not done for now. (The
+  libc of the root file system has no symbol table; its function bounds would come from `.eh_frame`.)
+- **FEX upstream** is still at the commit the patches apply to (`be66e03`, 2026-11-17). `.github/workflows/upstream.yml`
+  builds the patches on FEX's newest commit every week and runs `tests/ci.sh` there (`fex/install.sh` takes
+  `TSO_ARM_FEX_REF`), so a change in FEX that the patches have to follow shows within a week.
+- **The cache key** of a learned library is the program's build ID (`readelf -n`) instead of a SHA-256 of the whole
+  file at every start; a program without one still gets the hash. FEX checks every translated function against the
+  program's code before using it either way. `readelf` runs in the C locale (its output is translated otherwise).
+- **GitHub's Neoverse N2** (`tests/ci_bench.sh`, second CI run, best of 3, pigz on 256 MB, xz on 64 MB, zstd on
+  256 MB):
+
+| N2 | native | FEX, TSO off | FEX full TSO | page protocol | + learned | learned, TSO off |
+|---|---|---|---|---|---|---|
+| pigz | 1371 ms | 88 % | 69 % | 75 % | 83 % | 93 % |
+| xz | 3732 ms | 82 % | 72 % | 74 % | 78 % | 80 % |
+| zstd | 343 ms | 66 % | 48 % | 48 % | 47 % | 63 % |
+
+Ordering costs FEX about as much on the N2 as on the A76 (pigz 88 to 69 %), and tso-arm takes most of it back for
+pigz (83 %). Open: xz's translated code is no faster than FEX's own there (80 against 82 % without ordering), where on
+the Pi it is (93 against 79 %); the CI now logs what `learn` chose. zstd's run was too short (0.34 s, mostly the
+start); it compresses the corpus four times now.

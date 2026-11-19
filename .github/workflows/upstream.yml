@@ -1,0 +1,29 @@
+name: Upstream FEX
+
+# Every week: the patches on FEX's newest commit, built and tested as in CI. A failure here means FEX moved on in a
+# way the patches have to follow; `tso-arm install` stays on the commit the patches were made on until then.
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  arm64:
+    name: Patches on FEX's newest commit
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 python3-pip binutils \
+            gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          python3 -m pip install --user --break-system-packages 'capstone>=5,<6'
+
+      - name: FEX's newest commit with the patches
+        run: TSO_ARM_FEX_REF=origin/main bin/tso-arm install --generic
+
+      - name: Correctness tests
+        run: sh tests/ci.sh

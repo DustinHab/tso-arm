@@ -3,11 +3,15 @@
 #   fex/install.sh [--generic]
 #   --generic: for any Armv8.0 core instead of the build machine's own (slower, runs everywhere)
 #   TSO_ARM_SRC (default ~/.local/src/tso-arm/FEX): the FEX checkout; TSO_ARM_PREFIX (default ~/.local/opt/tso-arm)
+#   TSO_ARM_FEX_REF: another FEX commit or branch than the one the patches were made on (origin/main: FEX's newest)
 set -e
 R=$(cd "$(dirname "$0")/.." && pwd)
 SRC=${TSO_ARM_SRC:-$HOME/.local/src/tso-arm/FEX}
 PREFIX=${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}
 BASE=be66e03 # the FEX commit the patches apply to
+if [ -n "$TSO_ARM_FEX_REF" ]; then
+    BASE=$TSO_ARM_FEX_REF
+fi
 tune="-DTUNE_CPU=native"
 if [ "$1" = --generic ]; then
     tune="-DTUNE_CPU=none -DTUNE_ARCH=armv8-a"
@@ -29,15 +33,18 @@ if [ ! -d "$SRC/.git" ]; then
     git clone -q https://github.com/FEX-Emu/FEX.git "$SRC"
 fi
 cd "$SRC"
-if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+if [ -n "$TSO_ARM_FEX_REF" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
     git fetch -q origin
 fi
-echo "tso-arm install: FEX $BASE with $(ls "$R"/fex/patches/*tso-arm-stage*.patch | wc -l) tso-arm patches"
+echo "tso-arm install: FEX $(git log -1 --format='%h (%cs)' "$BASE") with $(ls "$R"/fex/patches/*tso-arm-stage*.patch | wc -l) tso-arm patches"
 git checkout -q -f --detach "$BASE"
 git clean -fdq -e 'Build-*'
 git submodule update -q --init --recursive
 for p in "$R"/fex/patches/*tso-arm-stage*.patch; do
-    git apply --whitespace=nowarn "$p"
+    git apply --whitespace=nowarn "$p" || {
+        echo "tso-arm install: $(basename "$p") does not apply to FEX $BASE" >&2
+        exit 1
+    }
 done
 
 B="$SRC/Build-tso-arm"

@@ -46,13 +46,13 @@ CL=$R/build/ci-corpus-large.tar
 [ -f $C ] || head -c 67108864 $CL >$C
 args_of() {
     case $1 in
-    zstd) echo "-T4 -3 -f -q -c $CL" ;;
+    zstd) echo "-T4 -3 -f -q -c $CL $CL $CL $CL" ;;
     pigz) echo "-n -p 4 -c $CL" ;;
     xz) echo "-T4 -6 --block-size=2MiB -c $C" ;;
     esac
 }
 for w in pigz xz zstd; do
-    $T learn $X/$w $(args_of $w) >/dev/null
+    $T learn $X/$w $(args_of $w) >$R/build/ci-learn-$w.log 2>&1 || { cat $R/build/ci-learn-$w.log; exit 1; }
 done
 
 best() { # command... -> best wall time in ms, and the output checked
@@ -84,4 +84,14 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
         u=$(best $T run --mode unordered $X/$w $(args_of $w))
         echo "| $w | $n ms | $((100 * n / o)) % | $((100 * n / f)) % | $((100 * n / p)) % | $((100 * n / l)) % | $((100 * n / u)) % |"
     done
+    echo
+    echo "What \`tso-arm learn\` chose:"
+    echo
+    for w in pigz xz zstd; do
+        echo "- $w: $(grep -E '^(profile|chosen):' $R/build/ci-learn-$w.log | tr '\n' ' ')"
+    done
 } | tee -a ${GITHUB_STEP_SUMMARY:-/dev/null}
+for w in pigz xz zstd; do
+    echo "== learn $w"
+    cat $R/build/ci-learn-$w.log
+done

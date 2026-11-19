@@ -49,7 +49,7 @@ fex() {
 # static | pie | dynamic | other: what kind of program the file is
 kind() {
     command -v readelf >/dev/null || die "readelf not found (binutils)"
-    h=$(readelf -h "$1" 2>/dev/null) || {
+    h=$(LC_ALL=C readelf -h "$1" 2>/dev/null) || {
         echo other
         return
     }
@@ -57,7 +57,7 @@ kind() {
         echo other
         return
     }
-    if readelf -lW "$1" 2>/dev/null | grep -q 'INTERP'; then
+    if LC_ALL=C readelf -lW "$1" 2>/dev/null | grep -q 'INTERP'; then
         echo dynamic
     elif echo "$h" | grep -q 'Type:.*DYN'; then
         echo pie
@@ -66,10 +66,16 @@ kind() {
     fi
 }
 
-# the name the ahead-of-time library of a program is kept under: its file name and a hash of its contents
+# the name the ahead-of-time library of a program is kept under: its file name and its build ID, or a hash of its
+# contents when it has none (the build ID saves reading a large program at every start; FEX checks every translated
+# function against the program's code before it uses it either way)
 key() {
     p=$(readlink -f "$1")
-    echo "$(basename "$p")-$(sha256sum "$p" | cut -c1-16)"
+    id=$(LC_ALL=C readelf -n "$p" 2>/dev/null | sed -n 's/^ *Build ID: *//p' | cut -c1-16)
+    if [ -z "$id" ]; then
+        id=$(sha256sum "$p" | cut -c1-16)
+    fi
+    echo "$(basename "$p")-$id"
 }
 
 cmd_run() {
