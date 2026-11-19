@@ -30,10 +30,53 @@ usage: tso-arm COMMAND [...]
   status [PROGRAM]      what tso-arm has learned
   forget PROGRAM        drop what it learned about PROGRAM
   check                 whether this machine can run tso-arm
-  install [--generic]   build FEX with the tso-arm patches into $PREFIX (--generic: for any Armv8.0 core)
+  install [--source | --generic]
+        install FEX with the tso-arm patches into $PREFIX and the command into ~/.local/bin: the prebuilt FEX
+        of this release (from its package, or fetched from GitHub), otherwise built from source.
+        --source: built from source for this machine's core; --generic: from source for any Armv8.0 core
+  uninstall [--all]     remove FEX and the command again (--all: what 'learn' translated as well)
   rootfs                fetch an x86-64 root file system for dynamically linked programs (FEX's own tool)
-  version
+  version               this version and the FEX it uses
 EOF
+}
+
+cmd_version() {
+    v=$(cat "$REPO/VERSION" 2>/dev/null || echo unknown)
+    if [ -e "$REPO/.git" ]; then
+        v="$v$(git -C "$REPO" describe --always --dirty 2>/dev/null | sed 's/^/ (/; s/$/)/')"
+    fi
+    echo "tso-arm $v"
+    F=$(fex 2>/dev/null) || {
+        echo "FEX: not installed ('tso-arm install')"
+        return
+    }
+    b="$(dirname "$(dirname "$F")")/BUILD"
+    if [ -f "$b" ]; then
+        echo "FEX: $(sed -n 's/^fex //p' "$b"), $(sed -n 's/^built //p' "$b"), patches $(sed -n 's/^patches //p' "$b")"
+    else
+        echo "FEX: $F"
+    fi
+}
+
+cmd_uninstall() {
+    if [ -x "$PREFIX/bin/FEX" ]; then
+        rm -rf "$PREFIX"
+        echo "tso-arm: removed $PREFIX"
+    fi
+    l="$HOME/.local/bin/tso-arm"
+    if [ -L "$l" ] && [ "$(readlink -f "$l")" = "$REPO/bin/tso-arm" ]; then
+        rm -f "$l"
+        echo "tso-arm: removed $l"
+    fi
+    if [ "${1:-}" = --all ]; then
+        rm -rf "$CACHE"
+        echo "tso-arm: removed $CACHE"
+    elif [ -d "$CACHE" ]; then
+        echo "tso-arm: kept what it learned in $CACHE ('tso-arm uninstall --all' removes it)"
+    fi
+    if [ -d "$HOME/.local/src/tso-arm" ]; then
+        echo "tso-arm: the FEX source of an earlier build is in ~/.local/src/tso-arm"
+    fi
 }
 
 fex() {
@@ -210,8 +253,9 @@ status) shift && cmd_status "$@" ;;
 forget) shift && cmd_forget "$@" ;;
 check) exec sh "$REPO/tools/board_check.sh" ;;
 install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
+uninstall) shift && cmd_uninstall "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
-version) echo "tso-arm $(cat "$REPO/VERSION" 2>/dev/null || echo unknown)$(git -C "$REPO" describe --always --dirty 2>/dev/null | sed 's/^/ (/; s/$/)/')" ;;
+version | --version) cmd_version ;;
 -h | --help | help | "") usage ;;
 *) usage >&2 && exit 1 ;;
 esac
