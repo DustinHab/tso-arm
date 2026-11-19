@@ -1,6 +1,7 @@
 # tso-arm
 
 [![CI](https://github.com/DustinHab/tso-arm/actions/workflows/ci.yml/badge.svg)](https://github.com/DustinHab/tso-arm/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/DustinHab/tso-arm)](https://github.com/DustinHab/tso-arm/releases)
 
 Run x86-64 Linux programs on 64-bit Arm with x86's memory order kept, at up to 90 % of native speed.
 
@@ -23,18 +24,25 @@ xz and zstd; the full table is below):
 
 ## Quick start
 
-On 64-bit Arm Linux with 4 KB pages (Debian, Ubuntu, Raspberry Pi OS with the 4 KB kernel):
+On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS with the 4 KB
+kernel):
 
 ```sh
-sudo apt install git cmake ninja-build clang lld python3 python3-capstone binutils
-sudo apt install linux-perf             # for 'learn' (Ubuntu: linux-tools-generic)
-# Capstone 5 is needed for 'learn'; Ubuntu 24.04 packages 4: pip install --user capstone
 git clone https://github.com/DustinHab/tso-arm && cd tso-arm
+bin/tso-arm install                     # FEX with the tso-arm patches, prebuilt: a few seconds
 bin/tso-arm check                       # whether this machine can run it
-bin/tso-arm install                     # FEX with the tso-arm patches, about 10 minutes on a Pi 5
 bin/tso-arm run ./program args...       # an x86-64 Linux program, x86 memory order kept
 bin/tso-arm learn ./program args...     # optional: translate its hot functions ahead of time
 ```
+
+`install` also links the command into `~/.local/bin`, so with that on the `PATH` it is just `tso-arm`.
+
+`run` needs `readelf` (binutils); `learn` needs `sudo apt install python3 python3-capstone clang linux-perf` as
+well (Ubuntu: `linux-tools-generic` for perf; it needs Capstone 5, and Ubuntu packages 4: `pip install --user
+capstone`). Without git, the [release package](https://github.com/DustinHab/tso-arm/releases) holds the same files
+and the prebuilt FEX: unpack it and run `bin/tso-arm install` in it. The prebuilt FEX needs glibc 2.35 or newer; on
+older systems, and with `install --source`, FEX is built from source (`git cmake ninja-build clang lld python3`,
+about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md` lists what each release changed.
 
 `learn` runs the program a few times with the given arguments (profile, then a check of the translated functions
 against a run without them), so give it an input whose processing has no side effects. Afterwards every
@@ -163,8 +171,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm learn PROGRAM [ARGS]` | translate its hot functions ahead of time and check them |
 | `tso-arm status [PROGRAM]`, `tso-arm forget PROGRAM` | what was learned, and dropping it |
 | `tso-arm check` | the machine's requirements |
-| `tso-arm install [--generic]` | build FEX with the patches into `~/.local/opt/tso-arm` (`--generic`: for any Armv8.0 core) |
+| `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |
+| `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs` | an x86-64 root file system for dynamically linked programs |
+| `tso-arm version` | the version, and the FEX it uses |
 
 ## Layout
 
@@ -172,6 +182,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 |---|---|
 | `bin/tso-arm` | the command |
 | `fex/` | the FEX patches, `install.sh` and the build scripts of the test machine |
+| `tools/package.sh`, `.github/workflows/release.yml` | the release packages: FEX prebuilt for any Armv8.0 core |
 | `aot/` | translation of hot x86-64 functions to C ahead of time (`lift.py`, chosen by `auto.py`; the lists in `aot/lists/`) |
 | `litmus/` | x86-64 litmus tests that detect reordering |
 | `tests/` | correctness tests: CI, corner cases of the views, more threads than views, cores without `ldapr`, emulated cores |

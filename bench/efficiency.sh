@@ -7,9 +7,10 @@
 #       CONFIGS="native off ours-off default full protocol-cold protocol aot-off aot-full aot")
 # The aot configurations need the workload's library of functions translated ahead of time (out/aot/WORKLOAD.so,
 # from aot/WORKLOAD.sh); without it they are left out.
+# FEXV: the tso-arm FEX to measure (default the development build; the installed one is ~/.local/opt/tso-arm/bin/FEX)
 cd "$(dirname "$0")/.."
 FEX=$HOME/opt/fex/bin/FEX
-FEXV=$HOME/opt/fex-views/bin/FEX
+FEXV=${FEXV:-$HOME/opt/fex-views/bin/FEX}
 X=$PWD/build/x86
 N=$PWD/build/arm64
 C=$PWD/build

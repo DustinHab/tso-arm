@@ -96,7 +96,7 @@ if [ $how = package ]; then
         fi
     fi
     rm -rf "$d"
-    say "no prebuilt FEX for exactly these patches; building it from source"
+    say "no prebuilt FEX for exactly these patches (or no connection to GitHub); building it from source"
     tune="-DTUNE_CPU=native"
 fi
 

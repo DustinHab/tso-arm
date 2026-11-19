@@ -69,13 +69,13 @@ jobs:
       - name: Install from the release package, as a user would
         run: |
           cd dist && sha256sum -c SHA256SUMS && cd ..
-          tar -xzf dist/tso-arm-*-linux-arm64.tar.gz
-          tso-arm-*/bin/tso-arm install
+          tar -xzf dist/tso-arm-[0-9]*-linux-arm64.tar.gz
+          tso-arm-[0-9]*/bin/tso-arm install
           tso-arm version
           tso-arm check
 
       - name: Correctness tests
-        run: cd tso-arm-*/ && sh tests/ci.sh
+        run: cd tso-arm-[0-9]*/ && sh tests/ci.sh
 
       - name: The FEX package alone, as 'tso-arm install' fetches it
         run: |
