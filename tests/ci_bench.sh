@@ -1,8 +1,9 @@
 #!/bin/sh
 # Efficiency on any Arm machine with tso-arm installed (the CI runs it on GitHub's Arm runners): pigz, xz and zstd
-# built from their official sources natively and for x86-64 (static, with a cross compiler), a corpus from the
-# machine's own files, `tso-arm learn` for each, then best of ROUNDS (default 3) natively, under FEX's full TSO and
-# with tso-arm; outputs checked against the native ones. A markdown table to stdout (and to $GITHUB_STEP_SUMMARY).
+# built from their official sources natively and for x86-64 (static, with a cross compiler), corpora from the
+# machine's own files, `tso-arm learn` for each, then best of ROUNDS (default 3) natively, under FEX without ordering
+# and with full TSO, and with tso-arm; outputs checked against the native ones. A markdown table to stdout (and to
+# $GITHUB_STEP_SUMMARY).
 #   tests/ci_bench.sh       CC_X86 (default x86_64-linux-gnu-gcc), ROUNDS
 set -e
 cd "$(dirname "$0")/.."
@@ -37,13 +38,16 @@ build() { # DIR CC LDFLAGS-static|"" OUT
 [ -x $N/pigz ] || build $R/build/ci-bn gcc "" $N
 [ -x $X/pigz ] || build $R/build/ci-bx $CCX -static $X
 
-# a corpus of the machine's own files (text and binaries), about 64 MB
+# corpora of the machine's own files (text and binaries): 256 MB for pigz and zstd, whose runs would otherwise be
+# dominated by the start, 64 MB for xz
 C=$R/build/ci-corpus.tar
-[ -f $C ] || { tar cf - /usr/share/doc /usr/include /usr/lib/python3 2>/dev/null | head -c 67108864 >$C; }
+CL=$R/build/ci-corpus-large.tar
+[ -f $CL ] || { tar cf - /usr/share/doc /usr/include /usr/lib/python3 /usr/lib/gcc /usr/bin 2>/dev/null | head -c 268435456 >$CL; }
+[ -f $C ] || head -c 67108864 $CL >$C
 args_of() {
     case $1 in
-    zstd) echo "-T4 -3 -f -q -c $C" ;;
-    pigz) echo "-n -p 4 -c $C" ;;
+    zstd) echo "-T4 -3 -f -q -c $CL" ;;
+    pigz) echo "-n -p 4 -c $CL" ;;
     xz) echo "-T4 -6 --block-size=2MiB -c $C" ;;
     esac
 }
@@ -67,14 +71,17 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
 {
     echo "Efficiency on $(nproc) cores of $model(native time / time, best of $rounds, outputs checked)"
     echo
-    echo "| | native | FEX full TSO | tso-arm, page protocol | tso-arm + learned |"
-    echo "|---|---|---|---|---|"
+    echo "| | native | FEX, TSO off | FEX full TSO | tso-arm, page protocol | tso-arm + learned | learned, TSO off |"
+    echo "|---|---|---|---|---|---|---|"
+    echo "| x86 memory order kept | | no | yes | yes | yes | no |"
     for w in pigz xz zstd; do
         want=$($N/$w $(args_of $w) | md5sum | cut -c1-32)
         n=$(best $N/$w $(args_of $w))
+        o=$(best $T run --mode unordered --no-aot $X/$w $(args_of $w))
         f=$(best $T run --mode full $X/$w $(args_of $w))
         p=$(best $T run --no-aot $X/$w $(args_of $w))
         l=$(best $T run $X/$w $(args_of $w))
-        echo "| $w | $n ms | $((100 * n / f)) % | $((100 * n / p)) % | $((100 * n / l)) % |"
+        u=$(best $T run --mode unordered $X/$w $(args_of $w))
+        echo "| $w | $n ms | $((100 * n / o)) % | $((100 * n / f)) % | $((100 * n / p)) % | $((100 * n / l)) % | $((100 * n / u)) % |"
     done
 } | tee -a ${GITHUB_STEP_SUMMARY:-/dev/null}

@@ -44,6 +44,28 @@ what was learned. Dynamically linked programs need an x86-64 root file system (`
 programs (position-independent, linked dynamically), pigz reaches 82 % and xz 85 % with what `learn` translated
 (notes section 29).
 
+pigz as distributions build it, on the Pi 5 (a 100 MB file, default clock; wall times as comments, output shortened,
+`tools/readme_demo.sh`):
+
+```console
+$ file pigz
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, ...
+$ tso-arm run ./pigz -c data.tar > data.tar.gz            # 1122 ms
+$ tso-arm learn ./pigz -c data.tar
+tso-arm: pigz is dynamically linked: its own functions are translated, those of its libraries stay with FEX
+profile: 28 guest functions, 98.1 % of the cycles in guest code
+  hot      54.07 %  longest_match
+  hot      23.80 %  deflate_slow
+  hot       8.62 %  slide_hash
+  ...
+chosen: 21 functions, 97.8 of 98.1 % of the guest cycles
+tso-arm: learned 21 functions of pigz; 'tso-arm run' uses them from now on
+$ tso-arm run ./pigz -c data.tar > data.tar.gz            # 953 ms
+$ tso-arm run --stats ./pigz -c data.tar > data.tar.gz
+...
+tso-arm: handled faults 308 in 0.010 s, block compiles 4403 in 0.039 s (all threads)
+```
+
 ## Why the order matters
 
 `tests/spsc.c` is a ring buffer written the way x86 code often is: no barriers, it relies on x86's order. 20 million
