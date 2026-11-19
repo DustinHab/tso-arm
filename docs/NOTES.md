@@ -1251,3 +1251,18 @@ went to a wrong one. The test is now the whole condition, address at or above 2^
 held the address, `cbnz`, and the address computed again (no flags touched, two to three more instructions on that
 path). `TSO_AOT_WIDE=1` forces the second form; on the Pi with it: the runner's zstd with the function 8 of 8
 correct, `aot/stub_check.sh` (outputs, the stubs' general path, both litmus series) all correct.
+
+On the N2 afterwards (CI): `learn` keeps the function (zstd 14 functions, none left out), all tests passed. The
+runner's table with zstd on one 1 GB file (`-T1`/`-T4` natively 4185/1257 ms, under FEX 4861/1558 ms: the threads
+work in both) and the bound search of section 30 in effect:
+
+| N2 | native | FEX, TSO off | FEX full TSO | page protocol | + learned | learned, TSO off |
+|---|---|---|---|---|---|---|
+| pigz | 1448 ms | 89 % | 72 % | 76 % | 84 % | 92 % |
+| xz | 3533 ms | 81 % | 71 % | 73 % | 93 % | 91 % |
+| zstd | 1484 ms | 86 % | 52 % | 52 % | 47 % | 88 % |
+
+With x86 order kept tso-arm is 12 (pigz) and 22 (xz) points ahead of FEX's full TSO there; zstd goes on with full
+ordering as on the Pi (section 23), and its translated functions, all ordered then, are slower than FEX's own code
+on the N2 (47 against 52 %; on the Pi equal, 69 against 68 %). On the Pi the full check after the change: all correct,
+the table within the noise (pigz 90, xz 90, zstd 70 %, mean 83 %).

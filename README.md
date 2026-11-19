@@ -16,7 +16,7 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **82 %** (pigz 91 %, xz 89 %, zstd 68 %) |
+| **tso-arm**, with functions translated ahead of time | **83 %** (pigz 90 %, xz 90 %, zstd 70 %) |
 | tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
@@ -102,20 +102,20 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-19T15:34, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-19T17:20, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.06 s, 100 % | 0.48 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 79 % | 0.58 s, 83 % | 83 % |
-| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.33 s, 80 % | 0.57 s, 84 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.51 s, 70 % | 0.67 s, 72 % | 68 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.53 s, 69 % | 0.71 s, 68 % | 66 % |
-| tso-arm, first run | yes | 1.37 s, 73 % | 1.56 s, 68 % | 0.94 s, 51 % | 63 % |
-| tso-arm, with profile | yes | 1.25 s, 80 % | 1.48 s, 72 % | 0.72 s, 67 % | 73 % |
-| ahead of time, TSO off | no | 1.06 s, 94 % | 1.14 s, 93 % | 0.55 s, 87 % | 91 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.62 s, 65 % | 0.71 s, 68 % | 63 % |
-| ahead of time + tso-arm, with profile | yes | 1.10 s, 91 % | 1.19 s, 89 % | 0.71 s, 68 % | 82 % |
+| native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.33 s, 80 % | 0.57 s, 86 % | 85 % |
+| FEX default | no | 1.57 s, 64 % | 1.52 s, 70 % | 0.67 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.65 s, 61 % | 1.53 s, 70 % | 0.72 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.37 s, 73 % | 1.58 s, 68 % | 0.93 s, 53 % | 64 % |
+| tso-arm, with profile | yes | 1.25 s, 80 % | 1.48 s, 72 % | 0.72 s, 68 % | 73 % |
+| ahead of time, TSO off | no | 1.06 s, 94 % | 1.15 s, 93 % | 0.55 s, 89 % | 92 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.73 s, 58 % | 1.62 s, 66 % | 0.71 s, 69 % | 64 % |
+| ahead of time + tso-arm, with profile | yes | 1.11 s, 90 % | 1.19 s, 90 % | 0.70 s, 70 % | 83 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -151,8 +151,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   views of others (correct, as fast as FEX's own full TSO).
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically; functions of shared libraries, and what the translator cannot take, stay with FEX.
-- **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Neoverse N2 (notes section 30: pigz
-  83 % with x86 order kept, against 69 % under FEX's full TSO). Other cores were tested for correctness in emulation;
+- **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Neoverse N2 (notes section 31: with
+  x86 order kept pigz 84 % and xz 93 %, against 72 and 71 % under FEX's full TSO). Other cores were tested for correctness in emulation;
   `tso-arm check` and `tools/board_check.sh --run` check, build and measure everything on a new board.
 
 ## Commands
