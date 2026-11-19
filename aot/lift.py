@@ -213,15 +213,24 @@ class Function:
                 raise self.err(insn, f"jump table entry {t:#x} outside the function")
         return idx, targets, None
 
+    # instructions that leave the flags alone, as compilers put them between a compare and its branch
+    FLAGLESS = {"mov", "movzx", "movsx", "movsxd", "movabs", "lea", "nop", "endbr64"}
+
     def table_bound(self, k, insn):
-        # The nearest "cmp ..., n-1" that is followed by a ja (the compared value may be the memory word the index is
-        # loaded from). An index outside the table at run time ends in aot_unreachable, so a bound found too small
+        # The nearest "cmp ..., n-1; ja" or "cmp ..., n; jae" before the jump, with only instructions that leave the
+        # flags alone between them (gcc 13 puts a lea there); the compared value may be the memory word the index is
+        # loaded from. An index outside the table at run time ends in aot_unreachable, so a bound found too small
         # fails loudly; table entries outside the function fail the translation.
-        window = self.insns[max(0, k - 12):k]
-        for j in range(len(window) - 2, -1, -1):
-            prev = window[j]
-            if prev.mnemonic == "cmp" and prev.operands[1].type == X.X86_OP_IMM and window[j + 1].mnemonic == "ja":
-                return prev.operands[1].imm + 1
+        window = self.insns[max(0, k - 16):k]
+        for j in range(len(window) - 1, -1, -1):
+            branch = window[j].mnemonic
+            if branch not in ("ja", "jae"):
+                continue
+            for prev in reversed(window[:j]):
+                if prev.mnemonic == "cmp" and prev.operands[1].type == X.X86_OP_IMM:
+                    return prev.operands[1].imm + (1 if branch == "ja" else 0)
+                if prev.mnemonic not in self.FLAGLESS:
+                    break
         raise self.err(insn, "jump table without bound")
 
     def relative_jump_table(self, insn, k):

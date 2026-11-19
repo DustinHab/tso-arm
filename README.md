@@ -133,7 +133,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
   Neoverse N2: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner cases, more threads
   than views, a dynamically linked program and the ring buffer there; then it measures the efficiency of pigz, xz and
-  zstd on that machine (`tests/ci_bench.sh`, in the run's summary).
+  zstd on that machine (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on
+  FEX's newest commit (`.github/workflows/upstream.yml`).
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).
@@ -150,8 +151,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   views of others (correct, as fast as FEX's own full TSO).
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically; functions of shared libraries, and what the translator cannot take, stay with FEX.
-- **Measured on the Raspberry Pi 5 only.** Other cores were tested for correctness in emulation; `tso-arm check` and
-  `tools/board_check.sh --run` check, build and measure everything on a new board.
+- **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Neoverse N2 (notes section 30: pigz
+  83 % with x86 order kept, against 69 % under FEX's full TSO). Other cores were tested for correctness in emulation;
+  `tso-arm check` and `tools/board_check.sh --run` check, build and measure everything on a new board.
 
 ## Commands
 

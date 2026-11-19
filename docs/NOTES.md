@@ -1231,4 +1231,5 @@ machine's own files, `tso-arm learn` for each) and writes the table into the run
 Ordering costs FEX about as much on the N2 as on the A76 (pigz 88 to 69 %), and tso-arm takes most of it back for
 pigz (83 %). Open: xz's translated code is no faster than FEX's own there (80 against 82 % without ordering), where on
 the Pi it is (93 against 79 %); the CI now logs what `learn` chose. zstd's run was too short (0.34 s, mostly the
-start); it compresses the corpus four times now.
+start); it compresses 1 GB now (the same file four times on one command line made native zstd slower than FEX: 2.26 s
+native, 144 % for FEX without ordering, so one file it is).

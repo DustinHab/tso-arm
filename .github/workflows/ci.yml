@@ -44,3 +44,15 @@ jobs:
           sudo apt-get install -y -q linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -y -q linux-tools-generic
           sudo sysctl -w kernel.perf_event_paranoid=1
           sh tests/ci_bench.sh
+
+      - name: Programs and learned libraries, for reproducing elsewhere
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: learned-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            build/ci-x86/
+            build/ci-learn-*.log
+            ~/.cache/tso-arm/aot/

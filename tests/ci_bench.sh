@@ -38,15 +38,18 @@ build() { # DIR CC LDFLAGS-static|"" OUT
 [ -x $N/pigz ] || build $R/build/ci-bn gcc "" $N
 [ -x $X/pigz ] || build $R/build/ci-bx $CCX -static $X
 
-# corpora of the machine's own files (text and binaries): 256 MB for pigz and zstd, whose runs would otherwise be
-# dominated by the start, 64 MB for xz
-C=$R/build/ci-corpus.tar
+# corpora of the machine's own files (text and binaries): 1 GB for zstd and 256 MB for pigz, whose runs would
+# otherwise be dominated by the start, 64 MB for xz (several input files instead make native zstd slower than
+# emulated: one file each)
+CX=$R/build/ci-corpus-1g.tar
 CL=$R/build/ci-corpus-large.tar
-[ -f $CL ] || { tar cf - /usr/share/doc /usr/include /usr/lib/python3 /usr/lib/gcc /usr/bin 2>/dev/null | head -c 268435456 >$CL; }
-[ -f $C ] || head -c 67108864 $CL >$C
+C=$R/build/ci-corpus.tar
+[ -f $CX ] || { tar cf - /usr/share/doc /usr/include /usr/lib /usr/bin 2>/dev/null | head -c 1073741824 >$CX; }
+[ -f $CL ] || head -c 268435456 $CX >$CL
+[ -f $C ] || head -c 67108864 $CX >$C
 args_of() {
     case $1 in
-    zstd) echo "-T4 -3 -f -q -c $CL $CL $CL $CL" ;;
+    zstd) echo "-T4 -3 -f -q -c $CX" ;;
     pigz) echo "-n -p 4 -c $CL" ;;
     xz) echo "-T4 -6 --block-size=2MiB -c $C" ;;
     esac
