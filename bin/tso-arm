@@ -16,14 +16,17 @@ usage() {
     cat <<EOF
 usage: tso-arm COMMAND [...]
 
-  run [--mode MODE] [--aot LIBRARY] PROGRAM [ARGS...]
+  run [--mode MODE] [--aot LIBRARY | --no-aot] [--stats] PROGRAM [ARGS...]
         run an x86-64 Linux program. MODE: tso (default; x86 memory order kept, with the page protocol and what
         'learn' translated), full (FEX's own full ordering), unordered (fastest, not correct for programs whose
-        threads share data without locks). --aot: a library of translated functions other than the learned one
+        threads share data without locks). --aot: a library of translated functions other than the learned one;
+        --no-aot: without what 'learn' translated.
+        --stats: what the page protocol did, at the end (shared pages, ordered instructions, fallback)
   learn PROGRAM [ARGS...]
-        profile a static x86-64 program, translate its hot functions ahead of time and check them against a run
-        without; later runs use them. Runs the program several times with these arguments: give it an input
-        whose processing has no side effects (stdin is empty, the output is compared)
+        profile an x86-64 program, translate its hot functions ahead of time and check them against a run
+        without; later runs use them. Static and position-independent programs; of a dynamically linked one its
+        own functions (its libraries stay with FEX). Runs the program several times with these arguments: give it
+        an input whose processing has no side effects (stdin is empty, the output is compared)
   status [PROGRAM]      what tso-arm has learned
   forget PROGRAM        drop what it learned about PROGRAM
   check                 whether this machine can run tso-arm
@@ -83,6 +86,14 @@ cmd_run() {
             [ -f "$aot" ] || die "no library $2"
             shift 2
             ;;
+        --stats)
+            export TSO_VIEWS_STATS=1
+            shift
+            ;;
+        --no-aot)
+            aot=/dev/null/none
+            shift
+            ;;
         --mode=*)
             mode=${1#*=}
             shift
@@ -134,8 +145,13 @@ cmd_learn() {
     shift
     [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $1"
     case $(kind "$prog") in
-    static) ;;
-    pie | dynamic) die "$prog is not a static, non-PIE x86-64 program: ahead-of-time translation does not take it yet; 'tso-arm run' runs it with the page protocol alone" ;;
+    static | pie) ;;
+    dynamic)
+        if [ -z "$FEX_ROOTFS" ] && ! grep -qs '"RootFS"' "$HOME/.fex-emu/Config.json"; then
+            die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
+        fi
+        echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, those of its libraries stay with FEX"
+        ;;
     *) die "$prog is not an x86-64 Linux program" ;;
     esac
     for t in python3 clang perf; do

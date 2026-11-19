@@ -1,4 +1,4 @@
-From e4fb9fe933ab7ca5be404225f54307e6d5bc2203 Mon Sep 17 00:00:00 2001
+From cc90a48784a85f93a4359732da481a40f49a8acb Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -16,9 +16,9 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 332 +++++++++---
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  36 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 485 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 497 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 14 files changed, 944 insertions(+), 87 deletions(-)
+ 14 files changed, 956 insertions(+), 87 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -207,7 +207,7 @@ index a7ac53a..1a81695 100644
    timespec T;
    clock_gettime(CLOCK_MONOTONIC, &T);
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b9..495ef89 100644
+index bed03b9..04b559a 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -22,6 +22,7 @@ $end_info$
@@ -248,7 +248,7 @@ index bed03b9..495ef89 100644
    }
  
 +  // tso-arm: guest functions translated ahead of time (TSO_AOT), checked against the mapped guest code
-+  ThunkHandler->LoadAOT(CTX.get());
++  ThunkHandler->LoadAOT(CTX.get(), Loader.GetMainElfBase());
 +
    auto BRKInfo = Loader.GetBRKInfo();
  
@@ -1051,7 +1051,7 @@ index 01b077e..d0c26a2 100644
      // Before the first thread runs anything: what earlier runs of this program learned
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..3e682a6 100644
+index 9c018bc..6b7a5f0 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -21,8 +21,20 @@ $end_info$
@@ -1477,11 +1477,11 @@ index 9c018bc..3e682a6 100644
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +581,84 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,6 +581,96 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  
-+  void LoadAOT(FEXCore::Context::Context* CTX) override {
++  void LoadAOT(FEXCore::Context::Context* CTX, uint64_t MainBase) override {
 +    const char* Path = getenv("TSO_AOT");
 +    if (!Path || !*Path) {
 +      return;
@@ -1536,6 +1536,16 @@ index 9c018bc..3e682a6 100644
 +      }
 +    }
 +
++    // A position-independent program: the library's addresses are offsets, and it forms the program's addresses from
++    // aot_base, set here to where the loader put the program, before anything runs
++    uint64_t Base = 0;
++    if (const auto* Pie = static_cast<const uint8_t*>(dlsym(Lib, "aot_pie")); Pie && *Pie) {
++      Base = MainBase;
++      if (auto SetBase = reinterpret_cast<void (*)(uint64_t)>(dlsym(Lib, "aot_set_base"))) {
++        SetBase(Base);
++      }
++    }
++
 +    {
 +      std::unique_lock lk(ThunksMutex);
 +      Thunks.emplace(AOT::BridgeSum, &AOT::Bridge);
@@ -1546,16 +1556,18 @@ index 9c018bc..3e682a6 100644
 +      if (Only && *Only && !AOT::Listed(Only, E->Name)) {
 +        continue;
 +      }
++      const uint64_t RIP = Base + E->RIP;
 +      fextl::vector<uint8_t> Code(E->Size);
-+      if (!AOT::ReadGuest(E->RIP, Code.data(), E->Size) || AOT::Hash(Code.data(), E->Size) != E->Hash) {
-+        fprintf(stderr, "tso-arm aot: %s at %#lx does not match the guest code, left to the JIT\n", E->Name, (unsigned long)E->RIP);
++      if (!AOT::ReadGuest(RIP, Code.data(), E->Size) || AOT::Hash(Code.data(), E->Size) != E->Hash) {
++        fprintf(stderr, "tso-arm aot: %s at %#lx does not match the guest code, left to the JIT\n", E->Name, (unsigned long)RIP);
 +        continue;
 +      }
-+      CTX->AddAOTEntrypoint(E->RIP, reinterpret_cast<uintptr_t>(E), AOT::BridgeSum);
++      CTX->AddAOTEntrypoint(RIP, reinterpret_cast<uintptr_t>(E), AOT::BridgeSum);
 +      ++Count;
 +    }
 +    if (AOT::Log) {
-+      fprintf(stderr, "tso-arm aot: %d functions from %s (code %#lx-%#lx)\n", Count, Path, (unsigned long)F.Start, (unsigned long)F.End);
++      fprintf(stderr, "tso-arm aot: %d functions from %s (code %#lx-%#lx%s)\n", Count, Path, (unsigned long)F.Start, (unsigned long)F.End,
++              Base ? ", position-independent program" : "");
 +    }
 +  }
 +
@@ -1563,7 +1575,7 @@ index 9c018bc..3e682a6 100644
    // Bits in a SHA256 sum are already randomly distributed, so truncation yields a suitable hash function
    struct TruncatingSHA256Hash {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.h b/Source/Tools/LinuxEmulation/Thunks.h
-index 16a89ce..22405b3 100644
+index 16a89ce..93fa9a0 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.h
 +++ b/Source/Tools/LinuxEmulation/Thunks.h
 @@ -7,6 +7,10 @@
@@ -1584,7 +1596,7 @@ index 16a89ce..22405b3 100644
 +
 +  // tso-arm: routes the guest functions of the library named by TSO_AOT to their host translations (after the guest
 +  // binary is mapped)
-+  virtual void LoadAOT(FEXCore::Context::Context* CTX) = 0;
++  virtual void LoadAOT(FEXCore::Context::Context* CTX, uint64_t MainBase) = 0;
  };
  fextl::unique_ptr<ThunkHandler> CreateThunkHandler();
 +

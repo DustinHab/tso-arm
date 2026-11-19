@@ -51,6 +51,10 @@ class Elf:
             p_type, p_flags, p_offset, p_vaddr, _, p_filesz, p_memsz, _ = struct.unpack_from("<IIQQQQQQ", self.data, phoff + i * phentsize)
             if p_type == 1:
                 self.segs.append((p_vaddr, p_offset, p_filesz, p_memsz, p_flags))
+        # position-independent (ET_DYN: static-pie or a PIE linked dynamically): loaded at an address known only at run
+        # time; the translation then forms every address of the program from aot_base, which FEX sets
+        self.pie = struct.unpack_from("<H", self.data, 0x10)[0] == 3
+        self.relocs = self.relocated_slots()
         self.syms = {}
         self.all = {}  # name -> every (address, size): static functions of different files may share a name
         for line in subprocess.run(["nm", "-S", path], capture_output=True, text=True).stdout.splitlines():
@@ -82,6 +86,34 @@ class Elf:
             if v <= addr and addr + n <= v + fs:
                 return not (fl & 2)
         return False
+
+    def relocated_slots(self):
+        # the 8-byte slots the loader writes (RELA and RELR sections): their file contents are not what the program
+        # reads, so no load from them may be folded into a constant
+        slots = set()
+        shoff, = struct.unpack_from("<Q", self.data, 0x28)
+        shentsize, shnum = struct.unpack_from("<HH", self.data, 0x3A)
+        for i in range(shnum if shoff else 0):
+            _, sh_type, _, _, off, size, _, _, _, entsize = struct.unpack_from("<IIQQQQIIQQ", self.data, shoff + i * shentsize)
+            if sh_type == 4 and entsize == 24:  # SHT_RELA
+                for k in range(size // 24):
+                    slots.add(struct.unpack_from("<Q", self.data, off + 24 * k)[0])
+            elif sh_type == 19:  # SHT_RELR: an address, then bitmaps of the 63 slots after it
+                base = 0
+                for k in range(size // 8):
+                    e, = struct.unpack_from("<Q", self.data, off + 8 * k)
+                    if not e & 1:
+                        slots.add(e)
+                        base = e + 8
+                    else:
+                        for b in range(63):
+                            if (e >> (b + 1)) & 1:
+                                slots.add(base + 8 * b)
+                        base += 63 * 8
+        return slots
+
+    def relocated(self, addr, n):
+        return any(s < addr + n and addr < s + 8 for s in range(addr - 7, addr + n) if s in self.relocs)
 
 
 def fnv(data):
@@ -161,30 +193,91 @@ class Function:
         return self.region[0] <= a < self.region[1]
 
     def jump_table(self, insn):
-        # notrack jmp [idx*8 + table], bounded by an earlier "cmp idx, n; ja default" in the same block
-        m = insn.operands[0].mem
+        # notrack jmp [idx*8 + table], bounded by an earlier "cmp idx, n; ja default" in the same block; or, in a
+        # position-independent program, the table holds 32-bit offsets from its own address:
+        #   lea table(%rip), rT; movslq (rT, idx, 4), rJ; add rT, rJ; jmp *rJ
+        # -> (index register, targets, None) or (None, targets, register jumped through)
+        k = self.insns.index(insn)
+        op = insn.operands[0]
+        if op.type == X.X86_OP_REG:
+            return self.relative_jump_table(insn, k)
+        m = op.mem
         if m.base or not m.index or m.scale != 8:
             raise self.err(insn, "indirect jump that is not a jump table")
         idx = REGS[insn.reg_name(m.index)][0]
-        k = self.insns.index(insn)
-        # The bound: the nearest "cmp ..., n-1" that is followed by a ja (the compared value may be the memory word the
-        # index is loaded from). An index outside the table at run time ends in aot_unreachable, so a bound found
-        # too small fails loudly; table entries outside the function fail the translation.
-        n = None
-        window = self.insns[max(0, k - 8):k]
-        for j in range(len(window) - 2, -1, -1):
-            prev = window[j]
-            if prev.mnemonic == "cmp" and prev.operands[1].type == X.X86_OP_IMM and window[j + 1].mnemonic == "ja":
-                n = prev.operands[1].imm + 1
-                break
-        if n is None:
-            raise self.err(insn, "jump table without bound")
+        n = self.table_bound(k, insn)
         table = m.disp & M64
         targets = [struct.unpack_from("<Q", self.elf.read(table + 8 * j, 8))[0] for j in range(n)]
         for t in targets:
             if not self.inside(t) or t not in self.at:
                 raise self.err(insn, f"jump table entry {t:#x} outside the function")
-        return idx, targets
+        return idx, targets, None
+
+    def table_bound(self, k, insn):
+        # The nearest "cmp ..., n-1" that is followed by a ja (the compared value may be the memory word the index is
+        # loaded from). An index outside the table at run time ends in aot_unreachable, so a bound found too small
+        # fails loudly; table entries outside the function fail the translation.
+        window = self.insns[max(0, k - 12):k]
+        for j in range(len(window) - 2, -1, -1):
+            prev = window[j]
+            if prev.mnemonic == "cmp" and prev.operands[1].type == X.X86_OP_IMM and window[j + 1].mnemonic == "ja":
+                return prev.operands[1].imm + 1
+        raise self.err(insn, "jump table without bound")
+
+    def relative_jump_table(self, insn, k):
+        def reg(r):
+            return REGS.get(insn.reg_name(r), (None,))[0] if r else None
+
+        def writes(i, r):
+            return any(o.type == X.X86_OP_REG and (o.access & capstone.CS_AC_WRITE) and reg(o.reg) == r for o in i.operands)
+
+        # jmp rJ after "add rJ, rS": one of rJ and rS holds the table's address (lea), the other the entry read from
+        # it (movsxd), searched backwards as long as nothing else writes them
+        rj = reg(insn.operands[0].reg)
+        add = movs = lea = None
+        need = set()
+        for prev in reversed(self.insns[max(0, k - 12):k]):
+            ops = prev.operands
+            if add is None:
+                if prev.mnemonic == "add" and len(ops) == 2 and ops[1].type == X.X86_OP_REG and reg(ops[0].reg) == rj:
+                    add = prev
+                    need = {rj, reg(ops[1].reg)}
+                elif writes(prev, rj):
+                    break
+            elif movs is None and prev.mnemonic == "movsxd" and ops[1].type == X.X86_OP_MEM and reg(ops[0].reg) in need:
+                movs = prev
+                need.discard(reg(ops[0].reg))
+            elif lea is None and prev.mnemonic == "lea" and ops[1].type == X.X86_OP_MEM and prev.reg_name(ops[1].mem.base) == "rip" \
+                    and reg(ops[0].reg) in need:
+                lea = prev
+                need.discard(reg(ops[0].reg))
+            elif any(writes(prev, r) for r in need):
+                break
+            if movs and lea:
+                break
+        mm = movs.operands[1].mem if movs else None
+        rt = reg(mm.base) if mm else None
+        if not mm or not mm.index or mm.scale != 4 or mm.disp or rt == reg(movs.operands[0].reg) \
+                or rt not in (reg(add.operands[0].reg), reg(add.operands[1].reg)):
+            raise self.err(insn, "indirect jump that is not a jump table")
+        if lea is None or reg(lea.operands[0].reg) != rt:
+            # The table's address is often loaded once before a loop. The translated code branches on the target
+            # the jump really takes and ends in aot_unreachable on one it does not know, so a table found through
+            # the only rip-relative lea into that register is safe.
+            leas = {(i.address + i.size + i.operands[1].mem.disp) & M64 for i in self.insns
+                    if i.mnemonic == "lea" and i.operands[1].type == X.X86_OP_MEM
+                    and i.reg_name(i.operands[1].mem.base) == "rip" and reg(i.operands[0].reg) == rt}
+            if len(leas) != 1:
+                raise self.err(insn, "indirect jump that is not a jump table")
+            table = leas.pop()
+        else:
+            table = (lea.address + lea.size + lea.operands[1].mem.disp) & M64
+        n = self.table_bound(k, insn)
+        targets = [(table + struct.unpack_from("<i", self.elf.read(table + 4 * j, 4))[0]) & M64 for j in range(n)]
+        for t in targets:
+            if not self.inside(t) or t not in self.at:
+                raise self.err(insn, f"jump table entry {t:#x} outside the function")
+        return None, targets, rj
 
     def analyse(self):
         leaders = {self.start}
@@ -616,8 +709,9 @@ class Lifter:
             parts.append(f"{index} * {m.scale}" if m.scale != 1 else index)
         if m.disp:
             parts.append(f"{m.disp & M64:#x}ULL")
-        # a table in a read-only segment, indexed by a register (base or index): immutable data
-        ro = self.elf.readonly(m.disp & M64) and (m.disp & M64) >= self.elf.segs[0][0]
+        # a table in a read-only segment, indexed by a register (base or index): immutable data. Not in a
+        # position-independent program: there a displacement is never an absolute address
+        ro = not self.elf.pie and self.elf.readonly(m.disp & M64) and (m.disp & M64) >= self.elf.segs[0][0]
         return ("dyn", "(" + " + ".join(parts) + ")", ro)
 
     def esc_base(self):
@@ -628,10 +722,14 @@ class Lifter:
             return f"((uint64_t)(uintptr_t)E - (uint64_t)(uintptr_t)V - {self.f.esc[0] & M64:#x}ULL)"
         return "gsp"
 
+    def gconst(self, v):
+        # an address of the program: as it is, or for a position-independent program relative to where it was loaded
+        return f"(aot_base + {v:#x}ULL)" if self.elf.pie else f"{v:#x}ULL"
+
     def lea_value(self, op):
         a = self.address(op)
         if a[0] == "const":
-            return f"{a[1]:#x}ULL"
+            return self.gconst(a[1])
         if a[0] == "stack":
             _, off, index, scale = a
             s = f"({self.esc_base()} + {off & M64:#x}ULL"
@@ -643,7 +741,7 @@ class Lifter:
     def guest_addr(self, a):
         # a resolved address -> (C address expression, accessor prefix): g volatile guest, r read-only guest, h host
         if a[0] == "const":
-            return (f"{a[1]:#x}ULL", "r" if self.elf.readonly(a[1]) else "g")
+            return (self.gconst(a[1]), "r" if self.elf.readonly(a[1]) else "g")
         if a[0] == "dyn":
             return (a[1], "r" if a[2] else "g")
         _, off, index, scale = a
@@ -662,7 +760,7 @@ class Lifter:
     def load(self, op, bits=None):
         bits = bits or op.size * 8
         a = self.address(op)
-        if a[0] == "const" and self.elf.readonly(a[1], bits // 8):
+        if a[0] == "const" and self.elf.readonly(a[1], bits // 8) and not self.elf.relocated(a[1], bits // 8):
             v = int.from_bytes(self.elf.read(a[1], bits // 8), "little")
             if bits == 128:
                 return f"((u128){{{v & M64:#x}ULL, {v >> 64:#x}ULL}})"
@@ -849,7 +947,7 @@ class Lifter:
         if got is not None:
             # through the PLT (glibc's string functions, chosen at start-up by IRELATIVE relocations): the GOT slot,
             # written before any translated code runs, names the target; a translated one is called directly
-            return f"aot_dispatch_{self.pre[0]}(c, V, rld64(V, {got:#x}ULL), {gsp_expr}, {self.call_args()})"
+            return f"aot_dispatch_{self.pre[0]}(c, V, rld64(V, {self.gconst(got)}), {gsp_expr}, {self.call_args()})"
         n = self.guest_nstack(target)
         if n:
             if tail:
@@ -864,7 +962,7 @@ class Lifter:
                     self.e(f"gst64({view}, gsp + {off & M64:#x}ULL, hld64(F + {off - self.f.frame_min}));")
                 elif kind != "esc" or self.f.esc_host:
                     raise self.err("outgoing stack arguments for guest code outside the frame")
-        return f"aot_guest_call(c, {target:#x}ULL, {gsp_expr}, {self.call_args()})"
+        return f"aot_guest_call(c, {self.gconst(target)}, {gsp_expr}, {self.call_args()})"
 
     # --- instructions --------------------------------------------------------------------------------------------------
     def emit_insn(self, insn):
@@ -1192,10 +1290,16 @@ class Lifter:
     def i_jmp(self, insn, ops):
         op = ops[0]
         if insn.address in self.f.tables:
-            idx, targets = self.f.tables[insn.address]
-            self.e(f"switch ({idx}) {{")
-            for j, t in enumerate(targets):
-                self.e(f"case {j}: goto L_{t:x};")
+            idx, targets, through = self.f.tables[insn.address]
+            if idx:
+                self.e(f"switch ({idx}) {{")
+                for j, t in enumerate(targets):
+                    self.e(f"case {j}: goto L_{t:x};")
+            else:
+                # a table of offsets: the register holds the target itself (relative to aot_base when relocated)
+                self.e(f"switch ({through} - aot_base) {{" if self.f.elf.pie else f"switch ({through}) {{")
+                for t in sorted(set(targets)):
+                    self.e(f"case {t:#x}ULL: goto L_{t:x};")
             self.e(f"default: aot_unreachable({insn.address:#x}ULL);")
             self.e("}")
             return
@@ -1233,7 +1337,7 @@ class Lifter:
                 raise self.err("atomic on a host stack slot")
             expr = f"({self.esc_base()} + {a[1] & M64:#x}ULL)"
         elif a[0] == "const":
-            expr = f"{a[1]:#x}ULL"
+            expr = self.gconst(a[1])
         else:
             expr = a[1]
         p = self.tmp(64, f"(uint64_t)(uintptr_t)(c->oview + {expr})")
@@ -1672,6 +1776,12 @@ class Lifter:
     # --- whole program -------------------------------------------------------------------------------------------------
     def program(self, roots):
         out = [PRELUDE]
+        pie = self.elf.pie
+        # static, so that translated code reaches it PC-relative instead of through the GOT; FEX sets it by aot_set_base
+        out.append("// where a position-independent program was loaded: FEX sets it before anything runs (0 otherwise)")
+        out.append("static uint64_t aot_base;")
+        out.append("void aot_set_base(uint64_t base) { aot_base = base; }")
+        out.append(f"const uint8_t aot_pie = {1 if pie else 0};")
         funcs = list(self.funcs.values())
         for k, f in enumerate(funcs):
             f.index = k
@@ -1690,7 +1800,7 @@ class Lifter:
         for pre in ("f_", "o_"):
             out.append(f"static uint64_t aot_dispatch_{pre[0]}(struct aot_ctx *c, uint8_t *V, uint64_t t, uint64_t gsp, {params})")
             out.append("{")
-            out.append("    switch (t) {")
+            out.append("    switch (t - aot_base) {" if pie else "    switch (t) {")
             for f in funcs:
                 if not f.nstack:
                     out.append(f"    case {f.start:#x}ULL: return aot_fn_{pre[0]}[{f.index}](c, V, gsp, 0, {self.call_args()});")

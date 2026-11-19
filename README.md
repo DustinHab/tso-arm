@@ -16,7 +16,7 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **82 %** (pigz 90 %, xz 90 %, zstd 69 %) |
+| **tso-arm**, with functions translated ahead of time | **82 %** (pigz 91 %, xz 89 %, zstd 68 %) |
 | tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
@@ -40,18 +40,20 @@ bin/tso-arm learn ./program args...     # optional: translate its hot functions 
 against a run without them), so give it an input whose processing has no side effects. Afterwards every
 `tso-arm run` of that program uses the translated functions; `tso-arm status` and `tso-arm forget` show and drop
 what was learned. Dynamically linked programs need an x86-64 root file system (`tso-arm rootfs`, FEX's own tool);
-ahead-of-time translation takes static, non-PIE programs for now.
+`learn` translates their own functions, those of their libraries stay with FEX. Built the way distributions build
+programs (position-independent, linked dynamically), pigz reaches 82 % and xz 85 % with what `learn` translated
+(notes section 29).
 
 ## Why the order matters
 
-`tests/spsc.c` is a ring buffer written the way x86 code often is: no barriers, it relies on x86's order. Under FEX
-on the Pi 5, 20 million messages:
+`tests/spsc.c` is a ring buffer written the way x86 code often is: no barriers, it relies on x86's order. 20 million
+messages under FEX:
 
-| | messages that arrived wrong |
-|---|---|
-| without ordering | 31 |
-| FEX, full TSO | 0 |
-| tso-arm | 0 |
+| | messages that arrived wrong, Raspberry Pi 5 (Cortex-A76) | GitHub's Arm runner (Neoverse N2) |
+|---|---|---|
+| without ordering | 31 | 507 |
+| FEX, full TSO | 0 | - |
+| tso-arm | 0 | 0 |
 
 Without ordering such programs mostly work and sometimes compute wrong results; with tso-arm they are correct, and
 faster than with full ordering.
@@ -63,9 +65,9 @@ faster than with full ordering.
   in its views; when another thread touches it, a fault marks it shared, and from then on the accesses to it are
   ordered. Accesses to private memory stay plain and cost nothing extra. What a run learns (which instructions met
   shared memory) is kept in a profile for the next run.
-- **Ahead of time** (`aot/`, notes sections 16 to 26): `aot/auto.py` picks a program's hot functions from a profile
-  run, `aot/lift.py` translates them to C and clang to Arm code, with a plain and an ordered variant of each. A plain
-  access that meets shared memory is patched at run time into an ordered one.
+- **Ahead of time** (`aot/`, notes sections 16 to 26 and 29): `aot/auto.py` picks a program's hot functions from a
+  profile run, `aot/lift.py` translates them to C and clang to Arm code, with a plain and an ordered variant of each.
+  A plain access that meets shared memory is patched at run time into an ordered one.
 - **Fallback:** a program whose threads hand data back and forth constantly (zstd) or uses more threads at once than
   the address space has views for (15 on a 39-bit kernel) goes on with full ordering, as fast as FEX's own.
 
@@ -78,20 +80,20 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-18T18:40, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-19T15:34, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 0.99 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.36 s, 79 % | 0.57 s, 86 % | 84 % |
-| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.33 s, 80 % | 0.57 s, 86 % | 85 % |
-| FEX default | no | 1.56 s, 63 % | 1.51 s, 71 % | 0.67 s, 73 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 60 % | 1.58 s, 68 % | 0.71 s, 69 % | 66 % |
-| tso-arm, first run | yes | 1.37 s, 72 % | 1.55 s, 69 % | 0.93 s, 53 % | 64 % |
-| tso-arm, with profile | yes | 1.25 s, 79 % | 1.48 s, 72 % | 0.73 s, 67 % | 73 % |
-| ahead of time, TSO off | no | 1.06 s, 93 % | 1.15 s, 93 % | 0.55 s, 89 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.64 s, 65 % | 0.71 s, 69 % | 63 % |
-| ahead of time + tso-arm, with profile | yes | 1.10 s, 90 % | 1.19 s, 90 % | 0.71 s, 69 % | 82 % |
+| native Arm | - | 1.00 s, 100 % | 1.06 s, 100 % | 0.48 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 79 % | 0.58 s, 83 % | 83 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.33 s, 80 % | 0.57 s, 84 % | 84 % |
+| FEX default | no | 1.57 s, 64 % | 1.51 s, 70 % | 0.67 s, 72 % | 68 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.53 s, 69 % | 0.71 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.37 s, 73 % | 1.56 s, 68 % | 0.94 s, 51 % | 63 % |
+| tso-arm, with profile | yes | 1.25 s, 80 % | 1.48 s, 72 % | 0.72 s, 67 % | 73 % |
+| ahead of time, TSO off | no | 1.06 s, 94 % | 1.14 s, 93 % | 0.55 s, 87 % | 91 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.62 s, 65 % | 0.71 s, 68 % | 63 % |
+| ahead of time + tso-arm, with profile | yes | 1.10 s, 91 % | 1.19 s, 89 % | 0.71 s, 68 % | 82 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -106,8 +108,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Litmus tests** (`litmus/`): message passing through plain and vector memory, `rep movs`, the stack, load
   buffering; forbidden x86 outcomes never show under tso-arm, also with translated thread functions, and do show
   without ordering.
-- **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers and
-  runs the litmus tests, the views' corner cases, more threads than views and the ring buffer there.
+- **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
+  Neoverse N2: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner cases, more threads
+  than views, a dynamically linked program and the ring buffer there; then it measures the efficiency of pigz, xz and
+  zstd on that machine (`tests/ci_bench.sh`, in the run's summary).
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).
@@ -122,7 +126,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Threads:** a thread with views of its own needs two 16 GB windows of address space, so 15 threads fit into a
   39-bit address space at once. With more, the program goes on with full ordering and the further threads share the
   views of others (correct, as fast as FEX's own full TSO).
-- **Ahead of time** takes static, non-PIE x86-64 programs; what the translator cannot take stays with FEX.
+- **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
+  dynamically; functions of shared libraries, and what the translator cannot take, stay with FEX.
 - **Measured on the Raspberry Pi 5 only.** Other cores were tested for correctness in emulation; `tso-arm check` and
   `tools/board_check.sh --run` check, build and measure everything on a new board.
 

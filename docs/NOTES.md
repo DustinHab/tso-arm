@@ -1150,3 +1150,57 @@ not handle.
   compiler's C library as root file system, the ring buffer. The same script on the Pi: all passed.
 - **README** rewritten as the project's front page: what it is, the result, a quick start, why the order matters,
   how it works, the measurements, correctness, where it runs, the commands.
+
+## 29. Position-independent programs ahead of time; GitHub's Neoverse N2 (2026-11-19)
+
+Distributions build their programs position-independent (PIE): the loader puts them at an address of its choosing,
+and the C code of the translator had the program's addresses written into it. Now:
+
+- **`aot/lift.py`**: in a program of ELF type `DYN` every guest address in the generated C is `aot_base` plus the
+  link-time address; the dispatch switches on `t - aot_base`. Words the dynamic loader relocates (`RELA`, `RELR`) are
+  not folded into constants, and the read-only table shortcut is off for such programs. The library says
+  `aot_pie = 1`; FEX's `LoadAOT` takes the main program's load address from its ELF loader, sets `aot_base` through
+  `aot_set_base` and moves the library's entry points by it before it checks their code hashes.
+- **Jump tables** of position-independent code hold 32-bit offsets from the table
+  (`lea table(%rip), rT; movslq (rT, rI, 4), rX; add rT, rX; jmp *rX`). The translated code branches on the target
+  the jump really takes: the targets read from the table become cases, any other value ends in `aot_unreachable`, so
+  a wrongly recognised table fails loudly and never runs on silently. A table address loaded once before a loop (xz's
+  `rc_encode`) is found through the only rip-relative `lea` into that register. xz as PIE: `rc_encode` and
+  `lzma_lzma_encode` translate now; `learn` chooses 13 functions with 98.9 of 99.1 % of the guest cycles (before: 10
+  with 85 of 98 %).
+- **`aot/auto.py`** finds the direct calls in position-independent C as well (`aot_guest_call(c, (aot_base + ...`).
+- **`tso-arm learn`** takes static-pie programs and dynamically linked ones (their own functions; those of their
+  libraries stay with FEX).
+
+The workloads built several ways from the same sources (`study/build_pie.sh`), each learned by `tso-arm learn`
+(`tests/pie_learn.sh`), through `tso-arm run`, median of 5 at 1.8 GHz, every run started below 60 °C, outputs
+checked (`tests/pie_bench.sh`); efficiency against the native build (pigz 993 ms, xz 1096 ms, zstd 501 ms):
+
+| | page protocol alone | with what was learned |
+|---|---|---|
+| pigz, static, not position-independent | 77 % | 88 % |
+| pigz, static-pie | 77 % | 89 % |
+| pigz, PIE linked dynamically (as distributions build it) | 75 % | 82 % |
+| xz, static, not position-independent | 72 % | 88 % |
+| xz, PIE linked dynamically | 69 % | 85 % |
+| zstd, static, not position-independent | 68 % | 67 % |
+| zstd, PIE linked dynamically | 65 % | 64 % |
+
+(zstd goes on with full ordering either way, section 23; translated functions do not change that.) Position
+independence itself costs nothing measurable once translated (static-pie as fast as static). Linked dynamically,
+pigz is 7 points and xz 3 behind; such a program differs in two ways that both cost: the C library's string functions, which the
+static builds carry and `learn` translates with them, lie in `libc.so` there and stay with FEX, and the dynamic
+loader's start-up (loading and relocating the libraries of the root file system) comes on top. Translating shared
+libraries ahead of time is the next step for such programs.
+
+For the static programs the translator writes the same C as before (only the declarations of `aot_base` added);
+`tests/full_check.sh` after the change: libraries, outputs and the stubs' general path, the views matrix, both litmus
+series (0 forbidden), 12 to 64 threads, all correct; the efficiency table unchanged within the noise (pigz 91, xz 89,
+zstd 68 %, mean 82 %).
+
+**GitHub's Arm runner** (`ubuntu-24.04-arm`, the CI): a Neoverse N2 with 4 cores, 48-bit virtual addresses,
+FEAT_LRCPC2 and LSE2, Ubuntu 24.04 (Capstone 4 packaged, 5 from pip). The first run of `tests/ci.sh` there passed
+everything (4 min 53 s with FEX built). The ring buffer without ordering: 507 of 20 million messages wrong there,
+against 31 on the Pi; with tso-arm none. `tests/ci_bench.sh` measures the efficiency on the runner itself (pigz, xz
+and zstd built from their official sources natively and with an x86-64 cross compiler, a 64 MB corpus of the
+machine's own files, `tso-arm learn` for each) and writes the table into the run's summary.

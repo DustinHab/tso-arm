@@ -37,3 +37,10 @@ jobs:
 
       - name: Correctness tests
         run: sh tests/ci.sh
+
+      - name: Efficiency on this runner (informational)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -q linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -y -q linux-tools-generic
+          sudo sysctl -w kernel.perf_event_paranoid=1
+          sh tests/ci_bench.sh

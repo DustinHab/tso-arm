@@ -90,7 +90,8 @@ def try_lift(binary, name, work):
     if r.returncode:
         return False, "does not compile: " + (r.stderr.strip().splitlines() or ["?"])[0][:100]
     text = open(c).read()
-    return True, {int(x, 16) for x in re.findall(r"aot_guest_call\(c, 0x([0-9a-f]+)ULL", text)}
+    # direct calls of other guest functions (in a position-independent program relative to aot_base)
+    return True, {int(x, 16) for x in re.findall(r"aot_guest_call\(c, (?:\(aot_base \+ )?0x([0-9a-f]+)ULL", text)}
 
 
 def output_hash(env, binary, args):

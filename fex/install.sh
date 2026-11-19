@@ -56,3 +56,10 @@ echo "tso-arm install: building (this takes a while; log in $B/build.log)"
 nice -n 10 ninja >"$B/build.log" 2>&1 || { tail -n 20 "$B/build.log" >&2; exit 1; }
 ninja install >/dev/null
 echo "tso-arm install: FEX installed to $PREFIX"
+# the command itself, on the user's PATH where the distribution puts ~/.local/bin
+mkdir -p "$HOME/.local/bin"
+ln -sf "$R/bin/tso-arm" "$HOME/.local/bin/tso-arm"
+case ":$PATH:" in
+*":$HOME/.local/bin:"*) echo "tso-arm install: 'tso-arm' is ready" ;;
+*) echo "tso-arm install: add ~/.local/bin to PATH to call 'tso-arm' from anywhere" ;;
+esac
