@@ -1,4 +1,4 @@
-From 1c20bc7344febc1608cd4f2e88b75a9d05ecc839 Mon Sep 17 00:00:00 2001
+From 950081d453e865eecfd5ea2048e6195141ac61cd Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -16,14 +16,14 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |   4 +
  .../LinuxSyscalls/SignalDelegator.cpp         |   6 +
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  13 +
- .../LinuxSyscalls/Syscalls/Thread.cpp         |  21 +
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |  32 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  61 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 702 ++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  65 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 762 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 19 files changed, 1704 insertions(+), 88 deletions(-)
+ 19 files changed, 1712 insertions(+), 91 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -376,7 +376,7 @@ index a7a432b..cb35e9d 100644
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index 76c7e6b..38fafcc 100644
+index 76c7e6b..84e5738 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -404,7 +404,32 @@ index 76c7e6b..38fafcc 100644
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &CloneArgs->SignalMask, nullptr, sizeof(CloneArgs->SignalMask));
  
      Thread->Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RAX] = 0;
-@@ -319,6 +330,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -261,8 +272,9 @@ uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::C
+   return Thread->StatusCode;
+ }
+ 
+-static int CloneFork(uint32_t flags, uint64_t exit_signal) {
+-  return ::syscall(SYSCALL_DEF(clone), (flags & (CLONE_FS | CLONE_FILES)) | exit_signal, nullptr, nullptr, nullptr, nullptr);
++static int CloneFork(uint32_t flags, uint64_t exit_signal, bool KernelVFork = false) {
++  return ::syscall(SYSCALL_DEF(clone), (flags & (CLONE_FS | CLONE_FILES)) | (KernelVFork ? CLONE_VFORK : 0) | exit_signal, nullptr,
++                   nullptr, nullptr, nullptr);
+ }
+ 
+ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
+@@ -299,7 +311,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+ 
+     // XXX: We don't currently support a real `vfork` as it causes problems.
+     // Currently behaves like a fork (with wait after the fact), which isn't correct. Need to find where the problem is
+-    Result = CloneFork(flags, exit_signal);
++    // tso-arm: under the views the child runs on its parent's guest memory (shared memory), so the parent must not go
++    // on before the child has called execve or exited, whatever the child does with its descriptors meanwhile: a guest
++    // that closes all of them before execve (Python's subprocess) closed the pipe above and let the parent run on the
++    // same stack. The kernel's vfork waits for exactly that, here without CLONE_VM (each side keeps FEX's own memory).
++    Result = CloneFork(flags, exit_signal, FEX::HLE::TSOViewMemory::Get() != nullptr);
+ 
+     if (Result == 0) {
+       // Close the read end of the pipe.
+@@ -319,6 +335,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // Unlock the mutexes on both sides of the fork
      FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, IsChild);
  
@@ -416,7 +441,7 @@ index 76c7e6b..38fafcc 100644
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
      // Child
-@@ -366,6 +382,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -366,6 +387,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // the rest of the context remains as is, this thread will keep executing
      return 0;
    } else {

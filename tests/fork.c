@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -169,6 +170,23 @@ static void with_vfork(void)
     if (p == 0)
         _exit(0);
     check(child_status(p) == 0, "the child of a vfork failed");
+
+    // The parent of a vfork goes on only once the child has called execve or exited, also when the child closes all
+    // its descriptors first (Python's subprocess does, before execve); the child runs on the parent's memory meanwhile,
+    // so the parent sees what it wrote last (FEX's own vfork, a fork, gives the child memory of its own)
+    static volatile int child_done;
+    child_done = 0;
+    p = vfork();
+    if (p == 0) {
+        syscall(436 /* close_range */, 3, ~0U, 0);
+        for (volatile int i = 0; i < 20000000; i++)
+            ;
+        child_done = 1;
+        _exit(7);
+    }
+    check(p > 0 && child_done == 1, "the parent of a vfork went on before its child had exited, or not on its memory");
+    int s = 0;
+    check(p > 0 && waitpid(p, &s, 0) == p && WIFEXITED(s) && WEXITSTATUS(s) == 7, "the child of a vfork failed");
 }
 
 static double many(int n)

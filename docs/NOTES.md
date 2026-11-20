@@ -1752,3 +1752,14 @@ openssl's sha512 is the one where tso-arm loses: 78 % of its cycles are in one h
 libcrypto, which lift.py refuses (`mov rax, rsp`: the stack pointer read as a value), and under the views alone,
 without any ordering, it runs 30 % slower than under FEX without them (577 against 443 ms, no fault, no escalation):
 the views' addressing costs more there than FEX's ordering (495 ms), which leaves stack accesses through RSP alone.
+**vfork, again.** The CI's run of `tests/rootfs_check.sh` on GitHub's N2 failed once: Python's `subprocess.run(["seq",
+...])` read a wrong byte from the pipe. On the Pi a loop of 20 such calls failed every time (`FileNotFoundError:
+'seq'`), under FEX's full ordering never. Since 0.2.3 a vfork child runs on its parent's guest memory, as vfork means,
+and FEX's vfork is a fork whose parent waits on a pipe until the child has called execve or exited. Python's
+subprocess child closes every descriptor it does not keep before execve (`close_fds`), FEX's pipe end with them: the
+parent went on at once, and both ran on one stack, the child's execve reading paths the parent was overwriting. Under
+the views the host fork now carries `CLONE_VFORK` (without `CLONE_VM`, so each side keeps FEX's own memory): the kernel
+holds the parent until the child has called execve or exited, whatever the child does with its descriptors.
+`tests/fork.c` has a vfork child that closes all its descriptors, works a while, and writes a flag before it exits;
+the parent must find the flag set. With 0.2.3's FEX that test fails, corrupts the output or hangs; with the fix the
+loop of Python subprocesses passed 20 times out of 20.

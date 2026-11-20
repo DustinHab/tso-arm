@@ -3,8 +3,9 @@
 ## 0.3.0 (2026-11-20)
 
 Programs as distributions ship them: `tso-arm learn` translates the hot functions of a program's shared libraries
-as well. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of
-0.2.3 or older.
+as well. And a fix for 0.2.3's vfork, which programs that start others with Python's subprocess hit: update from
+0.2.3. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.2.3
+or older.
 
 - **Shared libraries ahead of time.** `learn` splits its profile between the program and the shared libraries it
   runs and translates the hot functions of each, with the functions they call. A shared library's translation is
@@ -17,6 +18,10 @@ as well. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-a
   in the README.
 - `learn` times each variant with a page protocol profile of its own: one shared profile grows from run to run and
   made the later runs slower, which once had it leave out a library that made xz 30 % faster.
+- Fixed (from 0.2.3): the parent of a vfork could go on while its child still ran on the parent's memory, when the
+  child closed all its descriptors before execve, as Python's subprocess does; both then ran on one stack (a wrong
+  byte in the child's output, or `FileNotFoundError` for a program that exists). The kernel now holds the parent
+  until the child has called execve or exited.
 - Fixed: `aot/elfsyms.py` missed functions without a stack frame in stripped programs and libraries (their unwind
   entry has no instructions of its own), so their callers went back into the guest for them.
 - A program started with execve no longer checks the library `tso-arm run` named for its parent against its code
