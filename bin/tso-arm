@@ -36,6 +36,9 @@ usage: tso-arm COMMAND [...]
         --source: built from source for this machine's core; --generic: from source for any Armv8.0 core
   uninstall [--all]     remove FEX and the command again (--all: what 'learn' translated as well)
   rootfs                fetch an x86-64 root file system for dynamically linked programs (FEX's own tool)
+  binfmt [register | unregister]
+        whether x86-64 programs started directly (./program) run through tso-arm; register and unregister change
+        that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
   version               this version and the FEX it uses
 EOF
 }
@@ -77,6 +80,52 @@ cmd_uninstall() {
     if [ -d "$HOME/.local/src/tso-arm" ]; then
         echo "tso-arm: the FEX source of an earlier build is in ~/.local/src/tso-arm"
     fi
+}
+
+# binfmt_misc: x86-64 ELF files, executables and position-independent ones (the magic and mask qemu-user registers)
+BINFMT_MAGIC='\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00'
+BINFMT_MASK='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
+
+cmd_binfmt() {
+    d=/proc/sys/fs/binfmt_misc
+    conf=/etc/binfmt.d/tso-arm.conf
+    [ -f "$d/status" ] || die "binfmt_misc is not mounted here ($d)"
+    case ${1:-} in
+    "")
+        if [ -f "$d/tso-arm" ]; then
+            echo "x86-64 programs started directly run through tso-arm ($(head -n 1 "$d/tso-arm"), $(sed -n 's/^interpreter //p' "$d/tso-arm"))"
+        else
+            echo "x86-64 programs started directly do not run through tso-arm ('sudo $REPO/bin/tso-arm binfmt register')"
+        fi
+        for f in "$d"/*; do
+            case $(basename "$f") in register | status | tso-arm) continue ;; esac
+            if grep -q '^magic 7f454c4602010100000000000000000002003e00' "$f" 2>/dev/null; then
+                echo "another handler for x86-64 programs: $(basename "$f") ($(sed -n 's/^interpreter //p' "$f")); the one registered last is asked first"
+            fi
+        done
+        ;;
+    register)
+        [ "$(id -u)" = 0 ] || die "binfmt register changes the system and needs root: sudo $REPO/bin/tso-arm binfmt register"
+        # the kernel reads the \x escapes itself; the line goes to it as written
+        line=":tso-arm:M::$BINFMT_MAGIC:$BINFMT_MASK:$REPO/bin/tso-arm-binfmt:"
+        if [ -f "$d/tso-arm" ]; then
+            echo -1 >"$d/tso-arm"
+        fi
+        printf '%s\n' "$line" >"$d/register"
+        mkdir -p "$(dirname "$conf")"
+        printf '%s\n' "$line" >"$conf"
+        echo "tso-arm: x86-64 programs started directly run through $REPO/bin/tso-arm-binfmt now, and after a reboot ($conf)"
+        ;;
+    unregister)
+        [ "$(id -u)" = 0 ] || die "binfmt unregister changes the system and needs root: sudo $REPO/bin/tso-arm binfmt unregister"
+        if [ -f "$d/tso-arm" ]; then
+            echo -1 >"$d/tso-arm"
+        fi
+        rm -f "$conf"
+        echo "tso-arm: x86-64 programs started directly no longer run through tso-arm"
+        ;;
+    *) die "binfmt: register, unregister, or nothing for the state" ;;
+    esac
 }
 
 fex() {
@@ -278,6 +327,7 @@ check) exec sh "$REPO/tools/board_check.sh" ;;
 install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
 uninstall) shift && cmd_uninstall "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
+binfmt) shift && cmd_binfmt "$@" ;;
 version | --version) cmd_version ;;
 -h | --help | help | "") usage ;;
 *) usage >&2 && exit 1 ;;

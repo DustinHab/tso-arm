@@ -35,7 +35,9 @@ bin/tso-arm run ./program args...       # an x86-64 Linux program, x86 memory or
 bin/tso-arm learn ./program args...     # optional: translate its hot functions ahead of time
 ```
 
-`install` also links the command into `~/.local/bin`, so with that on the `PATH` it is just `tso-arm`.
+`install` also links the command into `~/.local/bin`, so with that on the `PATH` it is just `tso-arm`. With
+`sudo bin/tso-arm binfmt register`, x86-64 programs started directly (`./program`) run through tso-arm too, for the
+whole system and after a reboot; `binfmt unregister` takes that back.
 
 `run` needs `readelf` (binutils); `learn` needs `sudo apt install python3 python3-capstone clang linux-perf` as
 well (Ubuntu: `linux-tools-generic` for perf; it needs Capstone 5, and Ubuntu packages 4: `pip install --user
@@ -193,6 +195,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs` | an x86-64 root file system for dynamically linked programs |
+| `tso-arm binfmt [register \| unregister]` | x86-64 programs started directly (`./program`) run through tso-arm; register and unregister need root |
 | `tso-arm version` | the version, and the FEX it uses |
 
 ## Layout

@@ -38,6 +38,21 @@ jobs:
       - name: Correctness tests
         run: sh tests/ci.sh
 
+      - name: Started directly (binfmt_misc)
+        run: |
+          bin/tso-arm binfmt
+          sudo bin/tso-arm binfmt register
+          bin/tso-arm binfmt
+          ./build/ci/threads 8 | tee /tmp/direct.txt
+          grep -q 'wrong 0' /tmp/direct.txt
+          other=$(bin/tso-arm binfmt | grep -c 'another handler' || true)
+          sudo bin/tso-arm binfmt unregister
+          bin/tso-arm binfmt
+          if [ "$other" = 0 ] && ./build/ci/threads 8 2>/dev/null; then
+            echo "an x86-64 program still started directly without the registration"
+            exit 1
+          fi
+
       - name: Efficiency on this runner (informational)
         continue-on-error: true
         run: |

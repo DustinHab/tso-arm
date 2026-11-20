@@ -1,0 +1,4 @@
+#!/bin/sh
+# The interpreter the kernel starts an x86-64 program through once 'tso-arm binfmt register' has registered it with
+# binfmt_misc: the program's path and its arguments go to 'tso-arm run', x86 order kept.
+exec "$(dirname "$(readlink -f "$0")")/tso-arm" run "$@"
