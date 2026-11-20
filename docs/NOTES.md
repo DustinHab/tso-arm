@@ -1266,3 +1266,47 @@ With x86 order kept tso-arm is 12 (pigz) and 22 (xz) points ahead of FEX's full 
 ordering as on the Pi (section 23), and its translated functions, all ordered then, are slower than FEX's own code
 on the N2 (47 against 52 %; on the Pi equal, 69 against 68 %). On the Pi the full check after the change: all correct,
 the table within the noise (pigz 90, xz 90, zstd 70 %, mean 83 %).
+
+## 32. Release 0.1.0: a prebuilt FEX; ordered accesses with an offset (2026-11-20)
+
+- **The packages.** `.github/workflows/release.yml` builds FEX with the patches on `ubuntu-22.04-arm` (glibc 2.35,
+  clang 14) for any Armv8.0 core (`fex/install.sh --generic`: `TUNE_CPU=none`, `armv8-a`), packs it with
+  `tools/package.sh` (`bin`, `share`, `BUILD`, the licenses of FEX and of its external parts) and checks the packages on
+  `ubuntu-22.04-arm` and `ubuntu-24.04-arm`: install from the package, `tso-arm check`, `tests/ci.sh`, `uninstall`. A
+  tag `v*` whose name is not `VERSION` stops the run; otherwise it drafts the release with the notes of that version
+  from `CHANGELOG.md`, and the draft is published by hand. Two packages: `tso-arm-0.1.0-linux-arm64.tar.gz` (the
+  repository at the tag, with the FEX in `fex/prebuilt`, 3.4 MB) and `tso-arm-fex-0.1.0-linux-arm64.tar.gz` (FEX
+  alone, 3.1 MB), with `SHA256SUMS`.
+- **Which FEX `install` takes.** FEX's binary links FEXCore statically, needs only libstdc++, libm, libgcc_s and libc,
+  and finds FEXServer beside itself; the prefix it was built for is only where FEX looks for its AppConfig files, which
+  tso-arm does not use. `BUILD` in the prefix names the patches (the first 16 hex digits of a SHA-256 over
+  `fex/patches/*tso-arm-stage*.patch`), FEX's commit and how it was built. `install` takes, in this order,
+  `TSO_ARM_PACKAGE`, `fex/prebuilt` of the release package, the package of the release named by `VERSION` (checked
+  against `SHA256SUMS`), each only if its patches are exactly these; otherwise it builds from source for this core.
+  `--source` builds for this core, `--generic` for any. From the package it takes 0.02 s on the Pi.
+- **Prebuilt against built for the core,** on the Pi (3 rounds, learned, x86 order kept): pigz 89 against 91 %, xz 93
+  against 91 %, zstd 68 against 69 %, mean 82 against 83 %, within the noise. FEX's JIT emits code for the core it runs
+  on either way; only FEX's own C++ is built for Armv8.0, and that is not where the time goes.
+- **LDAPUR and STLUR.** On cores with FEAT_LRCPC2 (`ilrcpc` in `/proc/cpuinfo`: Neoverse N2 and V1, Cortex-A710 and
+  later) an ordered access with an offset is one instruction (`ldapur x0, [x1, #16]`) instead of an `add` and an
+  `ldapr`. FEX's own code uses them there; the translated code did not, because clang leaves the feature out of
+  `-march=armv8.2-a+rcpc` and does not accept `+rcpc-immo` in `-march`. `aot/build.sh` now passes it with
+  `-Xclang -target-feature -Xclang +rcpc-immo` where the core has it. The patch's access decoder already knew both
+  forms. On the Pi (no LRCPC2) the code stays as it was.
+
+On the N2, two CI runs the same evening, without and with (not the same machine each time: xz natively 3802 against
+3608 ms); all tests passed with it, the litmus tests with translated functions included:
+
+| N2 | native | FEX, TSO off | FEX full TSO | page protocol | + learned | learned, TSO off |
+|---|---|---|---|---|---|---|
+| pigz, without | 1445 ms | 89 % | 74 % | 79 % | 84 % | 89 % |
+| pigz, with | 1446 ms | 90 % | 71 % | 77 % | 85 % | 94 % |
+| xz, without | 3802 ms | 85 % | 71 % | 76 % | 95 % | 97 % |
+| xz, with | 3608 ms | 82 % | 70 % | 76 % | 90 % | 91 % |
+| zstd, without | 1602 ms | 100 % | 56 % | 53 % | 51 % | 97 % |
+| zstd, with | 1470 ms | 88 % | 51 % | 55 % | 50 % | 93 % |
+
+zstd's translated code was 5 points behind FEX's full TSO without and is 1 point behind with. But the page protocol and
+FEX's full TSO, which end in the same full ordering for zstd (section 23), differ by up to 4 points within one run: the
+runner's spread is as large as the effect, so it is not shown. Telling it apart needs both variants in the same job,
+on the same machine (`AOT_NORCPC=1` builds without); open.

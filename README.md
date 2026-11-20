@@ -159,9 +159,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   views of others (correct, as fast as FEX's own full TSO).
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically; functions of shared libraries, and what the translator cannot take, stay with FEX.
-- **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Neoverse N2 (notes section 31: with
-  x86 order kept pigz 84 % and xz 93 %, against 72 and 71 % under FEX's full TSO). Other cores were tested for correctness in emulation;
-  `tso-arm check` and `tools/board_check.sh --run` check, build and measure everything on a new board.
+- **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Neoverse N2 (notes section 32: with
+  x86 order kept pigz 85 % and xz 90 %, against 71 and 70 % under FEX's full TSO; zstd 50 against 51 %). Other cores
+  were tested for correctness in emulation; `tso-arm check` and `tools/board_check.sh --run` check, build and measure
+  everything on a new board.
 
 ## Commands
 

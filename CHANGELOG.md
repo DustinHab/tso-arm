@@ -1,6 +1,6 @@
 # Changes
 
-## 0.1.0 (2026-11-19)
+## 0.1.0 (2026-11-20)
 
 The first release: x86-64 Linux programs on 64-bit Arm with x86's memory order kept, at 83 % of native speed on a
 Raspberry Pi 5 (geometric mean of pigz 90 %, xz 90 %, zstd 70 %), against 66 % for FEX's own full TSO and 23 % for
@@ -19,12 +19,13 @@ Raspberry Pi OS) and 4 KB pages; `tso-arm check` tells whether a machine fits.
 - **Ahead of time:** `tso-arm learn` profiles a program, translates its hot functions to Arm code through C and
   checks them against a run without; later runs use them. Static and position-independent programs, and the own
   functions of dynamically linked ones (their libraries stay with FEX). Built the way distributions build them,
-  pigz reaches 82 % and xz 85 %.
+  pigz reaches 82 % and xz 85 %. On cores with FEAT_LRCPC2 the ordered accesses carry their offset in the
+  instruction (`ldapur`, `stlur`).
 - **Correctness:** litmus tests for message passing through plain and vector memory, `rep movs`, the stack and load
   buffering show no forbidden x86 outcome, also with translated functions. Every push runs them on GitHub's
   Neoverse N2; every week they run with the patches on FEX's newest commit. Cortex-A53, A72, A710, Neoverse N1 and
   V1 were tested in a full system emulation.
-- **Measured on GitHub's Neoverse N2:** with x86 order kept pigz 84 % and xz 93 %, against 72 and 71 % under FEX's
+- **Measured on GitHub's Neoverse N2:** with x86 order kept pigz 85 % and xz 90 %, against 71 and 70 % under FEX's
   full TSO.
 
 Known limits:
