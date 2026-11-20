@@ -1,5 +1,28 @@
 # Changes
 
+## 0.3.0 (2026-11-20)
+
+Programs as distributions ship them: `tso-arm learn` translates the hot functions of a program's shared libraries
+as well. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of
+0.2.3 or older.
+
+- **Shared libraries ahead of time.** `learn` splits its profile between the program and the shared libraries it
+  runs and translates the hot functions of each, with the functions they call. A shared library's translation is
+  kept under the library's name and build ID and serves every program that maps that library; what several programs
+  learned in one library is merged. FEX takes it when the guest maps the library and gives it up when the guest
+  unmaps it (dlclose). Ubuntu's xz, whose work is all in liblzma, runs at 96 % of the host's own Arm xz on the Pi
+  with one thread (31.0 s against 36.9 s without the translation), 86 % with four.
+- `bench/distro.sh` measures programs of the root file system (xz, gzip, bzip2, openssl) against the host's own Arm
+  builds: 78 % in the geometric mean with what `learn` translated, against 61 % under FEX's full TSO; the table is
+  in the README.
+- `learn` times each variant with a page protocol profile of its own: one shared profile grows from run to run and
+  made the later runs slower, which once had it leave out a library that made xz 30 % faster.
+- Fixed: `aot/elfsyms.py` missed functions without a stack frame in stripped programs and libraries (their unwind
+  entry has no instructions of its own), so their callers went back into the guest for them.
+- A program started with execve no longer checks the library `tso-arm run` named for its parent against its code
+  (one message per function); it looks its own up.
+- `tso-arm status PROGRAM` lists the shared libraries learned for it.
+
 ## 0.2.3 (2026-11-20)
 
 Shells and programs with signal handlers. The FEX patch changed, so this release brings FEX prebuilt anew;

@@ -77,17 +77,38 @@ for v in mp vec rep vecflag repflag vecwait lb; do
     ok "litmus $v, translated: $out"
 done
 
-# dynamically linked: the cross compiler's x86-64 C library as the root file system
+# dynamically linked: the cross compiler's x86-64 C library as the root file system (or one built elsewhere by
+# tests/build_ci_programs.sh)
 X=/usr/x86_64-linux-gnu
+R=$PWD/$B/rootfs
 if [ -z "$SKIP_BUILD" ] && [ -f $X/lib/libc.so.6 ]; then
-    R=$PWD/$B/rootfs
     mkdir -p $R/lib64 $R/lib
     cp -L $X/lib/ld-linux-x86-64.so.2 $R/lib64/
     cp -L $X/lib/libc.so.6 $X/lib/libm.so.6 $R/lib/
     $CC -O2 -pthread -o $B/threads-dyn tests/threads.c
+    $CC -O2 -fPIC -shared -Wl,--build-id -o $R/lib/libhot.so tests/sharedlib/libhot.c
+    $CC -O2 -Wl,--build-id -o $B/dl tests/sharedlib/dl.c
+fi
+if [ -f $R/lib/libc.so.6 ]; then
     out=$(FEX_ROOTFS=$R $T run $B/threads-dyn 20 | tail -n 1)
     echo "$out" | grep -q 'wrong 0' || fail "threads, dynamically linked: $out"
     ok "threads, dynamically linked: $out"
+
+    # a shared library's functions translated ahead of time: FEX takes them from the cache (TSO_AOT_DIR, under the
+    # library's name and build ID) when the program maps the library with dlopen, and gives them up at dlclose
+    C=$PWD/$B/cache
+    rm -rf $C
+    mkdir -p $C/tso-arm/aot
+    id=$(LC_ALL=C readelf -n $R/lib/libhot.so | sed -n 's/^ *Build ID: *//p' | cut -c1-16)
+    python3 aot/lift.py $R/lib/libhot.so out/aot/libhot.c hot_sum mix hot_apply >/dev/null
+    sh aot/build.sh out/aot/libhot.c $C/tso-arm/aot/libhot.so-$id.so >/dev/null 2>&1 || fail "shared library: build"
+    want=$(FEX_ROOTFS=$R $T run --no-aot $B/dl | tail -n 1)
+    got=$(FEX_ROOTFS=$R XDG_CACHE_HOME=$C TSO_AOT_LOG=1 $T run $B/dl 2>$B/dl.log | tail -n 1)
+    [ "$got" = "$want" ] || fail "shared library, translated: '$got' against '$want'"
+    loads=$(grep -c 'functions from .*shared library' $B/dl.log)
+    gone=$(grep -c 'is unmapped' $B/dl.log)
+    [ "$loads" = 3 ] && [ "$gone" = 3 ] || fail "shared library, translated: $loads loads and $gone unloads, not 3 each"
+    ok "$got (the library's translations taken and given up 3 times)"
 fi
 
 # a ring buffer written for x86 order: every message right with tso-arm (without ordering some may not be)

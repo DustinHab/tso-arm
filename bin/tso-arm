@@ -243,23 +243,32 @@ cmd_run() {
     case $mode in
     tso)
         export TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1
-        if [ -f "$lib" ]; then
-            # block by block unless learn found multiblock faster with this library (much of the program untranslated)
-            export TSO_AOT="$lib" FEX_MULTIBLOCK=$([ -f "$lib.multiblock" ] && echo 1 || echo 0)
-        fi
+        translated
         ;;
     full)
         export FEX_TSOENABLED=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1
         ;;
     unordered)
         export FEX_TSOENABLED=0
-        if [ -f "$lib" ]; then
-            export TSO_AOT="$lib" FEX_MULTIBLOCK=$([ -f "$lib.multiblock" ] && echo 1 || echo 0)
-        fi
+        translated
         ;;
     *) die "unknown mode $mode (tso, full, unordered)" ;;
     esac
     exec "$F" "$prog" "$@"
+}
+
+# what `learn` translated: the program's library (TSO_AOT, for this program only: programs it starts with execve look
+# theirs up), and the shared libraries' in the cache, which FEX takes when the program maps them (TSO_AOT_DIR)
+translated() {
+    [ "$aot" = /dev/null/none ] && return
+    export TSO_AOT_DIR="$CACHE/aot"
+    if [ -f "$lib" ]; then
+        export TSO_AOT="$lib" TSO_AOT_FOR="$(readlink -f "$prog")"
+    fi
+    if [ -f "$lib" ] || [ -f "$lib.libs" ]; then
+        # block by block unless learn found multiblock faster (much of the program untranslated)
+        export FEX_MULTIBLOCK=$([ -f "$lib.multiblock" ] && echo 1 || echo 0)
+    fi
 }
 
 cmd_learn() {
@@ -273,7 +282,7 @@ cmd_learn() {
         if ! has_rootfs; then
             die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
         fi
-        echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, those of its libraries stay with FEX"
+        echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, and those of its shared libraries (for every program that uses them)"
         ;;
     *) die "$prog is not an x86-64 Linux program" ;;
     esac
@@ -283,9 +292,13 @@ cmd_learn() {
     python3 -c 'import capstone' 2>/dev/null || die "learn needs the Python module capstone (pip install capstone)"
     mkdir -p "$CACHE/aot"
     out="$CACHE/aot/$(key "$prog").so"
-    TSO_ARM_FEX=$(fex) python3 "$REPO/aot/auto.py" "$prog" "$out" --timed -- "$@"
-    if [ -f "$out" ]; then
-        echo "tso-arm: learned $(wc -l <"$out.list") functions of $(basename "$prog"); 'tso-arm run' uses them from now on"
+    TSO_ARM_FEX=$(fex) python3 "$REPO/aot/auto.py" "$prog" "$out" --libdir "$CACHE/aot" --timed -- "$@"
+    n=0
+    [ -f "$out" ] && n=$(wc -l <"$out.list")
+    libs=""
+    [ -f "$out.libs" ] && libs=" and of $(wc -l <"$out.libs") of its shared libraries"
+    if [ -f "$out" ] || [ -f "$out.libs" ]; then
+        echo "tso-arm: learned $n functions of $(basename "$prog")$libs; 'tso-arm run' uses them from now on"
     elif [ -f "$out.slower" ]; then
         echo "tso-arm: the $(wc -l <"$out.list") translated functions made $(basename "$prog") slower on this machine; 'tso-arm run' goes on without them"
     else
@@ -300,8 +313,14 @@ cmd_status() {
             echo "$(basename "$1"): $(wc -l <"$lib.list") functions translated ahead of time"
         elif [ -f "$lib.slower" ]; then
             echo "$(basename "$1"): $(wc -l <"$lib.list") functions translated ahead of time, not used: slower on this machine"
-        else
+        elif [ ! -f "$lib.libs" ]; then
             echo "$(basename "$1"): nothing translated ahead of time"
+        fi
+        if [ -f "$lib.libs" ]; then
+            while read -r k; do
+                l="$CACHE/aot/$k.so"
+                [ -f "$l.list" ] && echo "$(basename "$1"): its shared library ${k%-*}: $(wc -l <"$l.list") functions translated ahead of time"
+            done <"$lib.libs"
         fi
         n=$(ls "$CACHE"/"$(basename "$1")"-*.prof 2>/dev/null | wc -l)
         echo "$(basename "$1"): $n page protocol profile(s)"
@@ -321,8 +340,9 @@ cmd_status() {
 
 cmd_forget() {
     [ $# -ge 1 ] || die "forget: which program?"
+    # the program's own; libraries of its shared libraries serve other programs as well and stay
     rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.slower" "$CACHE/aot/$(key "$1").so.list" \
-        "$CACHE/aot/$(key "$1").so.multiblock" "$CACHE/aot/$(key "$1").c"
+        "$CACHE/aot/$(key "$1").so.multiblock" "$CACHE/aot/$(key "$1").so.libs" "$CACHE/aot/$(key "$1").c"
     rm -f "$CACHE"/"$(basename "$1")"-*.prof
     echo "tso-arm: forgot $(basename "$1")"
 }

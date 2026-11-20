@@ -1,15 +1,15 @@
-From e9c0ff5d2db81bd72077481e9864ff254ae6cf8b Mon Sep 17 00:00:00 2001
+From 1c20bc7344febc1608cd4f2e88b75a9d05ecc839 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
- FEXCore/Source/Interface/Context/Context.h    |   1 +
+ FEXCore/Source/Interface/Context/Context.h    |   4 +
  FEXCore/Source/Interface/Core/Core.cpp        |  25 +-
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |  21 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  10 +
- FEXCore/include/FEXCore/Core/Context.h        |   8 +
+ FEXCore/include/FEXCore/Core/Context.h        |  10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   8 +
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  15 +
@@ -17,23 +17,26 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/SignalDelegator.cpp         |   6 +
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  13 +
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  21 +
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  45 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 702 ++++++++++++++++--
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  61 +-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 702 ++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  65 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 544 ++++++++++++++
- Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 19 files changed, 1455 insertions(+), 88 deletions(-)
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 762 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.h          |  28 +
+ 19 files changed, 1704 insertions(+), 88 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index dc85492..0e2e8c9 100644
+index dc85492..53dce36 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
-@@ -238,6 +238,7 @@ public:
+@@ -238,6 +238,10 @@ public:
    AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandler Handler, void* Creator = nullptr, void* Data = nullptr);
  
    void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) override;
 +  void AddAOTEntrypoint(uintptr_t Entrypoint, uintptr_t Hook, const IR::SHA256Sum& Bridge) override;
++  void RemoveAOTEntrypoint(FEXCore::Core::InternalThreadState* Thread, uintptr_t Entrypoint) override {
++    RemoveCustomIREntrypoint(Thread, Entrypoint);
++  }
  
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
@@ -179,10 +182,10 @@ index dd0ddac..9fc2ccf 100644
          const bool Ordered_ = Site.Ordered || Escalated;
          const bool Fenced = Escalated && !Site.Ordered;
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index ddec229..ffaac6e 100644
+index ddec229..c47887a 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
-@@ -182,6 +182,14 @@ public:
+@@ -182,6 +182,16 @@ public:
     */
    FEX_DEFAULT_VISIBILITY virtual void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) = 0;
  
@@ -193,6 +196,8 @@ index ddec229..ffaac6e 100644
 +   * performs its return: it sets RAX and RSP and leaves the return address in the context's rip.
 +   */
 +  FEX_DEFAULT_VISIBILITY virtual void AddAOTEntrypoint(uintptr_t Entrypoint, uintptr_t Hook, const IR::SHA256Sum& Bridge) = 0;
++  // tso-arm: Entrypoint's guest code is gone: its block goes back to the JIT
++  FEX_DEFAULT_VISIBILITY virtual void RemoveAOTEntrypoint(FEXCore::Core::InternalThreadState* Thread, uintptr_t Entrypoint) = 0;
 +
    /**
     * @brief Adds additional per-instruction granularity TSO enable/disable information for the given range.
@@ -424,7 +429,7 @@ index 76c7e6b..38fafcc 100644
        if (flags & CLONE_PARENT_SETTID) {
          *parent_tid = Result;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d..482bbe0 100644
+index 41aba2d..5d8edc1 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -515,6 +520,36 @@ index 41aba2d..482bbe0 100644
          }
        }
        break;
+@@ -486,6 +517,17 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+ 
+   InvalidateCodeRangeIfNecessary(Thread, Result, Size, PendingResourceDeletion);
+ 
++  // tso-arm: translations of code that was mapped over go; an executable file may have a library of translated
++  // functions (mappings FEX makes itself while starting, without a thread, are the program's: TSO_AOT)
++  if (Is64Bit && ThunkHandler) {
++    if (flags & MAP_FIXED) {
++      ThunkHandler->UnmapAOT(CTX, Thread, Result, Size);
++    }
++    if ((prot & PROT_EXEC) && fd != -1 && Thread) {
++      ThunkHandler->LoadAOTForMapping(CTX, Result, Size, fd, offset);
++    }
++  }
++
+   if (LateMetadata) {
+     auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
+     CTX->AddForceTSOInformation(LateMetadata->VolatileValidRanges, std::move(LateMetadata->VolatileInstructions));
+@@ -534,6 +576,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+   }
+   InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), Size, PendingResourceDeletion);
+ 
++  // tso-arm: translations of code that was there go
++  if (Is64Bit && ThunkHandler) {
++    ThunkHandler->UnmapAOT(CTX, Thread, reinterpret_cast<uint64_t>(addr), Size);
++  }
++
+   if (length) {
+     auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
+     CTX->RemoveForceTSOInformation(reinterpret_cast<uint64_t>(addr), length);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 index 76be33d..0cecd22 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
@@ -1652,10 +1687,10 @@ index 01b077e..d0c26a2 100644
      // Before the first thread runs anything: what earlier runs of this program learned
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..10c5220 100644
+index 9c018bc..2ba51c0 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
-@@ -21,8 +21,20 @@ $end_info$
+@@ -21,13 +21,29 @@ $end_info$
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/fextl/unordered_map.h>
  
@@ -1668,15 +1703,24 @@ index 9c018bc..10c5220 100644
 +#include <cstdio>
 +#include <cstring>
  #include <dlfcn.h>
++#include <elf.h>
++#include <fcntl.h>
 +#include <link.h>
 +#include <sys/auxv.h>
++#include <sys/stat.h>
 +#include <sys/mman.h>
 +#include <sys/uio.h>
 +#include <unistd.h>
  
  #include <malloc.h>
  #include <mutex>
-@@ -72,6 +84,440 @@ namespace FEX::HLE {
+ #include <shared_mutex>
+ #include <stdint.h>
++#include <string>
+ #include <utility>
+ 
+ #ifdef ENABLE_JEMALLOC_GLIBC
+@@ -72,6 +88,529 @@ namespace FEX::HLE {
  
  static thread_local FEX::HLE::ThreadStateObject* ThreadObject {};
  
@@ -1717,13 +1761,40 @@ index 9c018bc..10c5220 100644
 +  constexpr FEXCore::IR::SHA256Sum BridgeSum = {
 +    {'t', 's', 'o', '-', 'a', 'r', 'm', ':', 'a', 'o', 't', '-', 'b', 'r', 'i', 'd', 'g', 'e'}};
 +
-+  std::atomic<uint64_t> CodeStart {}, CodeEnd {};
++  // One library of translated functions per guest object: the program (TSO_AOT), and the shared libraries the guest
++  // maps later that have one in TSO_AOT_DIR
++  struct Lib {
++    uint64_t CodeStart, CodeEnd; // its executable range, for the fault handler
++    uint32_t* StubNext;           // room for patch stubs within branch range of its code (ReserveStubs)
++    uint32_t* StubEnd;
++    // Its switches to the ordered variants: of the function a host pc lies in (returns the function's name, or
++    // null), and of all functions
++    const char* (*EscalateFn)(uint64_t PC);
++    void (*OrderAllFn)();
++    std::atomic<bool> OrderedAll;
++    // The guest object's mapping it serves (0, 0 for the program), and its functions, for taking them back when the
++    // guest unmaps it
++    uint64_t GuestStart, GuestEnd, Base;
++    const struct Entry* Table;
++    std::atomic<bool> Gone;
++  };
++  constexpr int MaxLibs = 64;
++  Lib Libs[MaxLibs];
++  std::atomic<int> NumLibs {};
++  std::atomic<bool> OrderAllWanted {}; // set once the process runs fully ordered: libraries loaded later start ordered
++  std::mutex LoadMutex;
 +  bool Log {};
 +  std::atomic<int> Logged {};
-+  // The library's switches to the ordered variants: of the function a host pc lies in, and of all functions
-+  const char* (*EscalateFn)(uint64_t PC) {}; // the name of the function switched, or null
-+  void (*OrderAllFn)() {};
-+  std::atomic<bool> OrderedAll {};
++
++  Lib* LibOf(uint64_t PC) {
++    const int N = NumLibs.load(std::memory_order_acquire);
++    for (int i = 0; i < N; ++i) {
++      if (PC >= Libs[i].CodeStart && PC < Libs[i].CodeEnd) {
++        return &Libs[i];
++      }
++    }
++    return nullptr;
++  }
 +
 +  // A call from host code back into guest code that was not translated. RSP is the stack pointer the callee starts
 +  // with (pointing at its return address slot); FEX's callback path puts its own return address there.
@@ -1804,6 +1875,57 @@ index 9c018bc..10c5220 100644
 +    return H;
 +  }
 +
++  // An x86-64 ELF file of the guest: its headers, and the name `tso-arm learn` keeps its library under, the file's
++  // real name and the first 8 bytes of its build ID (empty without a build ID)
++  struct Object {
++    Elf64_Ehdr Eh;
++    Elf64_Phdr Ph[64];
++    char Key[320];
++  };
++
++  bool ReadObject(int Fd, Object& O) {
++    O.Key[0] = 0;
++    auto& Eh = O.Eh;
++    if (pread(Fd, &Eh, sizeof(Eh), 0) != sizeof(Eh) || memcmp(Eh.e_ident, ELFMAG, SELFMAG) || Eh.e_ident[EI_CLASS] != ELFCLASS64 ||
++        Eh.e_machine != EM_X86_64 || Eh.e_phentsize != sizeof(Elf64_Phdr) || Eh.e_phnum == 0 || Eh.e_phnum > 64) {
++      return false;
++    }
++    if (pread(Fd, O.Ph, Eh.e_phnum * sizeof(Elf64_Phdr), Eh.e_phoff) != ssize_t(Eh.e_phnum * sizeof(Elf64_Phdr))) {
++      return false;
++    }
++    char Id[17] {};
++    for (int i = 0; i < Eh.e_phnum && !Id[0]; ++i) {
++      const auto& P = O.Ph[i];
++      uint8_t Notes[4096];
++      if (P.p_type != PT_NOTE || P.p_filesz > sizeof(Notes) || pread(Fd, Notes, P.p_filesz, P.p_offset) != ssize_t(P.p_filesz)) {
++        continue;
++      }
++      for (uint64_t At = 0; At + sizeof(Elf64_Nhdr) <= P.p_filesz;) {
++        const auto* H = reinterpret_cast<const Elf64_Nhdr*>(Notes + At);
++        const uint64_t Name = At + sizeof(Elf64_Nhdr), Desc = Name + ((H->n_namesz + 3) & ~3u);
++        if (Desc + H->n_descsz > P.p_filesz) {
++          break;
++        }
++        if (H->n_type == NT_GNU_BUILD_ID && H->n_namesz == 4 && !memcmp(Notes + Name, "GNU", 4) && H->n_descsz >= 8) {
++          for (int b = 0; b < 8; ++b) {
++            snprintf(Id + 2 * b, 3, "%02x", Notes[Desc + b]);
++          }
++          break;
++        }
++        At = Desc + ((H->n_descsz + 3) & ~3u);
++      }
++    }
++    char Link[64], File[4096];
++    snprintf(Link, sizeof(Link), "/proc/self/fd/%d", Fd);
++    const ssize_t N = readlink(Link, File, sizeof(File) - 1);
++    if (Id[0] && N > 0) {
++      File[N] = 0;
++      const char* Name = strrchr(File, '/');
++      snprintf(O.Key, sizeof(O.Key), "%.280s-%s", Name ? Name + 1 : File, Id);
++    }
++    return true;
++  }
++
 +  bool Listed(const char* List, const char* Name) {
 +    const size_t N = strlen(Name);
 +    for (const char* P = List; *P;) {
@@ -1822,7 +1944,7 @@ index 9c018bc..10c5220 100644
 +} // namespace AOT
 +
 +bool IsAOTCode(uint64_t PC) {
-+  return PC >= AOT::CodeStart.load(std::memory_order_relaxed) && PC < AOT::CodeEnd.load(std::memory_order_relaxed);
++  return AOT::LibOf(PC) != nullptr;
 +}
 +
 +// A plain access of translated code met a page another thread writes. Like FEX's escalation of a guest
@@ -1834,8 +1956,6 @@ index 9c018bc..10c5220 100644
 +// Returns false when the instruction is not one it can patch (the caller switches the whole function instead).
 +namespace AOT {
 +  constexpr uint32_t DmbIshld = 0xD50339BF, DmbIsh = 0xD5033BBF;
-+  uint32_t* StubNext {};
-+  uint32_t* StubEnd {};
 +  std::atomic<bool> PatchLock {};
 +  std::atomic<uint64_t> Patched {};
 +
@@ -1885,6 +2005,10 @@ index 9c018bc..10c5220 100644
 +      Off = PairMode == 1 ? 0 : Imm;
 +    }
 +
++    Lib* L = LibOf(PC);
++    if (!L) {
++      return PatchResult::Impossible;
++    }
 +    bool Expected = false;
 +    if (!PatchLock.compare_exchange_strong(Expected, true)) {
 +      return PatchResult::Busy; // another thread is patching: complete this access only
@@ -1895,11 +2019,12 @@ index 9c018bc..10c5220 100644
 +      constexpr int Words = 20;
 +      // TSO_AOT_PATCH_MAX=N: only the first N sites are patched, later ones switch their function (for bisecting)
 +      static const long PatchMax = getenv("TSO_AOT_PATCH_MAX") ? strtol(getenv("TSO_AOT_PATCH_MAX"), nullptr, 10) : -1;
-+      if (!StubNext || StubEnd - StubNext < Words || (PatchMax >= 0 && Patched.load(std::memory_order_relaxed) >= uint64_t(PatchMax))) {
++      if (!L->StubNext || L->StubEnd - L->StubNext < Words ||
++          (PatchMax >= 0 && Patched.load(std::memory_order_relaxed) >= uint64_t(PatchMax))) {
 +        PatchLock.store(false);
 +        return PatchResult::Impossible; // no (more) room for stubs
 +      }
-+      uint32_t* S = StubNext;
++      uint32_t* S = L->StubNext;
 +      const void* Back = Site + 1;
 +      int K = 0;
 +      // Dst = Src +- A (add/sub immediate, A below 2^24)
@@ -2048,7 +2173,7 @@ index 9c018bc..10c5220 100644
 +        ++K;
 +      }
 +      __builtin___clear_cache(reinterpret_cast<char*>(S), reinterpret_cast<char*>(S + Words));
-+      StubNext += Words;
++      L->StubNext += Words;
 +      // The library's code page writable for the one word (a private mapping: copy on write)
 +      const uint64_t Page = PC & ~4095ULL;
 +      if (::mprotect(reinterpret_cast<void*>(Page), 4096, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
@@ -2059,7 +2184,7 @@ index 9c018bc..10c5220 100644
 +        Patched.fetch_add(1, std::memory_order_relaxed);
 +        if (Log) {
 +          fprintf(stderr, "tso-arm aot: patched %s at library+%#lx (stub %#lx)\n", Load ? "load" : "store",
-+                  (unsigned long)(PC - CodeStart.load()), (unsigned long)reinterpret_cast<uint64_t>(S));
++                  (unsigned long)(PC - L->CodeStart), (unsigned long)reinterpret_cast<uint64_t>(S));
 +        }
 +      }
 +    } else {
@@ -2076,10 +2201,10 @@ index 9c018bc..10c5220 100644
 +}
 +
 +namespace AOT {
-+  // Room for stubs within branch range (+-128 MiB) of the library's code: 1 MiB, 32,768 stubs
-+  void ReserveStubs() {
++  // Room for stubs within branch range (+-128 MiB) of a library's code: 1 MiB, 32,768 stubs
++  void ReserveStubs(Lib& L) {
 +    constexpr size_t Size = 1 << 20;
-+    const uint64_t Start = CodeStart.load(), End = CodeEnd.load();
++    const uint64_t Start = L.CodeStart, End = L.CodeEnd;
 +    for (uint64_t Want : {Start - (2ULL << 20), End + (4ULL << 20), Start - (16ULL << 20), End + (32ULL << 20)}) {
 +      void* P = ::mmap(reinterpret_cast<void*>(Want & ~0xFFFFFULL), Size, PROT_READ | PROT_WRITE | PROT_EXEC,
 +                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2089,19 +2214,25 @@ index 9c018bc..10c5220 100644
 +      // library code and stubs together within 120 MiB: every branch between them reaches
 +      const uint64_t A = reinterpret_cast<uint64_t>(P);
 +      if (std::max(A + Size, End) - std::min(A, Start) < (120ULL << 20)) {
-+        StubNext = static_cast<uint32_t*>(P);
-+        StubEnd = StubNext + Size / 4;
++        L.StubNext = static_cast<uint32_t*>(P);
++        L.StubEnd = L.StubNext + Size / 4;
 +        return;
 +      }
 +      ::munmap(P, Size);
 +    }
 +    fprintf(stderr, "tso-arm aot: no room for stubs near the library; accesses to shared memory switch whole functions\n");
 +  }
++
++  void OrderAll(Lib& L) {
++    if (L.OrderAllFn && !L.OrderedAll.exchange(true)) {
++      L.OrderAllFn();
++    }
++  }
 +} // namespace AOT
 +
 +void AOTEscalate(uint64_t PC) {
-+  if (AOT::EscalateFn) {
-+    const char* Name = AOT::EscalateFn(PC);
++  if (auto* L = AOT::LibOf(PC); L && L->EscalateFn) {
++    const char* Name = L->EscalateFn(PC);
 +    if (Name && AOT::Log) {
 +      fprintf(stderr, "tso-arm aot: %s runs ordered from its next call on\n", Name);
 +    }
@@ -2109,24 +2240,121 @@ index 9c018bc..10c5220 100644
 +}
 +
 +void AOTOrderAll() {
-+  if (AOT::OrderAllFn && !AOT::OrderedAll.exchange(true)) {
-+    AOT::OrderAllFn();
++  AOT::OrderAllWanted = true;
++  const int N = AOT::NumLibs.load(std::memory_order_acquire);
++  for (int i = 0; i < N; ++i) {
++    AOT::OrderAll(AOT::Libs[i]);
 +  }
 +}
 +
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +620,104 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,7 +713,230 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  
 +  void LoadAOT(FEXCore::Context::Context* CTX, uint64_t MainBase) override {
++    AOT::Log = getenv("TSO_AOT_LOG") && getenv("TSO_AOT_LOG")[0] == '1';
++    // The program's file on the host (a program of the root file system has its guest path in the configuration)
++    char Host[4096] {};
++    if (auto Program = FEXCore::Config::Get(FEXCore::Config::CONFIG_APP_FILENAME); Program && !Program.value()->empty()) {
++      const char* P = Program.value()->c_str();
++      auto RootFS = FEXCore::Config::Get(FEXCore::Config::CONFIG_ROOTFS);
++      std::string InRoot = (P[0] == '/' && RootFS && !RootFS.value()->empty()) ? std::string(RootFS.value()->c_str()) + P : std::string();
++      if (!(InRoot.size() && realpath(InRoot.c_str(), Host)) && !realpath(P, Host)) {
++        Host[0] = 0;
++      }
++    }
++    // TSO_AOT: a library named for the program (by `tso-arm run`, which sets TSO_AOT_FOR to the program's real path,
++    // so that programs it starts with execve, which inherit the variable, do not take it)
 +    const char* Path = getenv("TSO_AOT");
-+    if (!Path || !*Path) {
++    const char* For = getenv("TSO_AOT_FOR");
++    if (Path && *Path && (!For || !*For || !strcmp(For, Host))) {
++      std::lock_guard lk(AOT::LoadMutex);
++      LoadAOTLibrary(CTX, Path, MainBase, 0, 0);
 +      return;
 +    }
-+    AOT::Log = getenv("TSO_AOT_LOG") && getenv("TSO_AOT_LOG")[0] == '1';
++    // Otherwise the program's library in TSO_AOT_DIR, by its name and build ID
++    const char* Dir = getenv("TSO_AOT_DIR");
++    if (!Dir || !*Dir || !Host[0]) {
++      return;
++    }
++    const int Fd = open(Host, O_RDONLY | O_CLOEXEC);
++    if (Fd < 0) {
++      return;
++    }
++    AOT::Object O;
++    char Lib[4096];
++    const bool Known = AOT::ReadObject(Fd, O) && O.Key[0];
++    close(Fd);
++    if (Known && snprintf(Lib, sizeof(Lib), "%s/%s.so", Dir, O.Key) < int(sizeof(Lib)) && access(Lib, R_OK) == 0) {
++      std::lock_guard lk(AOT::LoadMutex);
++      LoadAOTLibrary(CTX, Lib, MainBase, 0, 0);
++    }
++  }
++
++  void LoadAOTForMapping(FEXCore::Context::Context* CTX, uint64_t Address, uint64_t Length, int Fd, uint64_t Offset) override {
++    static const char* Dir = getenv("TSO_AOT_DIR");
++    if (!Dir || !*Dir || Fd < 0) {
++      return;
++    }
++    AOT::Object O;
++    if (!AOT::ReadObject(Fd, O) || !O.Key[0] || O.Eh.e_type != ET_DYN) {
++      return; // without a build ID there is no name to look up
++    }
++    uint64_t Base = 0;
++    bool Placed = false;
++    for (int i = 0; i < O.Eh.e_phnum; ++i) {
++      const auto& P = O.Ph[i];
++      if (P.p_type == PT_LOAD && Offset >= (P.p_offset & ~0xFFFULL) && Offset < P.p_offset + P.p_filesz) {
++        // the mapping's guest address is the segment's address in the file's layout plus the load base
++        Base = Address - (P.p_vaddr - (P.p_offset - Offset));
++        Placed = true;
++        break;
++      }
++    }
++    char Path[4096];
++    if (!Placed || snprintf(Path, sizeof(Path), "%s/%s.so", Dir, O.Key) >= int(sizeof(Path)) || access(Path, R_OK) != 0) {
++      return;
++    }
++    std::lock_guard lk(AOT::LoadMutex);
++    LoadAOTLibrary(CTX, Path, Base, Address, Address + Length);
++  }
++
++  void UnmapAOT(FEXCore::Context::Context* CTX, FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Length) override {
++    const int Count = AOT::NumLibs.load(std::memory_order_acquire);
++    if (!Count) {
++      return;
++    }
++    std::lock_guard lk(AOT::LoadMutex);
++    for (int i = 0; i < Count; ++i) {
++      auto& L = AOT::Libs[i];
++      if (L.Gone.load() || L.GuestStart == L.GuestEnd || L.GuestEnd <= Address || L.GuestStart >= Address + Length) {
++        continue;
++      }
++      // The guest's code is gone (dlclose, or something mapped over it): its functions go back to the JIT
++      for (const auto* E = L.Table; E->RIP; ++E) {
++        CTX->RemoveAOTEntrypoint(Thread, L.Base + E->RIP);
++      }
++      L.Gone = true;
++      if (AOT::Log) {
++        fprintf(stderr, "tso-arm aot: the guest code at %#lx-%#lx is unmapped, its translations are no longer used\n",
++                (unsigned long)L.GuestStart, (unsigned long)L.GuestEnd);
++      }
++    }
++  }
++
+ private:
++  // A library of translated functions for a guest object: the program (GuestStart = GuestEnd = 0; MainBase where the
++  // loader put it, used if the library is position-independent), or a shared library the guest mapped at
++  // [GuestStart, GuestEnd) with load base MainBase. Under AOT::LoadMutex.
++  void LoadAOTLibrary(FEXCore::Context::Context* CTX, const char* Path, uint64_t MainBase, uint64_t GuestStart, uint64_t GuestEnd) {
++    const int Index = AOT::NumLibs.load(std::memory_order_relaxed);
++    if (Index >= AOT::MaxLibs) {
++      fprintf(stderr, "tso-arm aot: more than %d libraries of translated functions, %s not used\n", AOT::MaxLibs, Path);
++      return;
++    }
 +    void* Lib = dlopen(Path, RTLD_NOW | RTLD_LOCAL);
 +    if (!Lib) {
 +      fprintf(stderr, "tso-arm aot: %s\n", dlerror());
@@ -2144,6 +2372,25 @@ index 9c018bc..10c5220 100644
 +              Path, Abi ? *Abi : 1, AOT::ABI);
 +      dlclose(Lib);
 +      return;
++    }
++    const auto* Pie = static_cast<const uint8_t*>(dlsym(Lib, "aot_pie"));
++    const bool IsPie = Pie && *Pie;
++    if (GuestStart != GuestEnd && !IsPie) {
++      fprintf(stderr, "tso-arm aot: %s is not position-independent, not used for a shared library\n", Path);
++      dlclose(Lib);
++      return;
++    }
++    // The same library again (the guest mapped the object anew after unmapping it): its slot is taken over
++    for (int i = 0; i < Index; ++i) {
++      if (AOT::Libs[i].Table == Table) {
++        if (!AOT::Libs[i].Gone.load()) {
++          dlclose(Lib);
++          return; // already in use for a mapping of this object
++        }
++        AOT::Libs[i].Gone = false;
++        AddAOTEntries(CTX, AOT::Libs[i], Lib, Path, IsPie ? MainBase : 0, GuestStart, GuestEnd);
++        return;
++      }
 +    }
 +    // The library's executable range, for the fault handler
 +    struct Find {
@@ -2166,41 +2413,50 @@ index 9c018bc..10c5220 100644
 +        return 0;
 +      },
 +      &F);
-+    AOT::CodeStart = F.Start;
-+    AOT::CodeEnd = F.End;
-+    AOT::ReserveStubs();
-+    AOT::EscalateFn = reinterpret_cast<const char* (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
-+    AOT::OrderAllFn = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_all"));
++    auto& L = AOT::Libs[Index];
++    L.CodeStart = F.Start;
++    L.CodeEnd = F.End;
++    L.Table = Table;
++    AOT::ReserveStubs(L);
++    L.EscalateFn = reinterpret_cast<const char* (*)(uint64_t)>(dlsym(Lib, "aot_escalate"));
++    L.OrderAllFn = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_all"));
 +    // Every translated function ordered from the start when x86 order is wanted without the page protocol (FEX's TSO
-+    // on, no views), with TSO_AOT_ORDERED=1, and in the protocol's fallback to full ordering
++    // on, no views), with TSO_AOT_ORDERED=1, and once the protocol fell back to full ordering
 +    FEX_CONFIG_OPT(TSOEnabled, TSOENABLED);
 +    if ((TSOEnabled() && !FEXCore::TSOViews::Enabled()) || FEXCore::TSOViews::Knob("TSO_AOT_ORDERED") ||
-+        FEXCore::TSOViews::FallbackActive.load()) {
-+      AOTOrderAll();
++        FEXCore::TSOViews::FallbackActive.load() || AOT::OrderAllWanted.load()) {
++      AOT::OrderAll(L);
 +    } else if (!TSOEnabled()) {
 +      // No ordering wanted: functions the library starts ordered (they read shared data throughout) run plain
 +      if (auto Reset = reinterpret_cast<void (*)()>(dlsym(Lib, "aot_order_reset"))) {
 +        Reset();
 +      }
 +    }
-+
-+    // A position-independent program: the library's addresses are offsets, and it forms the program's addresses from
-+    // aot_base, set here to where the loader put the program, before anything runs
-+    uint64_t Base = 0;
-+    if (const auto* Pie = static_cast<const uint8_t*>(dlsym(Lib, "aot_pie")); Pie && *Pie) {
-+      Base = MainBase;
-+      if (auto SetBase = reinterpret_cast<void (*)(uint64_t)>(dlsym(Lib, "aot_set_base"))) {
-+        SetBase(Base);
-+      }
-+    }
-+
++    // Visible to the fault handler before any of its code can run
++    AOT::NumLibs.store(Index + 1, std::memory_order_release);
 +    {
 +      std::unique_lock lk(ThunksMutex);
 +      Thunks.emplace(AOT::BridgeSum, &AOT::Bridge);
 +    }
++    AddAOTEntries(CTX, L, Lib, Path, IsPie ? MainBase : 0, GuestStart, GuestEnd);
++  }
++
++  // The functions of library L for its guest object at Base: each checked against the guest's code
++  void AddAOTEntries(FEXCore::Context::Context* CTX, AOT::Lib& L, void* Lib, const char* Path, uint64_t Base, uint64_t GuestStart,
++                     uint64_t GuestEnd) {
++    // A position-independent object: the library's addresses are offsets, and it forms the object's addresses from
++    // aot_base, set here to where the object was put, before anything runs
++    if (Base) {
++      if (auto SetBase = reinterpret_cast<void (*)(uint64_t)>(dlsym(Lib, "aot_set_base"))) {
++        SetBase(Base);
++      }
++    }
++    L.Base = Base;
++    L.GuestStart = GuestStart;
++    L.GuestEnd = GuestEnd;
 +    const char* Only = getenv("TSO_AOT_ONLY");
 +    int Count = 0;
-+    for (const auto* E = Table; E->RIP; ++E) {
++    for (const auto* E = L.Table; E->RIP; ++E) {
 +      if (Only && *Only && !AOT::Listed(Only, E->Name)) {
 +        continue;
 +      }
@@ -2214,30 +2470,36 @@ index 9c018bc..10c5220 100644
 +      ++Count;
 +    }
 +    if (AOT::Log) {
-+      fprintf(stderr, "tso-arm aot: %d functions from %s (code %#lx-%#lx%s)\n", Count, Path, (unsigned long)F.Start, (unsigned long)F.End,
-+              Base ? ", position-independent program" : "");
++      fprintf(stderr, "tso-arm aot: %d functions from %s (code %#lx-%#lx%s)\n", Count, Path, (unsigned long)L.CodeStart,
++              (unsigned long)L.CodeEnd,
++              GuestStart != GuestEnd ? ", shared library" :
++              Base                   ? ", position-independent program" :
++                                       "");
 +    }
 +  }
 +
- private:
    // Bits in a SHA256 sum are already randomly distributed, so truncation yields a suitable hash function
    struct TruncatingSHA256Hash {
+     size_t operator()(const FEXCore::IR::SHA256Sum& SHA256Sum) const noexcept {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.h b/Source/Tools/LinuxEmulation/Thunks.h
-index 16a89ce..93fa9a0 100644
+index 16a89ce..609c9b2 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.h
 +++ b/Source/Tools/LinuxEmulation/Thunks.h
-@@ -7,6 +7,10 @@
+@@ -7,6 +7,13 @@
  
  #include <span>
  
 +namespace FEXCore::Context {
 +class Context;
 +}
++namespace FEXCore::Core {
++struct InternalThreadState;
++}
 +
  namespace FEX::HLE {
  struct ThreadStateObject;
  
-@@ -20,6 +24,20 @@ public:
+@@ -20,6 +27,27 @@ public:
     * @param Definitions A vector of thunk definitions that the frontend controls
     */
    virtual void AppendThunkDefinitions(std::span<const FEXCore::IR::ThunkDefinition> Definitions) = 0;
@@ -2245,6 +2507,13 @@ index 16a89ce..93fa9a0 100644
 +  // tso-arm: routes the guest functions of the library named by TSO_AOT to their host translations (after the guest
 +  // binary is mapped)
 +  virtual void LoadAOT(FEXCore::Context::Context* CTX, uint64_t MainBase) = 0;
++  // tso-arm: the guest mapped Length bytes of the file Fd from Offset at Address, executable: the library of
++  // translated functions for that file, if TSO_AOT_DIR has one (named by the file's name and build ID)
++  virtual void LoadAOTForMapping(FEXCore::Context::Context* CTX, uint64_t Address, uint64_t Length, int Fd, uint64_t Offset) = 0;
++  // tso-arm: guest memory at [Address, Address + Length) was unmapped or mapped over: translations of code that was
++  // there are no longer used
++  virtual void UnmapAOT(FEXCore::Context::Context* CTX, FEXCore::Core::InternalThreadState* Thread, uint64_t Address,
++                        uint64_t Length) = 0;
  };
  fextl::unique_ptr<ThunkHandler> CreateThunkHandler();
 +

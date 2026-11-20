@@ -38,6 +38,10 @@ def _fdes(path):
     for line in out.splitlines():
         m = FDE.search(line)
         if m:
+            if cur:
+                # the previous FDE had no row: no instructions of its own, the CIE's entry state (CFA at rsp+8), a
+                # function without a frame (readelf prints no row for it)
+                fdes.setdefault(cur, "rsp+8")
             lo, hi = int(m.group(1), 16), int(m.group(2), 16)
             cur = (lo, hi - lo) if hi > lo else None
             continue
@@ -45,6 +49,8 @@ def _fdes(path):
         if cur and r and int(r.group(1), 16) == cur[0]:
             fdes.setdefault(cur, r.group(2))
             cur = None
+    if cur:
+        fdes.setdefault(cur, "rsp+8")
     return sorted((lo, size, cfa) for (lo, size), cfa in fdes.items())
 
 

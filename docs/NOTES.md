@@ -1679,3 +1679,76 @@ outputs: command substitution, pipelines, a loop of 100 forks, subshells, a trap
 background jobs, `printf` of a `long double`, awk, sed and grep, md5sum and sha256sum, gzip, xz with two threads,
 tar, find with xargs, factor, date, perl (hashes, fork), Python (hashlib, subprocess, a fork pool of 4, fork beside 3
 running threads, SIGUSR1 and a timer signal). On the Pi all 25 the same, in 77 s for both modes.
+
+## 40. Shared libraries translated ahead of time (2026-11-20)
+
+Programs as distributions ship them do their work in shared libraries: Ubuntu's xz spends 99 % of its guest cycles
+in liblzma and 0.03 % in itself, so translating the program's own functions gave nothing. Release 0.2.0's
+`learn` said so ("those of its libraries stay with FEX").
+
+**FEX.** The translated code of several guest objects can be loaded at once (up to 64): the program's, named by
+`TSO_AOT` as before, and a shared library's, which FEX looks up when the guest maps an executable segment of a file
+(`GuestMmap`): in `TSO_AOT_DIR`, under the file's real name and the first 8 bytes of its build ID
+(`liblzma.so.5.4.5-78d7220824dfcd33.so`), the name `tso-arm learn` keeps it under. The load base comes from the
+file's program headers and the mapping's offset; the library is position-independent like a PIE program's (aot_base
+set at load), and every function is checked against the guest's code before FEX routes the guest function's block to
+it. When the guest unmaps the code or maps something over it (dlclose), the functions go back to the JIT
+(`RemoveAOTEntrypoint`); mapped again, the same library takes them again. Everything that was one library's state
+before (its code range for the fault handler, the room for patch stubs, the switches to the ordered variants)
+exists per library; a library loaded after the protocol fell back to full ordering starts ordered. `TSO_AOT` now
+comes with `TSO_AOT_FOR`, the program's real path: programs started with execve inherit the variable and used to
+check another program's library against their code (and leave it, with a message for each function); now they look
+their own up in `TSO_AOT_DIR` by build ID.
+
+**First try, and why it was slower.** liblzma's 10 hottest functions (from a profile; FEX names their blocks by guest
+address, and perf's records of the guest's file mappings place them in liblzma) made xz slower: 44.2 against
+41.4 s. In the translated code's profile, 13 % went to FEX and 18 % to JIT code: the translated functions called
+liblzma functions that were not translated, through the guest each time. With their callees as well (as `auto.py`
+does for programs) the most called ones (8 call sites) were still missing: `aot/elfsyms.py` found no function there.
+Leaf functions without a frame have an FDE without instructions of its own, for which `readelf` prints no row, and
+elfsyms took a function's FDE by its first row. It takes such FDEs as functions now (also for stripped programs).
+Then: 18 functions, 31.1 against 40.4 s, the same output; the host's own Arm xz takes 29.7 s.
+
+**learn** (`aot/auto.py --libdir`): the profile is split by object: the program's blocks by the name FEX gives
+them, a shared library's by perf's mapping records; per object the hot functions (at least 0.2 % of the cycles, at
+most 40) and the functions they call within it. A shared library's library goes to the cache under its name and
+build ID with the functions earlier programs chose in it added (its `.so.list`), so that it serves every program
+that maps it; the output check and the timed runs use the program's library and the shared libraries' together, and
+only when they do not make the program slower are the shared libraries' installed. The program's `.so.libs` lists
+the libraries it learned for (`tso-arm status`). `tso-arm run` sets `TSO_AOT_DIR` to the cache in its tso and
+unordered modes.
+
+On the Pi, `tso-arm learn` of Ubuntu's xz (8 MB input, 69 s): liblzma 10 functions (the 7 hottest and 3 callees),
+99.1 of 99.3 % of the guest cycles; `tso-arm run` with a 54 MB input 31.0 s against 36.9 s without them (the page
+protocol with its profile), the output the same as the Arm xz's, which takes 29.7 s: 96 %. xz with other options
+(`-T4 -3`) takes the library too.
+
+`tests/sharedlib/` in the CI: `libhot.so` (a loop that calls a function of the library, and one that calls back into
+the program through a pointer) translated with lift.py into a cache of the test's own; `dl` loads it with dlopen,
+calls it, unloads it with dlclose, three times: the same output as without the translation, and FEX's log shows the
+library's functions taken and given up three times.
+**Programs as Ubuntu ships them** (`bench/distro.sh`): xz, gzip, bzip2 and openssl of the root file system, each
+learned once, against the Pi's own Arm builds (Raspberry Pi OS: xz 5.8 against Ubuntu's 5.4, gzip 1.13 against 1.12,
+the same bzip2, openssl 3.5 against 3.0), at 1.8 GHz, best of 3:
+
+| | FEX full TSO | tso-arm, page protocol | tso-arm, learned |
+|---|---|---|---|
+| xz -T4 (liblzma: 11 functions) | 64 % | 68 % | 86 % |
+| gzip (its own code: 15 functions) | 66 % | 79 % | 94 % |
+| bzip2 (libbz2: 8 functions) | 55 % | 71 % | 83 % |
+| openssl sha512 (libcrypto) | 60 % | 51 % | 54 % |
+| geometric mean | 61 % | 66 % | 78 % |
+
+The first session gave xz -T4 a learned column slower than the protocol alone (1.74 against 1.55 s), and `learn`
+itself had found the library slower (1720 against 1520 ms). Both came from one page protocol profile shared by every
+run of the program: a profile only grows (the code ranges that met shared memory run ordered from then on), and xz
+with 4 threads adds about a thousand ranges per run, so each run was slower than the one before (the protocol's
+column read 1.55, 1.76, 1.87 s over its three rounds) and whatever ran later lost. Measured on their own, the same
+library made xz -T4 30 % faster. `learn`'s timed runs and each column of `bench/distro.sh` keep a profile of their own
+now; `learn` there also runs at the fixed clock, from a cool start. That a profile keeps growing for such a program
+is a question for the protocol itself (an escalated range that stays in the profile forever).
+
+openssl's sha512 is the one where tso-arm loses: 78 % of its cycles are in one hand-written assembly function of
+libcrypto, which lift.py refuses (`mov rax, rsp`: the stack pointer read as a value), and under the views alone,
+without any ordering, it runs 30 % slower than under FEX without them (577 against 443 ms, no fault, no escalation):
+the views' addressing costs more there than FEX's ordering (495 ms), which leaves stack accesses through RSP alone.

@@ -14,4 +14,17 @@ $CC -O2 -static -pthread -o build/ci/fields study/work/fields.c
 $CC -O2 -static -pthread -o build/ci/fork tests/fork.c
 $CC -O2 -static -o build/ci/signals tests/signals.c
 $CC -O2 -static -o build/ci/x87 tests/x87.c
+# dynamically linked, with this machine's C library as the root file system
+R=build/ci/rootfs
+LIBC=$($CC -print-file-name=libc.so.6)
+LD=$($CC -print-file-name=ld-linux-x86-64.so.2)
+[ -f "$LD" ] || LD=/lib64/ld-linux-x86-64.so.2
+if [ -f "$LIBC" ] && [ -f "$LD" ]; then
+    mkdir -p $R/lib64 $R/lib
+    cp -L "$LD" $R/lib64/
+    cp -L "$LIBC" "$($CC -print-file-name=libm.so.6)" $R/lib/
+    $CC -O2 -pthread -o build/ci/threads-dyn tests/threads.c
+    $CC -O2 -fPIC -shared -Wl,--build-id -o $R/lib/libhot.so tests/sharedlib/libhot.c
+    $CC -O2 -Wl,--build-id -o build/ci/dl tests/sharedlib/dl.c
+fi
 ls build/ci
