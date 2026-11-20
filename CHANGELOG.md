@@ -8,7 +8,11 @@
 - Where the kernel lets `ldapr` and `stlr` be unaligned within 16 bytes (FEAT_LSE2, as on the Neoverse N2), the
   translated code uses them there instead of a barrier; `tso-arm check` shows whether it does.
 - The CI benchmark fails when a program's output is wrong (it went on before) and measures each newer core feature
-  against a build without it.
+  against a build without it; `.github/workflows/profile.yml` profiles a workload on GitHub's Arm runner on demand.
+- Translated code tests for stack objects in host memory with one instruction instead of four (3 to 6 % shorter
+  libraries), and the escape analysis follows addresses through vector registers too.
+- `tso-arm learn` stops with the program's exit status when the program fails with the given arguments (it learned
+  nothing silently before).
 
 ## 0.1.0 (2026-11-20)
 

@@ -1373,3 +1373,44 @@ without the library ended the same way, the output check passed with an empty pr
 list counted as a line). The program's arguments are now what follows `--`; `learn` first runs the program once and
 stops with its exit status if it fails (exit status 22 for an unknown option of pigz); nothing chosen leaves no
 library and says so.
+
+On the N2 afterwards (CI): pigz 1676 ms with its library, 1819 ms without, kept; xz 3879 against 4875 ms, kept;
+zstd 2983 against 2473 ms, left out, so `tso-arm run` gives zstd the page protocol's 83 % there instead of less.
+
+## 34. Where the translated code loses on the N2; the host-object test as a mask (2026-11-20)
+
+`tests/ci_profile.sh` (on demand on GitHub: `.github/workflows/profile.yml`) runs a workload as `tso-arm run` runs it,
+with its translated functions and with FEX's own code alone, and compares cycles per guest function
+(`tools/perf_guest.py` maps FEX's named blocks back to the guest's functions). zstd, x86 order kept (fallback):
+
+| zstd | cycles | instructions | per cycle | `ZSTD_compressBlock_doubleFast`, cycles |
+|---|---|---|---|---|
+| Pi, translated + FEX | 4.64 billion | 4.20 billion | 0.91 | 3265 million |
+| Pi, FEX alone | 4.53 billion | 3.42 billion | 0.76 | 3041 million |
+| N2, translated + FEX | 36.2 billion | 63.9 billion | 1.77 | 27.7 billion |
+| N2, FEX alone | 28.6 billion | 42.7 billion | 1.49 | 21.0 billion |
+
+(The N2 run's input is 1 GB, the Pi's 100 MB.) The translated code executes 23 % (Pi) and 50 % (N2, with the checks
+of the unaligned path as well) more instructions than FEX's code for the same work: before every ordered access it
+tests for a stack object in host memory (`cmp O, V`, `b.eq`, `lsr #34`, `cbnz`) and for alignment (`tst`, `b.ne`);
+FEX's code has neither and lets an unaligned access fault once instead (section 33). On the A76 the higher rate of
+instructions per cycle hides most of it; on the N2 it does not. The hottest instructions on the Pi are the one after
+the hash table's load (its cache miss, which FEX's code pays as well) and the barriers after unaligned reads of the
+input; on the N2 the `cmp` of O and V.
+
+**The host-object test as a mask.** `O != V` holds or not for a whole function, so the test is now `a & H`, with
+`H = O != V ? ~(2^34 - 1) : 0` computed once per function and held in a register through an empty `asm` (otherwise
+clang folds it back into the comparison per access): one `tst` and one branch per access instead of four
+instructions. The libraries become 3 to 6 % shorter (zstd 34,416 instructions to 32,450, xz 29,824 to 28,156, pigz
+25,958 to 25,167). On the Pi, alternating (`aot/ab_env.sh`, 8 runs each): zstd best 727 to 726 ms, 3.95 to 3.91
+billion user cycles; pigz 1122 to 1119 ms; xz 1212 to 1208 ms, all within the noise. Testing alignment in the same
+`tst` (`a & (H | size - 1)`) made the code longer again (the slow path tests the host case a second time), so not.
+Full check on the Pi with the mask: libraries, stubs' general path, views matrix, both litmus series, 64 threads,
+the CI tests, all correct; efficiency pigz 90, xz 89, zstd 70 %, mean 83 % (README table).
+
+**Addresses through vector registers.** The escape analysis (which stack objects may stay in host memory) followed
+addresses through 64-bit registers only: a pointer moved through an xmm register (compilers do so with pairs of
+pointers) lost its taint, and a store of it to guest memory would not have counted as an escape, leaving a host
+address where guest code could find it. Vector registers carry the taint now. For pigz, xz and zstd the translated C
+comes out the same to the byte (`lift.py`'s classification of every function unchanged); it matters for programs
+that do this.

@@ -496,8 +496,9 @@ class Lifter:
 
         def value(op):
             if op.type == X.X86_OP_REG:
+                # 64-bit registers and vector registers carry addresses (compilers move pointer pairs through xmm)
                 base, bits, hi = REGS[insn.reg_name(op.reg)]
-                return regs.get(base, 0) if bits == 64 else 0
+                return regs.get(base, 0) if bits >= 64 else 0
             if op.type == X.X86_OP_MEM:
                 s = self.slot(f, insn, op, d)
                 return slots.get(s, 0) if s is not None and op.size == 8 else 0
@@ -505,8 +506,7 @@ class Lifter:
 
         def setreg(op, m):
             base, bits, hi = REGS[insn.reg_name(op.reg)]
-            if bits != 128:
-                regs[base] = m if bits == 64 else 0
+            regs[base] = m if bits >= 64 else 0
 
         def store(op, m):
             s = self.slot(f, insn, op, d)
@@ -632,6 +632,7 @@ class Lifter:
         decl = []
         if ordered:
             decl.append("    uint8_t *O = c->oview;")
+            decl.append("    const uint64_t H = aot_hmask(O, V);")
         else:
             decl.append(f"    if (__builtin_expect(aot_mode[{f.index}], 0))")
             decl.append(f"        return o_{f.name}(c, V, gsp, A, {self.call_args()});")
@@ -793,7 +794,7 @@ class Lifter:
         if kind == "g" and self.f.unit:
             return f"gld{bits}(O, {expr})"
         if kind == "g" and self.ordered:
-            return f"old{bits}(O, V, {expr})"
+            return f"old{bits}(O, V, H, {expr})"
         if kind == "s":
             return f"gld{bits}({self.stack_view()}, {expr})"
         return f"gld{bits}(V, {expr})"
@@ -804,7 +805,7 @@ class Lifter:
         if kind == "g" and self.f.unit:
             return f"gst{bits}(O, {expr}, {value});"
         if kind == "g" and self.ordered:
-            return f"ost{bits}(O, V, {expr}, {value});"
+            return f"ost{bits}(O, V, H, {expr}, {value});"
         if kind == "s":
             return f"gst{bits}({self.stack_view()}, {expr}, {value});"
         return f"gst{bits}(V, {expr}, {value});"
@@ -1430,7 +1431,7 @@ class Lifter:
         if self.f.unit:
             self.e(f"gfill(O, rdi, rax, {size}, rcx);")
         elif self.ordered:
-            self.e(f"ofill(O, V, rdi, rax, {size}, rcx);")
+            self.e(f"ofill(O, V, H, rdi, rax, {size}, rcx);")
         else:
             self.e(f"gfill(V, rdi, rax, {size}, rcx);")
         self.e(f"rdi += rcx * {size};")
@@ -1942,7 +1943,15 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
 // same way. (Reading the covering aligned words with `ldapr` instead was slower for zstd: 725 -> 782 ms, notes
 // section 21.) With views, guest addresses lie below 2^34; a larger value is the address of a stack object kept in
 // host memory (relative to the plain view, private to the thread): plain.
-#define HOSTOBJ(a) __builtin_expect(((a) >> 34) != 0 && O != V, 0)
+// The test as a mask computed once per function (H, aot_hmask): one `tst` per access instead of comparing O and V
+// and shifting the address each time; the empty asm keeps clang from turning it back into that.
+static inline uint64_t aot_hmask(const uint8_t *O, const uint8_t *V)
+{
+    uint64_t m = O != V ? ~((1ULL << 34) - 1) : 0;
+    __asm__("" : "+r"(m));
+    return m;
+}
+#define HOSTOBJ(a) __builtin_expect(((a) & H) != 0, 0)
 #ifndef AOT_WORDS
 #define AOT_WORDS 0 // unaligned loads of this many bytes and more read the covering aligned words with ldapr
 #endif
@@ -1980,7 +1989,7 @@ static inline void ust16(uint8_t *p, uint16_t v) { __asm__ volatile("stlrh %w0, 
 static inline void ust32(uint8_t *p, uint32_t v) { __asm__ volatile("stlr %w0, [%1]" ::"r"(v), "r"(p) : "memory"); }
 static inline void ust64(uint8_t *p, uint64_t v) { __asm__ volatile("stlr %x0, [%1]" ::"r"(v), "r"(p) : "memory"); }
 #define ORDERED(bits, T)                                                                                               \
-    static inline T old##bits(uint8_t *O, uint8_t *V, uint64_t a)                                                      \
+    static inline T old##bits(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a)                                          \
     {                                                                                                                  \
         if (HOSTOBJ(a))                                                                                                \
             return *(volatile T##u *)(V + a);                                                                          \
@@ -2001,7 +2010,7 @@ static inline void ust64(uint8_t *p, uint64_t v) { __asm__ volatile("stlr %x0, [
         __asm__ volatile("dmb ishld" ::: "memory");                                                                    \
         return v;                                                                                                      \
     }                                                                                                                  \
-    static inline void ost##bits(uint8_t *O, uint8_t *V, uint64_t a, T v)                                              \
+    static inline void ost##bits(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a, T v)                                  \
     {                                                                                                                  \
         if (HOSTOBJ(a)) {                                                                                              \
             *(volatile T##u *)(V + a) = v;                                                                             \
@@ -2027,19 +2036,19 @@ ORDERED(16, uint16_t)
 ORDERED(32, uint32_t)
 ORDERED(64, uint64_t)
 // 16 bytes (SSE moves): two ordered 8-byte halves, in address order
-static inline u128 old128(uint8_t *O, uint8_t *V, uint64_t a)
+static inline u128 old128(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a)
 {
-    uint64_t lo = old64(O, V, a), hi = old64(O, V, a + 8);
+    uint64_t lo = old64(O, V, H, a), hi = old64(O, V, H, a + 8);
     return (u128){lo, hi};
 }
-static inline void ost128(uint8_t *O, uint8_t *V, uint64_t a, u128 v)
+static inline void ost128(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a, u128 v)
 {
-    ost64(O, V, a, v[0]);
-    ost64(O, V, a + 8, v[1]);
+    ost64(O, V, H, a, v[0]);
+    ost64(O, V, H, a + 8, v[1]);
 }
 // rep stos ordered: the string's stores after every earlier access, in any order among themselves; every later
 // store is a release or follows a barrier, which keeps them before it
-static inline void ofill(uint8_t *O, uint8_t *V, uint64_t a, uint64_t v, unsigned size, uint64_t n)
+static inline void ofill(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a, uint64_t v, unsigned size, uint64_t n)
 {
     if (HOSTOBJ(a)) {
         gfill(V, a, v, size, n);
