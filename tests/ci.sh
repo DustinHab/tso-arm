@@ -24,6 +24,9 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/spsc tests/spsc.c
     $CC -O2 -static -pthread -o $B/sharedstack tests/sharedstack.c
     $CC -O2 -static -pthread -o $B/fields study/work/fields.c
+    $CC -O2 -static -pthread -o $B/fork tests/fork.c
+    $CC -O2 -static -o $B/signals tests/signals.c
+    $CC -O2 -static -o $B/x87 tests/x87.c
 fi
 sh tools/board_check.sh | sed 's/^/      /'
 
@@ -42,6 +45,23 @@ for n in 8 16 40; do
     echo "$out" | grep -q 'wrong 0' || fail "threads $n: $out"
     ok "threads $n: $out"
 done
+
+# fork without exec: the child's memory is its own (guest memory is shared memory under the views), memory mapped
+# shared stays shared, read-only memory made writable after the fork is copied
+out=$($T run $B/fork | tail -n 1) || fail "$out"
+ok "$out"
+
+# the program's own signal handlers, in every mode
+for m in tso full unordered; do
+    out=$($T run --mode $m $B/signals | tail -n 1) || fail "signals, $m: $out"
+    ok "$m: $out"
+done
+
+# x87 registers, which FEX addresses in the thread's context: the same results as FEX's full ordering
+want=$($T run --mode full $B/x87 | tail -n 1)
+got=$($T run $B/x87 | tail -n 1)
+[ "$got" = "$want" ] || fail "x87: '$got' against '$want'"
+ok "$got"
 
 # litmus tests: no forbidden outcome under the page protocol (mp exits 1 if there was one)
 for v in mp vec rep stack stackflag vecflag repflag vecwait lb; do

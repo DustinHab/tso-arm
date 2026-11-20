@@ -1605,3 +1605,66 @@ profile was bound to another program's file; GitHub's runner has no ffmpeg. The 
 the file in the root file system when there is one there, and keeps the guest path as its name (which stays the same
 when the root file system is mounted elsewhere). On the Pi: Node's second run started in the fallback (8829 against
 9762 ms), and after the compat rounds no program escalated any more; the CI tests passed.
+
+## 39. fork without exec (2026-11-20)
+
+A program that forks and goes on running in the child (bash's `$(...)`, shell scripts, `make`, Python's
+multiprocessing) broke under the page protocol: `tests/fork.c` (the child writes a global, the heap, a 4 MB buffer
+and the stack, then exits) ended with the child killed by SIGSEGV, under gdb with glibc's "stack smashing detected".
+Memory that is private for the guest is shared memory here (`MAP_SHARED | MAP_ANONYMOUS` at its guest address, one
+object mapped again into the views with `mremap` of size 0), and a fork keeps shared memory shared: parent and child
+ran on one stack. The kernel's copy-on-write needs private mappings, and the views need shared ones, so the child
+has to copy.
+
+What FEX does now (`TSOViewMemory::AfterForkChild`, `AfterForkParent`, `Unshare`):
+
+- The views' lock is held across the fork (`SyscallHandler::LockBeforeFork`), so the child finds consistent tables;
+  the child starts the lock over, as the only thread.
+- The parent waits until the child has its copy (a pipe: the child writes a byte when done, or dies and closes it).
+  The first version copied in the child while the parent ran on: the child copied the parent's later writes (the
+  stack frames of its `waitpid` over the child's own, so glibc's stack check fired; a lock word the parent had taken
+  again after the fork, so the child waited on it forever). The thread that forked waits inside the system call,
+  with glibc's fork locks still held, and the views' lock keeps the other threads' faults waiting; other threads that
+  run on their own pages are not stopped, so a child forked from a process with threads may copy a structure another
+  thread changes while it copies (POSIX allows such a child only async-signal-safe calls until it calls execve).
+- In the child, the views of the threads that did not come along go back to reservations, and every private page
+  becomes the forking thread's (plain accesses, a single thread), unless the process already runs fully ordered.
+- Each writable private range gets a new shared memory object with its contents; the copy is moved onto the guest
+  address with `mremap` and aliased into the thread's two views again. Only pages that hold something are copied:
+  `mincore` gives the pages in memory (for shared memory it looks at the object, so pages touched only through a
+  view count). Pages of shared memory in swap have no page table entry and are not in the page cache, which
+  `mincore` does not see; with swap in use on the system, `/proc/self/smaps` names the guest mappings with pages in
+  swap, and every nonzero page of those is copied. The child does no allocations for this (its allocators' locks
+  may be held by threads it does not have).
+- Ranges the guest cannot write stay shared between parent and child (program code and read-only data: most of a
+  large program's memory, never copied in a fork followed by exec). Both sides mark them; the first `mprotect` that
+  makes one writable, and `MADV_DONTNEED` on one (which removes pages of shared memory for everyone), copy it first.
+- Translations of code in copied writable executable ranges are dropped in the child: FEX write-protects pages it
+  translated code from, and that protection is not carried over to the copy.
+- Memory the guest mapped shared stays shared, as in a fork. A vfork child (and `posix_spawn`, which FEX runs as a
+  fork whose parent waits) runs on its parent's memory until it calls execve or exits, which is what vfork means;
+  with that, `posix_spawn` of a program that does not exist reports the error in the parent as it should (under
+  FEX's own memory it reports success: the child's write of the error is lost).
+
+`tests/fork.c` checks that the child sees what the parent wrote before the fork and keeps its own writes, with and
+without other threads running (the child starts a thread of its own as well), that memory mapped shared stays
+shared, that read-only memory made writable after the fork stays separate on either side, vfork, and the time per
+fork. On the Pi: 3.7 to 3.9 ms per fork and wait under tso-arm against 1.8 ms under FEX's full ordering; the child
+of the test copies 76 KB in 8 ranges in about 1 ms, and one with a 4 MB heap buffer 4.1 MB in 3.7 ms. A program
+with a large heap pays for its size at every fork, also one followed by execve (the kernel's copy-on-write costs
+nothing until a page is written); vfork and `posix_spawn` cost nothing extra.
+
+**Signal handlers.** Testing bash's `$(...)` found two older faults. Every handler the program installs crashed FEX,
+in every mode, since section 17: a handler runs on a dispatcher loop that FEX starts below the host state it saved
+at the signal, and the loop top reset the stack pointer to the dispatcher's (`DispatchSP`), above that state, so the
+handler's frames overwrote it and `sigreturn` jumped into data. bash crashed when it reaped a child in its SIGCHLD
+handler. Saving the host state now also saves `DispatchSP` and sets it to the new stack pointer; restoring puts it
+back. `tests/signals.c` (raised, with siginfo, a timer during `pause`, `kill`, a child's exit during `sigsuspend`) runs
+in the CI in every mode. A test that reaps 20 children in a SIGCHLD handler between pipe reads and `sigsuspend`
+sometimes hangs, also under FEX without the patches.
+
+**x87 registers.** `seq` of Ubuntu crashed under the views (and only there): FEX's x87 stack pass addresses the x87
+registers in the thread's context when the stack top is not known within a block (`FormContextAddress`, then
+ordinary loads and stores), and the views' pass took those for guest memory and added the view base. It leaves them
+alone now. `tests/x87.c` (sums and products in `long double`, `strtold`, `printf` of `long double`) gives the same
+result as FEX's full ordering in the CI.

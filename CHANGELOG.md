@@ -1,5 +1,23 @@
 # Changes
 
+## 0.2.3 (2026-11-20)
+
+Shells and programs with signal handlers. The FEX patch changed, so this release brings FEX prebuilt anew;
+`tso-arm install` replaces the one of 0.2.2 or older.
+
+- Fixed: a signal handler of the program crashed FEX, in every mode and since 0.1.0 (bash reaping a child, a timer,
+  `raise`). The handler's stack overwrote the host state FEX had saved at the signal.
+- Fixed: a process forked without calling execve (bash's command substitution `$(...)`, pipelines, shell scripts,
+  Python's multiprocessing) went on sharing the memory that is private for the program with its parent: under the
+  page protocol that memory is shared memory, mapped again into the views. Parent and child wrote into each other's
+  stacks and heaps and one of them crashed. The child gets its own copy of the writable memory now, made while the
+  parent waits; read-only memory stays shared until either side makes it writable, memory the program mapped shared
+  stays shared, and a vfork child runs on its parent's memory as the program asked (so `posix_spawn` of a missing
+  program reports the error). A fork costs about 2 ms more on the Pi, plus the copy of a large heap.
+- Fixed: x87 arithmetic (`long double`) could crash under the page protocol (Ubuntu's `seq`): FEX's accesses to the
+  x87 registers in the thread's context went through the views.
+- `tests/fork.c`, `tests/signals.c` and `tests/x87.c` run in the CI.
+
 ## 0.2.2 (2026-11-20)
 
 Programs of an x86-64 root file system learn from their earlier runs. The FEX patch changed, so this release brings

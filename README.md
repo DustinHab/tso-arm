@@ -118,19 +118,19 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-20T06:39, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-20T10:27, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
 | native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.58 s, 84 % | 84 % |
-| tso-arm build, TSO off | no | 1.15 s, 87 % | 1.34 s, 80 % | 0.57 s, 86 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.52 s, 70 % | 0.67 s, 73 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.63 s, 61 % | 1.53 s, 70 % | 0.71 s, 69 % | 67 % |
-| tso-arm, first run | yes | 1.39 s, 72 % | 1.55 s, 69 % | 0.95 s, 52 % | 64 % |
-| tso-arm, with profile | yes | 1.28 s, 78 % | 1.47 s, 73 % | 0.73 s, 67 % | 73 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.35 s, 79 % | 0.57 s, 86 % | 84 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.58 s, 84 % | 84 % |
+| FEX default | no | 1.57 s, 64 % | 1.55 s, 69 % | 0.67 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.53 s, 70 % | 0.73 s, 67 % | 66 % |
+| tso-arm, first run | yes | 1.37 s, 73 % | 1.56 s, 69 % | 0.96 s, 51 % | 63 % |
+| tso-arm, with profile | yes | 1.26 s, 79 % | 1.48 s, 72 % | 0.71 s, 69 % | 73 % |
 | ahead of time, TSO off | no | 1.06 s, 94 % | 1.17 s, 91 % | 0.54 s, 91 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.76 s, 57 % | 1.55 s, 69 % | 0.70 s, 70 % | 65 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.77 s, 56 % | 1.55 s, 69 % | 0.70 s, 70 % | 65 % |
 | ahead of time + tso-arm, with profile | yes | 1.11 s, 90 % | 1.21 s, 88 % | 0.70 s, 70 % | 82 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
@@ -148,11 +148,11 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   without ordering.
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
-  cases, more threads than views, a dynamically linked program and the ring buffer there; then it measures the
-  efficiency of pigz, xz and zstd on that machine (`tests/ci_bench.sh`, in the run's summary). Every week the same
-  tests run with the patches on FEX's newest commit (`.github/workflows/upstream.yml`); on demand,
-  `.github/workflows/profile.yml` profiles a workload there (`tests/ci_profile.sh`: per guest function, translated
-  against FEX's own code).
+  cases, more threads than views, fork without exec, the program's signal handlers, x87 arithmetic, a dynamically
+  linked program and the ring buffer there; then it measures the efficiency of pigz, xz and zstd on that machine
+  (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on FEX's newest commit
+  (`.github/workflows/upstream.yml`); on demand, `.github/workflows/profile.yml` profiles a workload there
+  (`tests/ci_profile.sh`: per guest function, translated against FEX's own code).
 - **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes section 35): sort,
   7-Zip, Python with threads, ffmpeg with x264 and Node with worker threads from x86-64 Ubuntu, packed with their
   libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock):
@@ -182,6 +182,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Threads:** a thread with views of its own needs two 16 GB windows of address space, so 15 threads fit into a
   39-bit address space at once. With more, the program goes on with full ordering and the further threads share the
   views of others (correct, as fast as FEX's own full TSO).
+- **fork:** the views need guest memory to be shared memory, which the kernel's copy-on-write does not cover, so a
+  forked child copies the program's writable memory while its parent waits (notes section 39): about 2 ms more per
+  fork on the Pi, plus the copy of a large heap. Read-only memory stays shared until it is made writable; vfork and
+  `posix_spawn` cost nothing extra.
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically; functions of shared libraries, and what the translator cannot take, stay with FEX.
 - **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Arm runner (notes sections 32 and

@@ -11,4 +11,7 @@ $CC -O2 -static -pthread -o build/ci/threads tests/threads.c
 $CC -O2 -static -pthread -o build/ci/spsc tests/spsc.c
 $CC -O2 -static -pthread -o build/ci/sharedstack tests/sharedstack.c
 $CC -O2 -static -pthread -o build/ci/fields study/work/fields.c
+$CC -O2 -static -pthread -o build/ci/fork tests/fork.c
+$CC -O2 -static -o build/ci/signals tests/signals.c
+$CC -O2 -static -o build/ci/x87 tests/x87.c
 ls build/ci
