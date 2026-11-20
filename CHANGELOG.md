@@ -6,6 +6,8 @@
   that met shared memory enters the profile only when it does so again in the next run that changes the profile
   (notes section 41). One run of Ubuntu's xz with 4 threads had added 801 ranges that every later run then ordered
   (1.4 instead of 1.26 s).
+- Fixed: with `XDG_CACHE_HOME` set, FEX kept the page protocol's profiles in `~/.cache/tso-arm` anyway, so
+  `tso-arm status` and `forget` did not see them; they go to `$XDG_CACHE_HOME/tso-arm` now, beside what `learn` keeps.
 
 ## 0.3.0 (2026-11-20)
 
