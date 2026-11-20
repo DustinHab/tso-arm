@@ -1,5 +1,14 @@
 # Changes
 
+## 0.3.3 (not released yet)
+
+- Programs with large libraries start faster and need much less memory: code and read-only data of a program and its
+  libraries are mapped from their files instead of copied into every process (notes section 45). `ffmpeg -version`
+  0.26 instead of 0.56 s and 93 instead of 266 MB, `node -e 0` 121 instead of 216 MB; a program start 46.8 instead
+  of 50.5 ms (FEX's full TSO: 40.6 ms).
+- `madvise(MADV_DONTNEED)` on a read-only private file mapping: its pages read the file again afterwards, not zeros.
+- `tests/filemap.c` (in `tests/ci.sh`): private file mappings under the views behave as private ones.
+
 ## 0.3.2 (2026-11-20)
 
 A crash fix, and programs with large functions much faster (ffmpeg, Node). Update from 0.3.1: a thread could die of

@@ -1881,3 +1881,37 @@ efficiency pigz 90, xz 88, zstd 70 %, mean 82 % (README table).
 packing with 4 threads, xz -T4, sort --parallel=4, Python threads with a lock, make -j4), each 20 times in three
 settings (with the profile earlier runs left, without a profile, block by block), every output against full
 ordering. On the Pi after the fix: 300 of 300 runs right.
+
+## 45. Programs and libraries mapped from their files (2026-11-20)
+
+A program start cost about 10 ms more under tso-arm than under FEX's full TSO (bash starting `/bin/true` 100 times:
+50.5 against 40.6 ms each), and large programs much more: `ffmpeg -version` 0.56 against 0.20 s and 266 against
+62 MB of memory, `node -e 0` 2.23 against 1.71 s and 216 against 103 MB. Guest memory under the views is shared
+memory (every view maps the same pages), so the views copied every private file mapping into shared memory with
+`pread`: every library a process maps, code and constants included, at every start, in every process.
+
+A private file mapping the guest cannot write (code, read-only data: most of a program and its libraries) is now the
+file itself, mapped shared: the views and all processes read the same pages of the page cache, nothing is copied.
+It is marked ForkShared (section 39) and file-backed: before it becomes writable (`mprotect`), it is copied into
+shared memory of its own (`Unshare` copies the whole range then: a file's pages not in memory are not zeros), so the
+guest's writes never reach the file. ld.so maps a library's whole span at first, past the file's end (.bss, gaps):
+the part within the file (in whole pages) comes from the file, the rest is zeros as before, as two ranges. A writable
+private mapping (a library's data) is copied as before. `madvise(MADV_DONTNEED)` leaves a file-backed range mapped
+(dropped pages read the file again, as in a private mapping); before, it read zeros afterwards. Where the file cannot
+be mapped so (a file system mounted noexec), it is copied as before.
+
+| | before | now | FEX full TSO |
+|---|---|---|---|
+| `ffmpeg -version` | 0.56 s, 266 MB | 0.26 s, 93 MB | 0.20 s, 62 MB |
+| `node -e 0` | 2.23 s, 216 MB | 2.06 s, 121 MB | 1.68 s, 102 MB |
+| `python3 -c 0` | 0.46 s, 37 MB | 0.45 s, 28 MB | 0.39 s, 26 MB |
+| a program start (`/bin/true` from bash) | 50.5 ms | 46.8 ms | 40.6 ms |
+
+`tests/filemap.c` (in `tests/ci.sh`) checks that such a mapping still behaves as a private one: it reads the file
+and zeros past its end, made writable it sees its own writes while the file keeps its bytes, also in a forked child
+that writes its copy, a second mapping reads the file, `madvise`, executable and writable private mappings, `mremap`;
+all right natively, under tso-arm, FEX's full TSO and without ordering. Full check all correct, `rootfs_check` 28 of
+28, `tests/ci.sh` passed; efficiency pigz 90, xz 88, zstd 70 %, mean 82 %.
+
+Of the remaining 6 ms per start, a third is the view pass in FEX's translation (`GuestViewPass`, 4.7 % of a start's
+user cycles), the rest the views' own mappings (`mprotect`, `mremap` for each mapping and view).

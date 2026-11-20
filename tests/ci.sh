@@ -27,6 +27,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/fork tests/fork.c
     $CC -O2 -static -o $B/signals tests/signals.c
     $CC -O2 -static -o $B/x87 tests/x87.c
+    $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
 sh tools/board_check.sh | sed 's/^/      /'
 
@@ -49,6 +50,12 @@ done
 # fork without exec: the child's memory is its own (guest memory is shared memory under the views), memory mapped
 # shared stays shared, read-only memory made writable after the fork is copied
 out=$($T run $B/fork | tail -n 1) || fail "$out"
+ok "$out"
+
+# private file mappings: a read-only one is mapped from the file itself, and stays private when it is made writable
+# (after a fork as well); the file never changes
+out=$($T run $B/filemap | tail -n 1)
+[ "$out" = "filemap: all right" ] || fail "filemap: $($T run $B/filemap | grep WRONG | head -n 3)"
 ok "$out"
 
 # the program's own signal handlers, in every mode
