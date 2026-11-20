@@ -54,8 +54,11 @@ args_of() {
     xz) echo "-T4 -6 --block-size=2MiB -c $C" ;;
     esac
 }
+A=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/aot
 for w in pigz xz zstd; do
     $T learn $X/$w $(args_of $w) >$R/build/ci-learn-$w.log 2>&1 || { cat $R/build/ci-learn-$w.log; exit 1; }
+    # the translated code itself, also where learn found it slower here and does not use it
+    sh $R/aot/build.sh $(ls $A/$w-*.c | head -n 1) $R/build/ci-aot-$w.so
 done
 
 once() { # command... -> wall time in ms, the output checked
@@ -88,7 +91,7 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
         f=$(best $T run --mode full $X/$w $(args_of $w))
         p=$(best $T run --no-aot $X/$w $(args_of $w))
         l=$(best $T run $X/$w $(args_of $w))
-        u=$(best $T run --mode unordered $X/$w $(args_of $w))
+        u=$(best $T run --mode unordered --aot $R/build/ci-aot-$w.so $X/$w $(args_of $w))
         echo "| $w | $n ms | $((100 * n / o)) % | $((100 * n / f)) % | $((100 * n / p)) % | $((100 * n / l)) % | $((100 * n / u)) % |"
         eval "native_$w=$n"
     done
@@ -96,7 +99,7 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
     echo "What \`tso-arm learn\` chose:"
     echo
     for w in pigz xz zstd; do
-        echo "- $w: $(grep -E '^(profile|chosen):' $R/build/ci-learn-$w.log | tr '\n' ' ')"
+        echo "- $w: $(grep -E '^(profile|chosen|timed):' $R/build/ci-learn-$w.log | tr '\n' ' ')"
     done
     # what newer cores' features bring to the translated code: the learned library as built here against the same
     # code built without one of them, in alternating rounds on this machine. NOIMMO: offsets in the ordered accesses
@@ -117,7 +120,6 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
         done
         echo "$h"
         echo "$l"
-        A=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/aot
         for w in pigz xz zstd; do
             c=$(ls $A/$w-*.c | head -n 1)
             for s in $sw; do
@@ -128,7 +130,7 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
             eval "n=\$native_$w"
             a=""
             for i in $(seq $rounds); do
-                t=$(once $T run $X/$w $(args_of $w))
+                t=$(once $T run --aot $R/build/ci-aot-$w.so $X/$w $(args_of $w))
                 a=$(lower "$a" "$t")
                 for s in $sw; do
                     t=$(once $T run --aot $R/build/ci-$s-$w.so $X/$w $(args_of $w))

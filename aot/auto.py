@@ -10,9 +10,12 @@ builds the library FEX loads with TSO_AOT.
      into the guest for them (up to --max functions in all).
   5. The library (aot/build.sh), then the program's output with it, without ordering and under the page protocol,
      against a run without it; a function whose library alone changes the output is left out.
+  6. With --timed (as `tso-arm learn` runs it): the program as `tso-arm run` runs it, with the library and without,
+     in alternating rounds (TSO_ARM_LEARN_ROUNDS, default 3); a library that makes it more than 3 % slower on this
+     machine becomes OUT.slower and is not used.
 
 The chosen functions go to OUT.list, one per line.
-  aot/auto.py BINARY OUT.so [--share PCT] [--max N] -- ARGS...
+  aot/auto.py BINARY OUT.so [--share PCT] [--max N] [--timed] -- ARGS...
 """
 import argparse
 import bisect
@@ -23,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIFT = os.path.join(ROOT, "aot", "lift.py")
@@ -107,6 +111,41 @@ def configs(lib):
     return {"off": off, "protocol": protocol}
 
 
+def run_env(lib):
+    """the environment of `tso-arm run` (x86 order kept), with the library or without"""
+    env = dict(os.environ, TSO_VIEWS="1", FEX_VECTORTSOENABLED="1", FEX_MEMCPYSETTSOENABLED="1",
+               FEX_DISABLETELEMETRY="1")
+    for k in ("TSO_AOT", "FEX_MULTIBLOCK", "FEX_TSOENABLED", "TSO_VIEWS_PROFILE"):
+        env.pop(k, None)
+    if lib:
+        env.update(TSO_AOT=lib, FEX_MULTIBLOCK="0")
+    return env
+
+
+def wall(env, binary, args):
+    t = time.monotonic()
+    subprocess.run([FEX_VIEWS, binary, *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=1800)
+    return time.monotonic() - t
+
+
+def timed(binary, args, out):
+    """step 6: keeps the library only if it does not make the program slower here"""
+    rounds = max(1, int(os.environ.get("TSO_ARM_LEARN_ROUNDS", "3")))
+    wall(run_env(None), binary, args)  # the page cache, and the page protocol's profile of the program
+    with_lib, without = [], []
+    for _ in range(rounds):
+        without.append(wall(run_env(None), binary, args))
+        with_lib.append(wall(run_env(out), binary, args))
+    w, wo = min(with_lib), min(without)
+    how = f"{w * 1000:.0f} ms with the library, {wo * 1000:.0f} ms without (x86 order kept, best of {rounds})"
+    if w > wo * 1.03:
+        os.replace(out, out + ".slower")
+        print(f"timed: {how}: slower on this machine, not used")
+    else:
+        print(f"timed: {how}: kept")
+
+
 def build(binary, names, out_so, work):
     specs = run(["sh", os.path.join(ROOT, "aot", "strings_specs.sh"), binary]).stdout.split()
     c = os.path.splitext(out_so)[0] + ".c"
@@ -124,13 +163,25 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--share", type=float, default=0.2, help="least share of the guest cycles, percent")
     ap.add_argument("--max", type=int, default=40, help="most functions in all")
-    ap.add_argument("args", nargs=argparse.REMAINDER)
-    a = ap.parse_args()
-    args = a.args[1:] if a.args[:1] == ["--"] else a.args
+    ap.add_argument("--timed", action="store_true", help="keep the library only if it does not make the program slower")
+    # the program's own arguments after "--", apart from ours (argparse's REMAINDER took options of ours as well)
+    argv = sys.argv[1:]
+    i = argv.index("--") if "--" in argv else len(argv)
+    a = ap.parse_args(argv[:i])
+    args = argv[i + 1:]
     binary, out = os.path.abspath(a.binary), os.path.abspath(a.out)
+    for old in (out, out + ".slower", out + ".list"):
+        if os.path.exists(old):
+            os.remove(old)
     work = tempfile.mkdtemp(prefix="tso-auto-")
     syms = symbols(binary)
     by_addr = {addr: name for addr, name in syms}
+
+    # the reference output; a program that fails with these arguments gives nothing to learn from
+    ref, rc = output_hash(dict(os.environ, FEX_TSOENABLED="0", FEX_DISABLETELEMETRY="1"), binary, args)
+    if rc:
+        raise SystemExit(f"the program ends with exit status {rc} under FEX with these arguments; learn needs a run "
+                         "that goes through")
 
     share = profile(binary, args, syms, work)
     total = sum(share.values())
@@ -167,9 +218,11 @@ def main():
 
     covered = sum(share.get(n, 0) for n in chosen)
     print(f"chosen: {len(chosen)} functions, {covered:.1f} of {total:.1f} % of the guest cycles")
+    if not chosen:
+        print("nothing to translate")
+        return
 
     # build, check the output, leave out what changes it
-    ref, rc = output_hash(dict(os.environ, FEX_TSOENABLED="0", FEX_DISABLETELEMETRY="1"), binary, args)
     while True:
         build(binary, chosen, out, work)
         bad = [cfg for cfg, env in configs(out).items() if output_hash(env, binary, args)[0] != ref]
@@ -186,9 +239,15 @@ def main():
         for name in wrong:
             print(f"  left out: {name}")
             chosen.remove(name)
+        if not chosen:
+            os.remove(out)
+            print("nothing left to translate")
+            return
     with open(out + ".list", "w") as f:
-        f.write("\n".join(chosen) + "\n")
+        f.write("".join(n + "\n" for n in chosen))
     print(f"library {out}: {len(chosen)} functions, output checked without ordering and under the protocol")
+    if a.timed:
+        timed(binary, args, out)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+- `tso-arm learn` times the program with the translated functions and without, as `tso-arm run` runs it, and keeps
+  them only if they do not make it slower on this machine (on GitHub's Neoverse N2 zstd's translated functions,
+  ordered throughout, are slower than FEX's own code); `tso-arm status` tells which.
+- Where the kernel lets `ldapr` and `stlr` be unaligned within 16 bytes (FEAT_LSE2, as on the Neoverse N2), the
+  translated code uses them there instead of a barrier; `tso-arm check` shows whether it does.
+- The CI benchmark fails when a program's output is wrong (it went on before) and measures each newer core feature
+  against a build without it.
+
 ## 0.1.0 (2026-11-20)
 
 The first release: x86-64 Linux programs on 64-bit Arm with x86's memory order kept, at 83 % of native speed on a

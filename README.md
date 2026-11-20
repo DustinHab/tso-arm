@@ -45,9 +45,9 @@ older systems, and with `install --source`, FEX is built from source (`git cmake
 about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md` lists what each release changed.
 
 `learn` runs the program a few times with the given arguments (profile, then a check of the translated functions
-against a run without them), so give it an input whose processing has no side effects. Afterwards every
-`tso-arm run` of that program uses the translated functions; `tso-arm status` and `tso-arm forget` show and drop
-what was learned. Dynamically linked programs need an x86-64 root file system (`tso-arm rootfs`, FEX's own tool);
+against a run without them, then both timed against each other), so give it an input whose processing has no side
+effects. Afterwards every `tso-arm run` of that program uses the translated functions, unless they made it slower
+on this machine; `tso-arm status` and `tso-arm forget` show and drop what was learned. Dynamically linked programs need an x86-64 root file system (`tso-arm rootfs`, FEX's own tool);
 `learn` translates their own functions, those of their libraries stay with FEX. Built the way distributions build
 programs (position-independent, linked dynamically), pigz reaches 82 % and xz 85 % with what `learn` translated
 (notes section 29).
@@ -139,7 +139,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   buffering; forbidden x86 outcomes never show under tso-arm, also with translated thread functions, and do show
   without ordering.
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
-  Neoverse N2: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner cases, more threads
+  Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner cases, more threads
   than views, a dynamically linked program and the ring buffer there; then it measures the efficiency of pigz, xz and
   zstd on that machine (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on
   FEX's newest commit (`.github/workflows/upstream.yml`).
@@ -169,7 +169,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | | |
 |---|---|
 | `tso-arm run [--mode tso\|full\|unordered] [--aot LIB] PROGRAM [ARGS]` | run an x86-64 program (default `tso`: x86 order kept) |
-| `tso-arm learn PROGRAM [ARGS]` | translate its hot functions ahead of time and check them |
+| `tso-arm learn PROGRAM [ARGS]` | translate its hot functions ahead of time, check them, keep them if faster |
 | `tso-arm status [PROGRAM]`, `tso-arm forget PROGRAM` | what was learned, and dropping it |
 | `tso-arm check` | the machine's requirements |
 | `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |

@@ -209,8 +209,14 @@ cmd_learn() {
     python3 -c 'import capstone' 2>/dev/null || die "learn needs the Python module capstone (pip install capstone)"
     mkdir -p "$CACHE/aot"
     out="$CACHE/aot/$(key "$prog").so"
-    TSO_ARM_FEX=$(fex) python3 "$REPO/aot/auto.py" "$prog" "$out" -- "$@"
-    echo "tso-arm: learned $(wc -l <"$out.list") functions of $(basename "$prog"); 'tso-arm run' uses them from now on"
+    TSO_ARM_FEX=$(fex) python3 "$REPO/aot/auto.py" "$prog" "$out" --timed -- "$@"
+    if [ -f "$out" ]; then
+        echo "tso-arm: learned $(wc -l <"$out.list") functions of $(basename "$prog"); 'tso-arm run' uses them from now on"
+    elif [ -f "$out.slower" ]; then
+        echo "tso-arm: the $(wc -l <"$out.list") translated functions made $(basename "$prog") slower on this machine; 'tso-arm run' goes on without them"
+    else
+        echo "tso-arm: nothing of $(basename "$prog") to translate ahead of time; 'tso-arm run' runs it with FEX alone"
+    fi
 }
 
 cmd_status() {
@@ -218,6 +224,8 @@ cmd_status() {
         lib="$CACHE/aot/$(key "$1").so"
         if [ -f "$lib" ]; then
             echo "$(basename "$1"): $(wc -l <"$lib.list") functions translated ahead of time"
+        elif [ -f "$lib.slower" ]; then
+            echo "$(basename "$1"): $(wc -l <"$lib.list") functions translated ahead of time, not used: slower on this machine"
         else
             echo "$(basename "$1"): nothing translated ahead of time"
         fi
@@ -227,14 +235,20 @@ cmd_status() {
     fi
     echo "translated ahead of time ($CACHE/aot):"
     for l in "$CACHE"/aot/*.so.list; do
-        [ -f "$l" ] && echo "  $(basename "$l" .so.list): $(wc -l <"$l") functions"
+        [ -f "$l" ] || continue
+        if [ -f "${l%.list}" ]; then
+            echo "  $(basename "$l" .so.list): $(wc -l <"$l") functions"
+        else
+            echo "  $(basename "$l" .so.list): $(wc -l <"$l") functions, not used (slower on this machine)"
+        fi
     done
     echo "page protocol profiles: $(ls "$CACHE"/*.prof 2>/dev/null | wc -l)"
 }
 
 cmd_forget() {
     [ $# -ge 1 ] || die "forget: which program?"
-    rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.list" "$CACHE/aot/$(key "$1").c"
+    rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.slower" "$CACHE/aot/$(key "$1").so.list" \
+        "$CACHE/aot/$(key "$1").c"
     rm -f "$CACHE"/"$(basename "$1")"-*.prof
     echo "tso-arm: forgot $(basename "$1")"
 }

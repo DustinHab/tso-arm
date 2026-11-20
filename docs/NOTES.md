@@ -1315,3 +1315,61 @@ FEX's full TSO, which end in the same full ordering for zstd (section 23), diffe
 runner's spread is as large as the effect, so it is not shown. Telling it apart needs both variants in the same job,
 on the same machine: `AOT_NOIMMO=1` builds the translated code without the offsets (`AOT_NORCPC=1` would take LDAPR
 away as well), and `tests/ci_bench.sh` measures both in alternating rounds on cores with LRCPC2.
+
+## 33. Unaligned ordered accesses; GitHub's runners are not one machine; learn keeps only what is faster (2026-11-20)
+
+**Not one machine.** One CI run of the evening ran on a Neoverse V3 (`lscpu`), the others on N2s: two CI runs may
+compare two machines. What `tests/ci_bench.sh` compares now runs in one job, in alternating rounds. On the V3
+(`Neoverse-V3`, 4 cores):
+
+| V3 | native | FEX, TSO off | FEX full TSO | page protocol | + learned | learned, TSO off |
+|---|---|---|---|---|---|---|
+| pigz | 1408 ms | 92 % | 70 % | 76 % | 76 % | 94 % |
+| xz | 2659 ms | 85 % | 68 % | 77 % | 96 % | 99 % |
+| zstd | 1560 ms | 171 % | 72 % | 67 % | 41 % | 179 % |
+
+Native zstd there is slower than zstd under FEX without ordering (171 %; its threads, as on the N2 in section 31,
+only more so), which makes zstd's percentages on that machine say little; the order among the columns still holds.
+
+**Offsets, alternating on one machine** (with `ldapur`/`stlur` against `AOT_NOIMMO=1`): on the N2 pigz 85 against 83 %,
+xz 94 against 95 %, zstd 51 against 45 %; on the V3 pigz 83 against 77 %, xz 99 against 97 %, zstd 38 against 38 %.
+
+**Unaligned ordered accesses within 16 bytes.** An x86 access at an unaligned address became `ldr` and `dmb ishld` in
+the ordered variant (a store `dmb ish` and `str`), because `ldapr` and `stlr` fault on unaligned addresses. With
+FEAT_LSE2 they need not within an aligned 16 bytes, if the kernel sets SCTLR_EL1.nAA. `aot/unaligned_probe.c` tries an
+8-byte `ldapr` (`ldar` without LRCPC) and `stlr` at offset 3 and at offset 12 of an aligned buffer, a SIGBUS meaning
+no; `aot/build.sh` compiles with `AOT_U16` where the first works, and the translated code then uses `ldapr`/`stlr` for
+an unaligned access that stays within 16 bytes (`(a & 15) + size <= 16`) and keeps the barrier only across them.
+`AOT_NOU16=1` leaves it out; `tso-arm check` shows what the probe finds. On the N2 runner it works (the kernel sets
+nAA); on the Pi (no LSE2) the probe says no and zstd's library came out the same to the instruction (41,067). The
+litmus tests with translated functions passed on the N2 with it. Alternating there, the learned code as built, without
+the offsets, without the unaligned accesses:
+
+| N2 | as built | without offsets | without unaligned |
+|---|---|---|---|
+| pigz | 84 % | 79 % | 81 % |
+| xz | 93 % | 94 % | 93 % |
+| zstd | 48 % | 43 % | 46 % |
+
+FEX does the same in its own way: its JIT uses `ldapur` for every ordered load, and a site that faults on an unaligned
+address is rewritten once into a load and a barrier (`HandleUnalignedAccess`, the half barrier); on a kernel with nAA
+it does not fault within 16 bytes.
+
+**What remains on these cores:** zstd's translated functions, all ordered when zstd falls back to full ordering
+(section 23), are slower than FEX's own code there: 42 to 48 % against 52 % on the N2, 41 against 72 % on the V3; on
+the Pi equal (69 against 68 %). Neither the offsets nor the unaligned accesses close it; where the rest goes would take
+a profile on such a machine.
+
+**So `learn` measures before it keeps.** After the output check, `tso-arm learn` (`aot/auto.py --timed`) runs the
+program as `tso-arm run` runs it, with x86 order kept, once to warm up and then with the library and without in
+alternating rounds (`TSO_ARM_LEARN_ROUNDS`, default 3, best of each). A library that makes the program more than 3 %
+slower on this machine becomes `OUT.so.slower`: `tso-arm run` goes without it, `tso-arm status` says so, `forget`
+removes it, and the next `learn` decides again. On the Pi: pigz 868 ms with, 1017 ms without, kept; zstd 666 against
+669 ms, kept. The test chain (`aot/auto.sh`, `bench/efficiency.sh`) builds its libraries without the step.
+
+Found on the way: `aot/auto.py` took the program's arguments with argparse's `REMAINDER`, which also swallowed an
+option of its own after the two paths; `--timed` went to pigz, which ended at once with an error, and since the run
+without the library ended the same way, the output check passed with an empty profile and "1 function" (an empty
+list counted as a line). The program's arguments are now what follows `--`; `learn` first runs the program once and
+stops with its exit status if it fails (exit status 22 for an unknown option of pigz); nothing chosen leaves no
+library and says so.
