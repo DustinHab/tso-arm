@@ -1876,3 +1876,8 @@ crashed and 0 of 30 with it, with 3 and 1 exits through a trap linked over.
 
 Then: `rootfs_check` 28 of 28 the same as FEX's full ordering, `tests/ci.sh` passed, full check all correct;
 efficiency pigz 90, xz 88, zstd 70 %, mean 82 % (README table).
+
+`tests/soak.sh` looks for such rare failures on purpose: multi-threaded programs of the root file system (git
+packing with 4 threads, xz -T4, sort --parallel=4, Python threads with a lock, make -j4), each 20 times in three
+settings (with the profile earlier runs left, without a profile, block by block), every output against full
+ordering. On the Pi after the fix: 300 of 300 runs right.

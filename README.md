@@ -205,6 +205,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   `tso-arm rootfs` fetches (shell pipelines, command substitution, traps and job control, coreutils, gzip, xz, tar,
   perl, Python with subprocess, a fork pool, fork beside running threads and signal handlers, git packing a
   repository with 4 threads, make with 4 jobs, rsync) give the same output as under FEX's full ordering.
+- **Rare failures** (`tests/soak.sh`, notes section 44): git, xz, sort, Python and make with 4 threads or jobs, 20
+  runs each with the profile, without one and block by block, every output against full ordering: 300 of 300 right.
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).
