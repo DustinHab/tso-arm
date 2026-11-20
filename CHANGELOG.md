@@ -6,6 +6,11 @@
   instructions (`FEX_MAXINST`, FEX's default 5000), so a function entered at many points is no longer compiled whole
   again from each (notes section 43). ffmpeg with x264 1.7 instead of 2.9 s, its first run 2.4 instead of 5.3 s;
   Node 5.0 instead of 8.2 s; both now faster than FEX without any ordering. Set `FEX_MAXINST` to override.
+- Fixed: a thread could die of a segmentation fault (git's `pack-objects` with 4 threads, about 1 run in 5 when FEX
+  compiled block by block, as it does with translated libraries). It had run into a boundary trap at the start of a
+  guest jump, and before its fault handler read the trap, another thread linked the jump to its target over it; the
+  handler now recognizes that case (notes section 44).
+- `tests/rootfs_check.sh` also packs a git repository with 4 threads, runs make with 4 jobs and rsync.
 
 ## 0.3.1 (2026-11-20)
 

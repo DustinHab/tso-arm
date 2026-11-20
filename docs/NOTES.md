@@ -1850,3 +1850,29 @@ pigz at 1.12 s (88 %, mean 81 %); its best of five varies between 1.09 and 1.12 
 Also seen: FEXServer keeps the root file system of the client that started it, and exits only a second after its
 last client; a program started with another `FEX_ROOTFS` within that second gets the first one's ("Invalid or
 Unsupported elf file"). Benchmarks that switch root file systems wait a few seconds in between.
+
+## 44. A boundary trap the block linker wrote over (2026-11-20)
+
+`tests/rootfs_check.sh` got three more programs: git packing a repository of 60 commits (made with fast-import)
+with 4 threads searching deltas at once, make with 4 jobs, rsync. git's `pack-objects` died of a segmentation fault
+under tso-arm, now and then: 1 of 3 runs in the first try, 0 of 40 with multiblock, 4 of 20 with `FEX_MULTIBLOCK=0`
+(as FEX runs when a program has translated libraries); never under FEX's full TSO, without ordering, or with the views
+alone (stage 1).
+
+The protocol's log of a crashing run: an instruction of a block escalated in four threads at once, the block was
+translated anew, and `TSOTrapBlockBoundaries` wrote traps over its instruction starts, among them the start of a
+guest `jmp`. Two threads left through that trap as they should. A third faulted on it too (`ldrb wzr, [x24]`, fault
+address the view's base), but by the time its handler read the instruction, it was `b +0x6c`: no trap, so not the
+protocol's fault, and the guest got SIGSEGV. A guest instruction that is only a jump compiles to nothing but FEX's
+exit stub, whose first instruction FEX's block linker rewrites whenever a thread links the jump to its target or
+unlinks it (`b HostCode`, `b JmpThunk`). Here a fourth thread had come to the stub before the trap, gone to the
+dispatcher, compiled the target and linked the stub, over the trap.
+
+The handler now also takes a fault at the view's base, at a place where a trap was written, where a branch stands
+now, for the trap (a branch accesses no memory, and the linker writes nothing but branches there); the thread leaves
+at that instruction start as from the trap. A thread that comes to the stub after the linker gets the branch to the
+fresh translation of the target, which is what the jump would have done. Afterwards: 0 of 60 runs without multiblock
+crashed and 0 of 30 with it, with 3 and 1 exits through a trap linked over.
+
+Then: `rootfs_check` 28 of 28 the same as FEX's full ordering, `tests/ci.sh` passed, full check all correct;
+efficiency pigz 90, xz 88, zstd 70 %, mean 82 % (README table).

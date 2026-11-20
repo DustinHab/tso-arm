@@ -1,7 +1,8 @@
 #!/bin/sh
 # Everyday programs of an x86-64 root file system under tso-arm, each output compared with FEX's full ordering:
 # shells with pipes, command substitution, traps and job control, coreutils, compression, perl, python with
-# subprocess and multiprocessing (fork without exec from a process with threads), x87 arithmetic. Needs the root
+# subprocess and multiprocessing (fork without exec from a process with threads), x87 arithmetic, git packing with
+# threads, make with parallel jobs, rsync. Needs the root
 # file system `tso-arm rootfs` fetches (or ROOTFS=directory).
 #   tests/rootfs_check.sh          exit status 1 if an output differs or a command fails under tso-arm
 set -u
@@ -90,6 +91,47 @@ signal.setitimer(signal.ITIMER_REAL, 0.05)
 time.sleep(0.2)
 print(got)
 "'
+
+# git: a repository of 60 commits made with fast-import, packed anew with 4 threads searching deltas at once
+git_script=$(cat <<'EOF'
+d=$(mktemp -d) && cd "$d" || exit 1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+git init -q -b main repo && cd repo || exit 1
+awk 'BEGIN {
+    for (c = 1; c <= 60; c++) {
+        printf "commit refs/heads/main\nmark :%d\ncommitter t <t@t> %d +0000\ndata 4\nc%03d\n", c, 1700000000 + c * 60, c
+        if (c > 1) printf "from :%d\n", c - 1
+        for (f = 0; f < 100; f++) {
+            if (c > 1 && (f * 7 + c) % 5 != 0) continue
+            s = ""
+            for (j = 0; j < 300; j++) s = s sprintf("file %d line %d value %d\n", f, j, (j * 31 + f * 17 + (j % 10 == c % 10 ? c * 7 : 0)) % 100003)
+            printf "M 100644 inline f%03d.txt\ndata %d\n%s\n", f, length(s), s
+        }
+    }
+}' | git fast-import --quiet || exit 1
+git repack -a -d -f -q --threads=4 --window=20 || exit 1
+git fsck --strict --no-progress && echo "fsck ok"
+git count-objects -v | sed -n "s/^in-pack: /objects /p"
+git rev-list --objects --all | sort | md5sum
+cd / && rm -rf "$d"
+EOF
+)
+check git-repack-threads "$git_script"
+# make with 4 jobs at once: 40 recipes, each a pipeline of its own
+make_script=$(cat <<'EOF'
+d=$(mktemp -d) && cd "$d" || exit 1
+{
+    printf "all:"
+    for i in $(seq 1 40); do printf " t%d" $i; done
+    printf "\n"
+    for i in $(seq 1 40); do printf "t%d:\n\t@seq 1 %d | md5sum >t%d.out\n" $i $((i * 3000)) $i; done
+} >Makefile
+make -s -j4 && cat $(ls t*.out | sort) | md5sum
+cd / && rm -rf "$d"
+EOF
+)
+check make-parallel "$make_script"
+check rsync 'd=$(mktemp -d); rsync -a /usr/share/doc/ "$d/doc/" && cd "$d/doc" && find . -type f | sort | xargs md5sum | md5sum; cd / && rm -rf "$d"'
 
 echo "rootfs_check: $((n - fails)) of $n the same as FEX's full ordering"
 [ $fails = 0 ]
