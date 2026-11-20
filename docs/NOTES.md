@@ -1532,3 +1532,33 @@ through the bridge into the host code and back); pigz built the distributions' w
 without multiblock. Full check on the Pi with all of this (pigz's and xz's libraries changed by the tail calls):
 libraries, the stubs' general path, views matrix, both litmus series, 64 threads, the CI tests, all correct;
 efficiency pigz 91, xz 89, zstd 70 %, mean 83 % (README table).
+
+## 37. rdx as a second return register (2026-11-20)
+
+x86-64 returns 16-byte results in rax and rdx: Rust's slices (pointer and length), `Option<usize>`, C++'s pairs. A
+translated function returned rax only, and the bridge set only the guest's rax; a guest call gave back rax only as
+well. sort's 7 functions left out in section 36 all end in `mov rdx, ...; ret`.
+
+First through the context: a field `rdx` at the end of `aot_ctx`, stored before every return and loaded after every
+call, set from and into the guest's rdx by the bridge and `GuestCall`. Right (sort learned all 25 functions with the
+right output; the CI tests and the full check passed), but it cost, alternating on the Pi (8 runs each, the same FEX):
+xz best 1223 against 1235 ms, median 1231 against 1250 ms, 1.6 % more user cycles; pigz 0.6 %; zstd nothing; the
+efficiency table came out at 82 instead of 83 %.
+
+So the pair is returned instead: every translated function, `aot_guest_call` and the bridge's entry return
+`struct aot_rr {rax, rdx}`, which AArch64 returns in x0 and x1, without memory; a call takes both
+(`{ struct aot_rr r = f(...); rax = r.rax; rdx = r.rdx; }`, clang drops what is not read), a return gives both, a
+tail call passes the callee's on. FEX's side (the stage-3 patch, `Thunks.cpp`): `Fn` and `GuestCall` return the pair,
+the bridge sets the guest's rax and rdx from it. The interface has a number now, `aot_abi` in every library
+(`AOT_ABI` = 2 in `aot/aot.h`): FEX does not use a library without it or with another one, it says so and runs the
+program without, since a library of the old interface returns rax alone and would leave rdx undefined. `learn` then
+translates it again. And `tso-arm` refuses an installed FEX whose `BUILD` names other patches than the checkout's
+(`tso-arm install` updates it); the prebuilt FEX of 0.1.0 is such a one now, so a checkout of `main` builds FEX from
+source until the next release brings it prebuilt.
+
+On the Pi with both FEX builds made anew (patches `771e78d95e10f3ef`): the CI tests all passed, sort learns all 25
+functions with the right output (its library stays slower than none, 12.9 against 2.2 s: its translated functions
+call back into FEX for every comparison). Against the code without rdx, alternating (8 runs each): xz best 1229
+against 1229 ms, 0.5 % more user cycles; pigz 1142 against 1138 ms, 1 %; zstd 754 against 725 ms; so the pair costs
+next to nothing. Full check all correct; efficiency pigz 90, xz 88, zstd 70 %, mean 82 % (README table; xz's 1.21
+against 1.19 s of the last table is the spread of single sessions, as the alternating runs show).

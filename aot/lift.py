@@ -720,7 +720,7 @@ class Lifter:
                 self.problems.append(str(e))
                 self.e(f"aot_unreachable({insn.address:#x}ULL);")
         params = ", ".join(f"uint64_t {a}" for a in ARGS)
-        head = [f"static uint64_t {self.pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params})", "{"]
+        head = [f"static struct aot_rr {self.pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params})", "{"]
         decl = []
         if ordered:
             decl.append("    uint8_t *O = c->oview;")
@@ -1464,10 +1464,12 @@ class Lifter:
         op = ops[0]
         gsp_expr = f"gsp + {(self.d - 8) & M64:#x}ULL"
         if op.type == X.X86_OP_IMM:
-            self.e(f"rax = {self.direct_call(op.imm, gsp_expr, self.d, False)};")
+            call = self.direct_call(op.imm, gsp_expr, self.d, False)
         else:
             t = self.tmp(64, self.src(op, 64))
-            self.e(f"rax = aot_dispatch_{self.pre[0]}(c, V, {t}, {gsp_expr}, {self.call_args()});")
+            call = f"aot_dispatch_{self.pre[0]}(c, V, {t}, {gsp_expr}, {self.call_args()})"
+        # rax and rdx back (rdx: the second half of a 16-byte result; clang drops it where rdx is written first)
+        self.e(f"{{ struct aot_rr r = {call}; rax = r.rax; rdx = r.rdx; }}")
         self.fd = None
 
     def i_ret(self, insn, ops):
@@ -1475,7 +1477,7 @@ class Lifter:
             raise self.err("ret with operand")
         if self.f.unit:
             self.e("if (unit_fence) __asm__ volatile(\"dmb ish\" ::: \"memory\");")
-        self.e("return rax;")
+        self.e("return (struct aot_rr){rax, rdx};")  # 16-byte results come in rax:rdx
 
     # --- atomics and fences ----------------------------------------------------------------------------------------
     # Atomics go to the ordered view: read/write there on shared pages, and a private page of another thread moves
@@ -1932,6 +1934,7 @@ class Lifter:
         out.append("static uint64_t aot_base;")
         out.append("void aot_set_base(uint64_t base) { aot_base = base; }")
         out.append(f"const uint8_t aot_pie = {1 if pie else 0};")
+        out.append("const uint32_t aot_abi = AOT_ABI; // the interface this library was translated for (aot.h)")
         funcs = list(self.funcs.values())
         for k, f in enumerate(funcs):
             f.index = k
@@ -1941,14 +1944,14 @@ class Lifter:
         for pre in ("f_", "o_"):
             for f in funcs:
                 attr = "static inline __attribute__((always_inline))" if f.nstack else "static"
-                out.append(f"{attr} uint64_t {pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params});")
+                out.append(f"{attr} struct aot_rr {pre}{f.name}(struct aot_ctx *c, uint8_t *V, uint64_t gsp, uint8_t *A, {params});")
         # Entry points and indirect calls go through these tables, so that no function is inlined into them: a host pc
         # in translated code then lies in the body of the function it belongs to (aot_escalate)
         for pre in ("f_", "o_"):
-            out.append(f"static uint64_t (*const volatile aot_fn_{pre[0]}[{len(funcs)}])(struct aot_ctx *, uint8_t *, uint64_t, "
+            out.append(f"static struct aot_rr (*const volatile aot_fn_{pre[0]}[{len(funcs)}])(struct aot_ctx *, uint8_t *, uint64_t, "
                        f"uint8_t *, {', '.join('uint64_t' for a in ARGS)}) = {{" + ", ".join(f"{pre}{f.name}" for f in funcs) + "};")
         for pre in ("f_", "o_"):
-            out.append(f"static uint64_t aot_dispatch_{pre[0]}(struct aot_ctx *c, uint8_t *V, uint64_t t, uint64_t gsp, {params})")
+            out.append(f"static struct aot_rr aot_dispatch_{pre[0]}(struct aot_ctx *c, uint8_t *V, uint64_t t, uint64_t gsp, {params})")
             out.append("{")
             out.append("    switch (t - aot_base) {" if pie else "    switch (t) {")
             for f in funcs:
@@ -1990,7 +1993,7 @@ class Lifter:
         # entry points for FEX: guest rsp at the call (stack arguments above it), the thread's own guest stack for
         # translated code, the argument registers
         for f in self.funcs.values():
-            out.append(f"static uint64_t e_{f.name}(struct aot_ctx *c, uint64_t rsp, uint64_t stack, const uint64_t *a)")
+            out.append(f"static struct aot_rr e_{f.name}(struct aot_ctx *c, uint64_t rsp, uint64_t stack, const uint64_t *a)")
             out.append("{")
             out.append(f"    return aot_fn_f[{f.index}](c, c->view, stack, c->view + rsp + 8, a[0], a[1], a[2], a[3], a[4], a[5]);")
             out.append("}")
@@ -2200,8 +2203,8 @@ static inline void ofill(uint8_t *O, uint8_t *V, uint64_t H, uint64_t a, uint64_
 
 __attribute__((noreturn, cold)) void aot_unreachable(uint64_t rip);
 
-static inline uint64_t aot_guest_call(struct aot_ctx *c, uint64_t target, uint64_t rsp, uint64_t rdi, uint64_t rsi,
-                                      uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9)
+static inline struct aot_rr aot_guest_call(struct aot_ctx *c, uint64_t target, uint64_t rsp, uint64_t rdi, uint64_t rsi,
+                                           uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9)
 {
     const uint64_t a[6] = {rdi, rsi, rdx, rcx, r8, r9};
     return c->guest_call(c, target, rsp, a);

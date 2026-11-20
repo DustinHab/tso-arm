@@ -1,4 +1,4 @@
-From 725ddee1a523185f46ee403518d4db7e06f8dcd3 Mon Sep 17 00:00:00 2001
+From 0a0020feaf541448b3394dc5fdc8a5919871d482 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -16,9 +16,9 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 332 ++++++++---
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  36 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        | 527 ++++++++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.cpp        | 544 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 14 files changed, 986 insertions(+), 87 deletions(-)
+ 14 files changed, 1003 insertions(+), 87 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -1051,7 +1051,7 @@ index 01b077e..d0c26a2 100644
      // Before the first thread runs anything: what earlier runs of this program learned
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..173f145 100644
+index 9c018bc..10c5220 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -21,8 +21,20 @@ $end_info$
@@ -1075,7 +1075,7 @@ index 9c018bc..173f145 100644
  
  #include <malloc.h>
  #include <mutex>
-@@ -72,6 +84,431 @@ namespace FEX::HLE {
+@@ -72,6 +84,440 @@ namespace FEX::HLE {
  
  static thread_local FEX::HLE::ThreadStateObject* ThreadObject {};
  
@@ -1083,10 +1083,18 @@ index 9c018bc..173f145 100644
 +// table maps guest functions to host code. The block FEX makes for such a function's entry calls AOTBridge, a thunk,
 +// which runs the host code and the function's return. The structures match aot/aot.h.
 +namespace AOT {
++  // What a translated function and a guest call return: rax, and rdx, the second register of 16-byte results (Rust's
++  // slices, C++'s pairs); AArch64 returns it in x0 and x1
++  struct Ret {
++    uint64_t RAX, RDX;
++  };
++  // The interface's number: a library of another (aot_abi) is ignored, not run with a different one
++  constexpr uint32_t ABI = 2;
++
 +  struct Context {
 +    uint8_t* View; // guest address a is at View + a (the thread's plain view; 0 without views)
 +    uint64_t FSBase;
-+    uint64_t (*GuestCall)(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args);
++    Ret (*GuestCall)(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args);
 +    void* Thread;
 +    uint8_t* OView; // the thread's ordered view, for atomics (0 without views)
 +  };
@@ -1097,7 +1105,7 @@ index 9c018bc..173f145 100644
 +    uint64_t Hash; // FNV-1a 64 of the guest function's bytes
 +    // RSP: the guest stack pointer at the call (return address, stack arguments above it); Stack: where the
 +    // translated code keeps what it puts on a guest stack
-+    uint64_t (*Fn)(Context* C, uint64_t RSP, uint64_t Stack, const uint64_t* Args);
++    Ret (*Fn)(Context* C, uint64_t RSP, uint64_t Stack, const uint64_t* Args);
 +    const char* Name;
 +  };
 +
@@ -1118,7 +1126,7 @@ index 9c018bc..173f145 100644
 +
 +  // A call from host code back into guest code that was not translated. RSP is the stack pointer the callee starts
 +  // with (pointing at its return address slot); FEX's callback path puts its own return address there.
-+  uint64_t GuestCall(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args) {
++  Ret GuestCall(Context* C, uint64_t Target, uint64_t RSP, const uint64_t* Args) {
 +    auto* Thread = static_cast<FEXCore::Core::InternalThreadState*>(C->Thread);
 +    auto& State = Thread->CurrentFrame->State;
 +    if (Log && Logged.fetch_add(1) < 20) {
@@ -1130,7 +1138,7 @@ index 9c018bc..173f145 100644
 +    }
 +    State.gregs[FEXCore::X86State::REG_RSP] = RSP + 16;
 +    Thread->CTX->HandleCallback(Thread, Target);
-+    const uint64_t Result = State.gregs[FEXCore::X86State::REG_RAX];
++    const Ret Result {State.gregs[FEXCore::X86State::REG_RAX], State.gregs[FEXCore::X86State::REG_RDX]};
 +    State.gregs[FEXCore::X86State::REG_RSP] = SavedRSP;
 +    return Result;
 +  }
@@ -1173,8 +1181,9 @@ index 9c018bc..173f145 100644
 +    // While the host code runs, the guest stack pointer in the context stays below anything in use, so that nothing
 +    // put there meanwhile (a guest signal frame) overwrites it
 +    G[FEXCore::X86State::REG_RSP] = OnOwnStack(RSP) ? RSP - 65536 : RSP - 4096;
-+    const uint64_t Result = E->Fn(&C, RSP, Stack, Args);
-+    G[FEXCore::X86State::REG_RAX] = Result;
++    const Ret Result = E->Fn(&C, RSP, Stack, Args);
++    G[FEXCore::X86State::REG_RAX] = Result.RAX;
++    G[FEXCore::X86State::REG_RDX] = Result.RDX;
 +    Frame->State.rip = *reinterpret_cast<const uint64_t*>(RSP);
 +    G[FEXCore::X86State::REG_RSP] = RSP + 8;
 +  }
@@ -1507,7 +1516,7 @@ index 9c018bc..173f145 100644
  struct TrampolineInstanceInfo {
    void* HostPacker;
    uintptr_t CallCallback;
-@@ -174,6 +611,96 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
+@@ -174,6 +620,104 @@ struct ThunkHandler_impl final : public FEX::HLE::ThunkHandler {
  
    void LoadLib(std::string_view Name);
  
@@ -1525,6 +1534,14 @@ index 9c018bc..173f145 100644
 +    const auto* Table = static_cast<const AOT::Entry*>(dlsym(Lib, "aot_table"));
 +    if (!Table) {
 +      fprintf(stderr, "tso-arm aot: %s has no aot_table\n", Path);
++      return;
++    }
++    const auto* Abi = static_cast<const uint32_t*>(dlsym(Lib, "aot_abi"));
++    if (!Abi || *Abi != AOT::ABI) {
++      fprintf(stderr, "tso-arm aot: %s was translated for another FEX (interface %u, this one takes %u): not used, "
++                      "'tso-arm learn' translates it again\n",
++              Path, Abi ? *Abi : 1, AOT::ABI);
++      dlclose(Lib);
 +      return;
 +    }
 +    // The library's executable range, for the fault handler

@@ -19,6 +19,10 @@
 - Fixed: a tail call from translated code into guest code could overwrite the guest caller's return address when the
   translated function had been entered from guest code that translated code had called.
 - `learn` also times the library with FEX's multiblock on and keeps that where it is faster.
+- Translated functions return rdx too (16-byte results such as Rust's slices), as a pair in two registers. This
+  changes the FEX patches: libraries carry the number of their interface and FEX ignores one of another (`learn`
+  translates it again), and `tso-arm` refuses an installed FEX built with other patches than its own
+  (`tso-arm install` updates it).
 - Programs of a distribution as a test (`tests/compat.sh`, on every push): sort, 7-Zip, Python, ffmpeg with x264 and
   Node from x86-64 Ubuntu, with the same output in every mode, as fast as FEX's full TSO or faster, and message
   passing in JavaScript that keeps x86's order.

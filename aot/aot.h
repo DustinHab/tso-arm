@@ -3,13 +3,22 @@
 #pragma once
 #include <stdint.h>
 
+// What a translated function and a guest call return: rax, and rdx, the second register of 16-byte results (Rust's
+// slices, C++'s pairs). AArch64 returns it in x0 and x1, without memory.
+struct aot_rr {
+    uint64_t rax, rdx;
+};
+
+// The interface's number (aot_abi in every library); FEX does not use a library of another
+#define AOT_ABI 2
+
 struct aot_ctx {
     // guest address a is at view + a: the thread's plain view under the page protocol, 0 without views
     uint8_t *view;
     uint64_t fs_base;
     // runs the guest function at target with the six argument registers, rsp being the stack pointer it would have
-    // at its entry (pointing at a return address slot); returns rax
-    uint64_t (*guest_call)(struct aot_ctx *c, uint64_t target, uint64_t rsp, const uint64_t *args);
+    // at its entry (pointing at a return address slot); returns rax and rdx
+    struct aot_rr (*guest_call)(struct aot_ctx *c, uint64_t target, uint64_t rsp, const uint64_t *args);
     void *thread;
     // the thread's ordered view (atomics: read/write on shared pages); 0 without views
     uint8_t *oview;
@@ -22,7 +31,7 @@ struct aot_entry {
     uint64_t rip;
     uint64_t size;
     uint64_t hash; // FNV-1a 64 of the function's bytes
-    uint64_t (*fn)(struct aot_ctx *c, uint64_t rsp, uint64_t stack, const uint64_t *args);
+    struct aot_rr (*fn)(struct aot_ctx *c, uint64_t rsp, uint64_t stack, const uint64_t *args);
     const char *name;
 };
 

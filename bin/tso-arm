@@ -82,6 +82,14 @@ cmd_uninstall() {
 fex() {
     for f in "$TSO_ARM_FEX" "$PREFIX/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
         if [ -n "$f" ] && [ -x "$f" ]; then
+            # an installed FEX says which patches it was built with; translated code and FEX must agree on them
+            b="$(dirname "$(dirname "$f")")/BUILD"
+            if [ -f "$b" ]; then
+                have=$(sed -n 's/^patches //p' "$b")
+                want=$(cat "$REPO"/fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
+                [ "$have" = "$want" ] ||
+                    die "the FEX in $(dirname "$(dirname "$f")") was built with other patches ($have) than this tso-arm has ($want): 'tso-arm install' brings it up to date"
+            fi
             echo "$f"
             return
         fi
