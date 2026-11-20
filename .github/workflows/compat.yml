@@ -2,7 +2,8 @@ name: Compat
 
 # Programs of an x86-64 Linux distribution under tso-arm: an x86-64 runner packs them with their libraries
 # (tools/compat_rootfs.sh), an Arm runner runs them with x86 order kept, with FEX's full TSO and without ordering and
-# compares their outputs (tests/compat.sh), message passing between Node worker threads included.
+# compares their outputs (tests/compat.sh), message passing between Node worker threads included. Then the root file
+# system `tso-arm rootfs` fetches, and everyday commands of it against FEX's full ordering (tests/rootfs_check.sh).
 on:
   push:
   workflow_dispatch:
@@ -36,7 +37,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
@@ -54,3 +55,14 @@ jobs:
           COMPAT_STATS=1 sh tests/compat.sh compat-rootfs.tar.zst
           cat build/compat/compat.md >>"$GITHUB_STEP_SUMMARY"
           { echo; echo '```'; cat build/compat/stats.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+      # what a user gets from `tso-arm rootfs` (FEX's Ubuntu 24.04), and everyday commands of it: shells with pipes,
+      # forks and traps, coreutils, compression, perl, Python with fork and signals
+      - name: Root file system as a user fetches it
+        run: bin/tso-arm rootfs
+      - name: Everyday programs against FEX's full ordering
+        run: |
+          s=0
+          sh tests/rootfs_check.sh >rootfs_check.txt 2>&1 || s=$?
+          cat rootfs_check.txt
+          { echo; echo '```'; cat rootfs_check.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $s
