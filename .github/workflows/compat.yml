@@ -66,3 +66,11 @@ jobs:
           cat rootfs_check.txt
           { echo; echo '```'; cat rootfs_check.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s
+      # rare failures: multi-threaded programs of it, 5 runs each in three settings, outputs against full ordering
+      - name: Multi-threaded programs, many runs
+        run: |
+          s=0
+          sh tests/soak.sh 5 >soak.txt 2>&1 || s=$?
+          cat soak.txt
+          { echo; echo '```'; cat soak.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $s
