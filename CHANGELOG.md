@@ -1,6 +1,10 @@
 # Changes
 
-## 0.3.2 (not released yet)
+## 0.3.2 (2026-11-20)
+
+A crash fix, and programs with large functions much faster (ffmpeg, Node). Update from 0.3.1: a thread could die of
+a segmentation fault there. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install`
+replaces the one of 0.3.1 or older.
 
 - Programs with large functions much faster: `tso-arm` has FEX compile multiblock units of at most 150 guest
   instructions (`FEX_MAXINST`, FEX's default 5000), so a function entered at many points is no longer compiled whole
