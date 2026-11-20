@@ -1,6 +1,10 @@
 # Changes
 
-## 0.3.1 (not released yet)
+## 0.3.1 (2026-11-20)
+
+Faster code under the page protocol, and a profile that forgets one run's accident. Ubuntu's programs (xz, gzip,
+bzip2, openssl) at 80 % of the host's own Arm builds instead of 78 %, openssl now ahead of FEX's full TSO. The FEX
+patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.0 or older.
 
 - Faster translated code under the page protocol: the full guest state is written back only at the instruction
   starts where a thread can leave its block (accesses to memory, control flow, block ends), no longer at every
