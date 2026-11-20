@@ -21,11 +21,12 @@ EOF
 # core has it (FEAT_LRCPC: Cortex-A55, A75, A76 and later); older cores (Cortex-A53, A72) get LDAR, which orders at
 # least as strongly. AOT_NORCPC=1 builds the latter on any core, for testing.
 # rcpc-immo: with FEAT_LRCPC2 (Neoverse N2, V1, Cortex-A710 and later; "ilrcpc") the ordered accesses take an
-# immediate offset (LDAPUR, STLUR) and need no address addition of their own, as FEX's own code does there
+# immediate offset (LDAPUR, STLUR) and need no address addition of their own, as FEX's own code does there;
+# AOT_NOIMMO=1 leaves only this out, for comparing
 features=""
 if grep -qw lrcpc /proc/cpuinfo && [ -z "$AOT_NORCPC" ]; then
     march=armv8.2-a+rcpc
-    if grep -qw ilrcpc /proc/cpuinfo; then
+    if grep -qw ilrcpc /proc/cpuinfo && [ -z "$AOT_NOIMMO" ]; then
         features="-Xclang -target-feature -Xclang +rcpc-immo"
     fi
 else

@@ -58,15 +58,19 @@ for w in pigz xz zstd; do
     $T learn $X/$w $(args_of $w) >$R/build/ci-learn-$w.log 2>&1 || { cat $R/build/ci-learn-$w.log; exit 1; }
 done
 
+once() { # command... -> wall time in ms, the output checked
+    s=$(date +%s%N)
+    "$@" >/tmp/cb-out 2>/dev/null
+    e=$(date +%s%N)
+    [ "$(md5sum </tmp/cb-out | cut -c1-32)" = "$want" ] || { echo "WRONG OUTPUT: $*" >&2; exit 1; }
+    echo $(( (e - s) / 1000000 ))
+}
+lower() { if [ -z "$1" ] || [ "$2" -lt "$1" ]; then echo "$2"; else echo "$1"; fi; }
 best() { # command... -> best wall time in ms, and the output checked
     b=""
     for i in $(seq $rounds); do
-        s=$(date +%s%N)
-        "$@" >/tmp/cb-out 2>/dev/null
-        e=$(date +%s%N)
-        t=$(( (e - s) / 1000000 ))
-        [ -z "$b" ] || [ $t -lt $b ] && b=$t
-        [ "$(md5sum </tmp/cb-out | cut -c1-32)" = "$want" ] || { echo "WRONG OUTPUT: $*" >&2; exit 1; }
+        t=$(once "$@")
+        b=$(lower "$b" "$t")
     done
     echo $b
 }
@@ -86,6 +90,7 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
         l=$(best $T run $X/$w $(args_of $w))
         u=$(best $T run --mode unordered $X/$w $(args_of $w))
         echo "| $w | $n ms | $((100 * n / o)) % | $((100 * n / f)) % | $((100 * n / p)) % | $((100 * n / l)) % | $((100 * n / u)) % |"
+        eval "native_$w=$n"
     done
     echo
     echo "What \`tso-arm learn\` chose:"
@@ -93,7 +98,34 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
     for w in pigz xz zstd; do
         echo "- $w: $(grep -E '^(profile|chosen):' $R/build/ci-learn-$w.log | tr '\n' ' ')"
     done
-} | tee -a ${GITHUB_STEP_SUMMARY:-/dev/null}
+    # on FEAT_LRCPC2 cores: the same translated code with the offsets in the ordered accesses (LDAPUR, STLUR) and
+    # without (an ADD before LDAPR, STLR), in alternating rounds on this machine
+    if grep -qw ilrcpc /proc/cpuinfo; then
+        echo
+        echo "Ordered accesses with the offset in the instruction (\`ldapur\`, \`stlur\`) against without, x86 order kept,"
+        echo "the same translated code built both ways, alternating rounds:"
+        echo
+        echo "| | with | without |"
+        echo "|---|---|---|"
+        A=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/aot
+        for w in pigz xz zstd; do
+            c=$(ls $A/$w-*.c | head -n 1)
+            AOT_NOIMMO=1 sh $R/aot/build.sh $c $R/build/ci-noimmo-$w.so
+            want=$($N/$w $(args_of $w) | md5sum | cut -c1-32)
+            eval "n=\$native_$w"
+            a="" b=""
+            for i in $(seq $rounds); do
+                t=$(once $T run $X/$w $(args_of $w))
+                a=$(lower "$a" "$t")
+                t=$(once $T run --aot $R/build/ci-noimmo-$w.so $X/$w $(args_of $w))
+                b=$(lower "$b" "$t")
+            done
+            echo "| $w | $((100 * n / a)) % | $((100 * n / b)) % |"
+        done
+    fi
+} >$R/build/ci-bench.md # into a file, not through a pipe: a wrong output has to stop the script, not one side of a pipe
+cat $R/build/ci-bench.md
+[ -z "$GITHUB_STEP_SUMMARY" ] || cat $R/build/ci-bench.md >>"$GITHUB_STEP_SUMMARY"
 for w in pigz xz zstd; do
     echo "== learn $w"
     cat $R/build/ci-learn-$w.log

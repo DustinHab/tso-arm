@@ -1309,4 +1309,5 @@ On the N2, two CI runs the same evening, without and with (not the same machine 
 zstd's translated code was 5 points behind FEX's full TSO without and is 1 point behind with. But the page protocol and
 FEX's full TSO, which end in the same full ordering for zstd (section 23), differ by up to 4 points within one run: the
 runner's spread is as large as the effect, so it is not shown. Telling it apart needs both variants in the same job,
-on the same machine (`AOT_NORCPC=1` builds without); open.
+on the same machine: `AOT_NOIMMO=1` builds the translated code without the offsets (`AOT_NORCPC=1` would take LDAPR
+away as well), and `tests/ci_bench.sh` measures both in alternating rounds on cores with LRCPC2.
