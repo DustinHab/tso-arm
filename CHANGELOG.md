@@ -1,11 +1,17 @@
 # Changes
 
-## Unreleased
+## 0.2.1 (2026-11-20)
 
-- `tso-arm binfmt [register | unregister]`: x86-64 programs started directly (`./program`) run through tso-arm.
+Dynamically linked programs right after `tso-arm rootfs`, and x86-64 programs started directly. FEX and its patches
+are the same as in 0.2.0.
+
 - Fixed: after `tso-arm rootfs`, dynamically linked programs were refused, since `tso-arm` looked for FEX's setting
-  in `~/.fex-emu` only; it reads it where FEX does (`~/.config/fex-emu` when `~/.fex-emu` does not exist).
-- `tests/transitions.sh` measures what a call across the border of translated code costs.
+  in `~/.fex-emu` only; it reads it where FEX does (`~/.config/fex-emu` when `~/.fex-emu` does not exist). Checked
+  with Ubuntu 24.04 from FEX's server: x86-64 `bash`, `python3` and `sort` run, `sort` with the Arm `sort`'s output.
+- `tso-arm binfmt [register | unregister]`: x86-64 programs started directly (`./program`) run through tso-arm, for
+  the whole system and after a reboot (needs root); checked in the CI.
+- `tests/transitions.sh` measures what a call across the border of translated code costs (on the Pi 40 ns inward,
+  81 ns outward), which is why `learn` leaves out libraries of programs that cross it all the time.
 
 ## 0.2.0 (2026-11-20)
 
