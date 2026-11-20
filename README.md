@@ -183,7 +183,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 |---|---|
 | `bin/tso-arm` | the command |
 | `fex/` | the FEX patches, `install.sh` and the build scripts of the test machine |
-| `tools/package.sh`, `.github/workflows/release.yml` | the release packages: FEX prebuilt for any Armv8.0 core |
+| `tools/package.sh`, `tools/release_notes.sh`, `.github/workflows/release.yml` | the release packages (FEX prebuilt for any Armv8.0 core) and their notes from `CHANGELOG.md` |
 | `aot/` | translation of hot x86-64 functions to C ahead of time (`lift.py`, chosen by `auto.py`; the lists in `aot/lists/`) |
 | `litmus/` | x86-64 litmus tests that detect reordering |
 | `tests/` | correctness tests: CI, corner cases of the views, more threads than views, cores without `ldapr`, emulated cores |

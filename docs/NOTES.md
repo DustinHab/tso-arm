@@ -1283,7 +1283,11 @@ the table within the noise (pigz 90, xz 90, zstd 70 %, mean 83 %).
   `fex/patches/*tso-arm-stage*.patch`), FEX's commit and how it was built. `install` takes, in this order,
   `TSO_ARM_PACKAGE`, `fex/prebuilt` of the release package, the package of the release named by `VERSION` (checked
   against `SHA256SUMS`), each only if its patches are exactly these; otherwise it builds from source for this core.
-  `--source` builds for this core, `--generic` for any. From the package it takes 0.02 s on the Pi.
+  `--source` builds for this core, `--generic` for any. From the package it takes 0.02 s on the Pi. After the release
+  was published, on the Pi: a clone of the tag fetched the package from the release, the release's tarball (checked
+  against `SHA256SUMS`) took its `fex/prebuilt`; both FEX the same to the byte, `tso-arm check` content with them.
+  `tools/release_notes.sh` joins the lines of each paragraph of the version's notes, since GitHub shows every line
+  break of a release text.
 - **Prebuilt against built for the core,** on the Pi (3 rounds, learned, x86 order kept): pigz 89 against 91 %, xz 93
   against 91 %, zstd 68 against 69 %, mean 82 against 83 %, within the noise. FEX's JIT emits code for the core it runs
   on either way; only FEX's own C++ is built for Armv8.0, and that is not where the time goes.

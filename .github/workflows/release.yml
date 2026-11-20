@@ -103,6 +103,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v=${GITHUB_REF_NAME#v}
-          awk -v v="$v" '/^## / { on = ($2 == v) ; next } on' CHANGELOG.md >notes.md
+          sh tools/release_notes.sh "$v" >notes.md
           test -s notes.md
           gh release create "$GITHUB_REF_NAME" dist/* --draft --title "tso-arm $v" --notes-file notes.md
