@@ -17,13 +17,13 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **82 %** (pigz 90 %, xz 88 %, zstd 70 %) |
+| **tso-arm**, with functions translated ahead of time | **83 %** (pigz 91 %, xz 88 %, zstd 70 %) |
 | tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
 
 Programs as Ubuntu ships them (xz with liblzma, gzip, bzip2 with libbz2, openssl's sha512), with their shared
-libraries translated ahead of time: 80 % of the host's own Arm builds, against 61 % under FEX's full TSO.
+libraries translated ahead of time: 83 % of the host's own Arm builds, against 61 % under FEX's full TSO.
 
 ## Quick start
 
@@ -60,7 +60,7 @@ tool (unpacked, about 2 GB, 95 s on a Pi 5), or `FEX_ROOTFS` names a directory w
 translates such a program's own functions and those of its shared libraries: a shared library's translation is kept
 under the library's name and build ID, and FEX takes it whenever a program maps that library (notes section 40). It
 takes programs as distributions ship them, stripped and built with frame pointers and the stack protector: Ubuntu's
-xz, whose work is all in liblzma, gzip and bzip2 reach 83 to 94 % of the host's own Arm builds, against 55 to 66 %
+xz, whose work is all in liblzma, gzip and bzip2 reach 84 to 94 % of the host's own Arm builds, against 55 to 66 %
 under FEX's full TSO (the table below). Where little of a program's time is in its own code, or its code calls
 back and forth across the border to FEX all the time (an interpreter's loop, closures), `learn` finds the translation
 slower and leaves it out (notes section 38).
@@ -109,6 +109,10 @@ faster than with full ordering.
   ordered. Accesses to private memory stay plain and cost nothing extra. What a run learns (which instructions met
   shared memory) is kept in a profile for the next run. Code and read-only data of a program and its libraries are
   mapped from their files, shared with every view and process (notes section 45).
+- **One thread, no views** (notes section 46): a process with a single thread needs no ordering at all. Its code
+  runs as without views, every access plain, until a second thread starts or it maps memory shared with another
+  process; then what was translated goes and the page protocol takes over. Shells, build tools and most commands
+  never get there.
 - **Ahead of time** (`aot/`, notes sections 16 to 26, 29 and 40): `aot/auto.py` picks the hot functions of a
   program and of its shared libraries from a profile run, `aot/lift.py` translates them to C and clang to Arm code,
   with a plain and an ordered variant of each. FEX takes a shared library's translation when the program maps the
@@ -129,20 +133,20 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-20T20:06, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-20T22:14, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
 | native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.58 s, 84 % | 84 % |
-| tso-arm build, TSO off | no | 1.14 s, 88 % | 1.33 s, 80 % | 0.57 s, 86 % | 85 % |
-| FEX default | no | 1.57 s, 64 % | 1.51 s, 71 % | 0.66 s, 74 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.56 s, 69 % | 0.72 s, 68 % | 66 % |
-| tso-arm, first run | yes | 1.34 s, 75 % | 1.53 s, 70 % | 0.85 s, 58 % | 67 % |
-| tso-arm, with profile | yes | 1.27 s, 79 % | 1.51 s, 71 % | 0.71 s, 69 % | 73 % |
-| ahead of time, TSO off | no | 1.06 s, 94 % | 1.17 s, 91 % | 0.55 s, 89 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.62 s, 66 % | 0.69 s, 71 % | 64 % |
-| ahead of time + tso-arm, with profile | yes | 1.11 s, 90 % | 1.21 s, 88 % | 0.70 s, 70 % | 82 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
+| FEX default | no | 1.56 s, 64 % | 1.51 s, 71 % | 0.68 s, 72 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.54 s, 69 % | 0.71 s, 69 % | 66 % |
+| tso-arm, first run | yes | 1.32 s, 76 % | 1.53 s, 70 % | 0.85 s, 58 % | 67 % |
+| tso-arm, with profile | yes | 1.26 s, 79 % | 1.51 s, 71 % | 0.71 s, 69 % | 73 % |
+| ahead of time, TSO off | no | 1.06 s, 94 % | 1.17 s, 91 % | 0.56 s, 87 % | 91 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.76 s, 57 % | 1.55 s, 69 % | 0.70 s, 70 % | 65 % |
+| ahead of time + tso-arm, with profile | yes | 1.10 s, 91 % | 1.21 s, 88 % | 0.70 s, 70 % | 83 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -154,22 +158,22 @@ of the same programs (Raspberry Pi OS: other versions, so the native column is a
 program learned once with `tso-arm learn`.
 
 <!-- distro:begin -->
-Measured 2026-11-20T18:09, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
+Measured 2026-11-20T22:27, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
 
 | Program (its library) | native Arm | FEX full TSO | tso-arm, page protocol | tso-arm, learned |
 |---|---|---|---|---|
-| xz (liblzma) | 1.06 s, 100 % | 1.71 s, 62 % | 1.60 s, 66 % | 1.25 s, 85 % |
-| gzip (-) | 3.59 s, 100 % | 5.40 s, 66 % | 4.54 s, 79 % | 3.81 s, 94 % |
-| bzip2 (libbz2) | 1.02 s, 100 % | 1.88 s, 54 % | 1.46 s, 70 % | 1.23 s, 83 % |
-| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.65 s, 60 % | 0.64 s, 61 % | 0.64 s, 61 % |
-| geometric mean | 100 % | 61 % | 69 % | 80 % |
+| xz (liblzma) | 1.06 s, 100 % | 1.67 s, 63 % | 1.55 s, 68 % | 1.25 s, 85 % |
+| gzip (-) | 3.59 s, 100 % | 5.40 s, 66 % | 4.28 s, 84 % | 3.80 s, 94 % |
+| bzip2 (libbz2) | 1.02 s, 100 % | 1.87 s, 55 % | 1.36 s, 75 % | 1.21 s, 84 % |
+| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.65 s, 60 % | 0.57 s, 68 % | 0.56 s, 70 % |
+| geometric mean | 100 % | 61 % | 74 % | 83 % |
 
 Efficiency = native time / time. Throttling flags after the run: 0xe0000. Every output checked.
 <!-- distro:end -->
 
 Where tso-arm gains least: openssl's sha512 is hand-written assembly in libcrypto that `learn` cannot translate (it
-reads the stack pointer as a value), with few memory accesses to order; there the views' addressing costs about what
-FEX's ordering does (notes sections 40 and 42).
+reads the stack pointer as a value), with few memory accesses to order; it runs as FEX translates it, with one
+thread, so without views and without ordering (notes sections 40, 42 and 46).
 
 Box64 on the same machine and programs (`bench/box64.sh`, notes section 25; it needs dynamically linked builds):
 by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forbidden litmus outcomes) and reaches

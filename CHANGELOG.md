@@ -1,5 +1,14 @@
 # Changes
 
+## 0.3.4 (not released yet)
+
+- A process with a single thread runs without views and without ordering until a second thread starts or it maps
+  memory shared with another process (notes section 46). Most commands never get there: a program start costs what
+  it does under FEX (40.9 against 46.8 ms), and Ubuntu's gzip, bzip2 and openssl run at 84, 75 and 68 % of the
+  host's builds with the page protocol (were 79, 70 and 59 %); the distribution table's mean with learned functions
+  83 instead of 80 %. `TSO_VIEWS_ASLEEP=0` starts with the views awake.
+- `tests/wake.c` (in `tests/ci.sh`): code translated while the views slept does not run on with two threads.
+
 ## 0.3.3 (2026-11-20)
 
 Programs with large libraries start faster and need much less memory. The FEX patch changed, so this release brings

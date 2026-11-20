@@ -22,6 +22,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/mp litmus/mp.c
     $CC -O2 -static -pthread -o $B/threads tests/threads.c
     $CC -O2 -static -pthread -o $B/spsc tests/spsc.c
+    $CC -O2 -static -pthread -o $B/wake tests/wake.c
     $CC -O2 -static -pthread -o $B/sharedstack tests/sharedstack.c
     $CC -O2 -static -pthread -o $B/fields study/work/fields.c
     $CC -O2 -static -pthread -o $B/fork tests/fork.c
@@ -122,4 +123,8 @@ fi
 out=$($T run $B/spsc 20000000) || fail "ring buffer: $out"
 ok "ring buffer, tso-arm: $out"
 echo "      ring buffer without ordering, for comparison: $($T run --mode unordered $B/spsc 20000000 || true)"
+
+# the same after a start with one thread: what was translated while the views slept does not run on with two threads
+out=$($T run $B/wake 20000000) || fail "ring buffer after one thread: $out"
+ok "$out"
 echo "all tests passed"

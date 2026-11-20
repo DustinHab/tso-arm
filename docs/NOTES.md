@@ -1915,3 +1915,40 @@ all right natively, under tso-arm, FEX's full TSO and without ordering. Full che
 
 Of the remaining 6 ms per start, a third is the view pass in FEX's translation (`GuestViewPass`, 4.7 % of a start's
 user cycles), the rest the views' own mappings (`mprotect`, `mremap` for each mapping and view).
+
+## 46. One thread, no views (2026-11-20)
+
+x86 memory order is a matter between threads (and processes sharing memory): a process with a single thread sees
+its own accesses in program order whatever the processor does. Still, every process ran through the views from its
+first instruction: the view address in every access, exact instruction starts, the view pass at every translation,
+the views' own mappings. A single-threaded program paid that for nothing, and most programs are single-threaded
+(shells, compilers, the tools of a build, most commands).
+
+The views now sleep in a new process (`FEXCore::TSOViews::AsleepActive`, read once per translation like the
+fallback's flag). While they sleep, code is translated as without views: guest memory addressed directly, every
+access plain, no exact starts, no view pass; the views get no mappings (each range comes into a view at its first
+access later, as into another thread's). They wake when a second thread is created (`AttachThread`, before the new
+thread runs anything) or the process maps memory another process may map as well (a shared mapping, a second
+mapping of shared memory by `mremap`, System V `shmat`): everything translated so far goes, as in the fallback, and
+the protocol takes over with all pages owned by the first thread. The thread that wakes them is in a system call,
+which ends its block; the new thread has not run yet. A forked child inherits the state; `execve` starts asleep.
+`TSO_VIEWS_ASLEEP=0` starts awake; the measurement modes (stage 1, identity base, eager views) always do.
+`TSO_VIEWS_STATS` tells "views asleep throughout (one thread)" or "views woke after N s" (pigz: 0.013 s).
+
+`tests/wake.c` (in `tests/ci.sh`) is the ring buffer of `tests/spsc.c` with its producer and consumer first run by
+the main thread alone (translated asleep), then by two threads: 20 million messages, none wrong under tso-arm
+(without ordering 3 wrong in one of three runs: the test can see it).
+
+| | before | asleep |
+|---|---|---|
+| a program start (`/bin/true` from bash) | 46.8 ms | 40.9 ms (FEX's full TSO 40.5) |
+| `python3 -c 0` | 0.45 s, 28 MB | 0.39 s, 25 MB (FEX 0.39 s, 26 MB) |
+| `ffmpeg -version` | 0.26 s, 93 MB | 0.22 s, 77 MB (FEX 0.20 s, 62 MB) |
+| gzip, page protocol (distro table) | 79 % | 84 % |
+| bzip2, page protocol | 70 % | 75 % |
+| openssl, page protocol / learned | 59 / 63 % | 68 / 70 % (FEX's full TSO 60 %) |
+| distro table, mean protocol / learned | 68 / 80 % | 74 / 83 % |
+
+Node wakes the views at once (V8 starts its threads), and the efficiency table's programs all run four threads:
+pigz 91, xz 88, zstd 70 %, mean 83 %. Full check all correct, `tests/ci.sh` passed, `rootfs_check` 28 of 28,
+`tests/soak.sh` 75 of 75.

@@ -9,6 +9,7 @@ mkdir -p build/ci
 $CC -O2 -static -pthread -o build/ci/mp litmus/mp.c
 $CC -O2 -static -pthread -o build/ci/threads tests/threads.c
 $CC -O2 -static -pthread -o build/ci/spsc tests/spsc.c
+$CC -O2 -static -pthread -o build/ci/wake tests/wake.c
 $CC -O2 -static -pthread -o build/ci/sharedstack tests/sharedstack.c
 $CC -O2 -static -pthread -o build/ci/fields study/work/fields.c
 $CC -O2 -static -pthread -o build/ci/fork tests/fork.c
