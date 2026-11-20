@@ -1562,3 +1562,21 @@ call back into FEX for every comparison). Against the code without rdx, alternat
 against 1229 ms, 0.5 % more user cycles; pigz 1142 against 1138 ms, 1 %; zstd 754 against 725 ms; so the pair costs
 next to nothing. Full check all correct; efficiency pigz 90, xz 88, zstd 70 %, mean 82 % (README table; xz's 1.21
 against 1.19 s of the last table is the spread of single sessions, as the alternating runs show).
+
+## 38. Release 0.2.0; what a call across the border costs (2026-11-20)
+
+Release 0.2.0 (tag `v0.2.0` on `01e83d8`): the release workflow built FEX for any Armv8.0 core and checked the
+packages on Ubuntu 22.04 and 24.04; published, then on the Pi: a clone of the tag fetched the prebuilt FEX, the
+release's tarball (checked against `SHA256SUMS`) took its own, both the same to the byte (patches
+`771e78d95e10f3ef`); `tso-arm learn` with it kept pigz's library (868 ms against 968 ms without) and `tso-arm run` gave
+the right output.
+
+Why Python's and sort's libraries are slower than none (section 36): `tests/transitions.c` calls a small function
+10 million times across the border, `tests/transitions.sh` measures it (FEX without ordering, block by block, best of
+3, on the Pi): guest code calling a translated function costs 40 ns more per call than FEX's own call (1075 against
+1480 ms; the bridge: FEX's thunk call, the context, the arguments, the return through the guest stack), translated
+code calling guest code through a pointer 81 ns more (1180 against 1995 ms; FEX's callback path into its dispatcher and
+out again). Python's eval loop stays with FEX (computed gotos) and calls its small translated functions all the
+time; sort's translated functions call back into FEX for each comparison (Rust closures through pointers). Making
+these crossings cheap would take FEX's JIT calling translated code directly, or translating whole call graphs with
+their indirect targets; `learn` already keeps such libraries out.
