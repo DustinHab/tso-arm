@@ -1812,3 +1812,41 @@ Full check all correct (litmus series, views matrix, 12 to 64 threads, outputs),
 pigz 92 (was 90), xz 88, zstd 70 %, mean 83 %; the page protocol alone 73 %. Ubuntu's programs (`bench/distro.sh`):
 openssl learned 63 instead of 54 % (FEX's full TSO 60 %), with the protocol alone 59 instead of 51 %; mean 80
 instead of 78 %. What is left of openssl's cost is the address arithmetic of the views (section 40).
+
+## 43. Smaller multiblock units (2026-11-20)
+
+ffmpeg (x264, 4 threads) ran its first time under tso-arm in 5.3 s, twice its time under FEX's full TSO. The page
+protocol's statistics put the time elsewhere than expected: faults 0.76 s, but 7,741 block compiles in 5.5 s (all
+threads, 0.7 ms each), with 3,900 escalations each throwing a translation away. With `FEX_MULTIBLOCK=0` the same run
+took 1.9 s, with 39,439 compiles in 0.31 s (8 microseconds each), and FEX's full TSO 1.4 instead of 2.5 s. FEX's
+multiblock compiles from each entry everything reachable forward, up to `MaxInst` guest instructions (default 5000).
+A large function entered at many points (every return from a call is an entry) is compiled again from each of them,
+cold paths included.
+
+Multiblock on and off under tso-arm with a warmed profile (best of 2, 1.8 GHz): it is worth 15 % to pigz, 17 % to
+xz, 20 % to gzip, 37 % to bzip2, 16 % to sort and 48 % to Python, and costs ffmpeg 40 % (3.72 against 2.23 s) and
+Node 37 % (9.48 against 6.00 s). Smaller units keep both sides (`FEX_MAXINST`, best of 2):
+
+| MaxInst | pigz | xz | gzip | bzip2 | openssl | sort | Python | ffmpeg | Node |
+|---|---|---|---|---|---|---|---|---|---|
+| 5000 (FEX) | 1.29 s | 1.49 s | 4.55 s | 19.59 s | 0.67 s | 2.47 s | 2.89 s | 3.73 s | 9.43 s |
+| 400 | 1.27 | 1.54 | 4.54 | 19.76 | 0.65 | 2.49 | 3.01 | 2.41 | 7.02 |
+| 250 | 1.29 | 1.52 | 4.54 | 19.70 | 0.64 | 2.42 | 3.00 | 2.28 | 6.61 |
+| 150 | 1.27 | 1.52 | 4.54 | 19.98 | 0.65 | 2.42 | 2.95 | 2.17 | 6.15 |
+| 100 | 1.29 | 1.56 | 4.55 | 20.07 | 0.65 | 2.47 | 3.00 | 2.14 | 5.76 |
+| multiblock off | 1.47 | 1.77 | 5.46 | 26.75 | 0.61 | 2.85 | 4.28 | 2.23 | 6.00 |
+
+`tso-arm` now sets `FEX_MAXINST=150` (unless it is set): xz, bzip2 and Python lose 1 to 2 % (within the spread),
+ffmpeg gains 42 % and Node 35 %. The benchmarks give tso-arm's configurations the same and FEX's columns FEX's own
+5000 (`bench/efficiency.sh`, `bench/distro.sh`, `tests/compat.sh`). ffmpeg's first run now 2.4 instead of 5.3 s; in
+the compatibility table (README) ffmpeg 1.73 s and Node 4.97 s against 2.93 and 8.38 s under FEX's full TSO, both
+faster than FEX without any ordering (2.24 and 6.71 s).
+
+The translated configurations compile block by block (`FEX_MULTIBLOCK=0`), where `MaxInst` only splits basic blocks
+longer than that: pigz and xz ahead of time + tso-arm, 150 against 5000 alternating, 8 rounds: pigz best 1096 against
+1090 ms (medians 1109 and 1106), xz 1211 against 1212 ms, no difference. The efficiency table of this session has
+pigz at 1.12 s (88 %, mean 81 %); its best of five varies between 1.09 and 1.12 s from session to session.
+
+Also seen: FEXServer keeps the root file system of the client that started it, and exits only a second after its
+last client; a program started with another `FEX_ROOTFS` within that second gets the first one's ("Invalid or
+Unsupported elf file"). Benchmarks that switch root file systems wait a few seconds in between.

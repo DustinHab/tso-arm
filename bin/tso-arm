@@ -6,6 +6,10 @@ set -e
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 PREFIX=${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}
 CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm
+# FEX's multiblock compiles up to this many guest instructions from each entry (FEX's own default: 5000). Large
+# functions entered at many points (after each call) were compiled again and again: ffmpeg 3.7 instead of 2.2 s,
+# Node 9.4 instead of 6.2 s; the hot loops of pigz, xz and others lose nothing that counts (notes section 43)
+export FEX_MAXINST=${FEX_MAXINST:-150}
 
 die() {
     echo "tso-arm: $*" >&2

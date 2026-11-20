@@ -42,10 +42,12 @@ run_config() {
     ours-off) set -- env FEX_TSOENABLED=0 $FEXV $X/$w ;;
     default) set -- $FEX $X/$w ;;
     full) set -- env FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEX $X/$w ;;
+    # tso-arm's configurations compile FEX's multiblock units of at most 150 instructions, as bin/tso-arm does
+    # (FEX's own: 5000; notes section 43)
     # with the profile of earlier runs (the first round writes it)
-    protocol) set -- env TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
+    protocol) set -- env FEX_MAXINST=150 TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
     # without any profile: everything learned in this run
-    protocol-cold) set -- env TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
+    protocol-cold) set -- env FEX_MAXINST=150 TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
     # the hot functions translated ahead of time (aot/), the rest by FEX: without ordering, and with the page
     # protocol and a profile of its own
     # FEX compiles the rest block by block (FEX_MULTIBLOCK=0): with the hot code translated ahead of time, compiling
@@ -54,12 +56,12 @@ run_config() {
         lib=$PWD/out/aot/$w.so
         [ -f $lib ] || return
         if [ $cfg = aot-off ]; then
-            set -- env FEX_TSOENABLED=0 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
+            set -- env FEX_MAXINST=150 FEX_TSOENABLED=0 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         elif [ $cfg = aot-full ]; then
             # no page protocol: FEX full TSO, the translated functions ordered throughout
-            set -- env FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
+            set -- env FEX_MAXINST=150 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         else
-            set -- env TSO_VIEWS=1 TSO_VIEWS_PROFILE=$HOME/.cache/tso-arm/$w-aot.prof FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 \
+            set -- env FEX_MAXINST=150 TSO_VIEWS=1 TSO_VIEWS_PROFILE=$HOME/.cache/tso-arm/$w-aot.prof FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 \
                 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         fi
         ;;

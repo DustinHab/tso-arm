@@ -66,7 +66,8 @@ run_config() {
     # (the code ranges that met shared memory), and the later configuration would inherit the earlier one's
     case $cfg in
     native) set -- "$p" ;;
-    full) set -- "$T" run --mode full "$R/usr/bin/$p" ;;
+    # FEX's full TSO with FEX's own settings (tso-arm compiles smaller units, bin/tso-arm)
+    full) set -- env FEX_MAXINST=5000 "$T" run --mode full "$R/usr/bin/$p" ;;
     protocol) set -- env TSO_VIEWS_PROFILE="$XDG_CACHE_HOME/$p-protocol.prof" "$T" run --no-aot "$R/usr/bin/$p" ;;
     learned) set -- env TSO_VIEWS_PROFILE="$XDG_CACHE_HOME/$p-learned.prof" "$T" run "$R/usr/bin/$p" ;;
     esac

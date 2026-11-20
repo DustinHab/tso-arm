@@ -1,5 +1,12 @@
 # Changes
 
+## 0.3.2 (not released yet)
+
+- Programs with large functions much faster: `tso-arm` has FEX compile multiblock units of at most 150 guest
+  instructions (`FEX_MAXINST`, FEX's default 5000), so a function entered at many points is no longer compiled whole
+  again from each (notes section 43). ffmpeg with x264 1.7 instead of 2.9 s, its first run 2.4 instead of 5.3 s;
+  Node 5.0 instead of 8.2 s; both now faster than FEX without any ordering. Set `FEX_MAXINST` to override.
+
 ## 0.3.1 (2026-11-20)
 
 Faster code under the page protocol, and a profile that forgets one run's accident. Ubuntu's programs (xz, gzip,

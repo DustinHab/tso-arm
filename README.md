@@ -17,9 +17,9 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **83 %** (pigz 92 %, xz 88 %, zstd 70 %) |
+| **tso-arm**, with functions translated ahead of time | **81 %** (pigz 88 %, xz 88 %, zstd 68 %) |
 | tso-arm, page protocol alone | 73 % |
-| FEX, full TSO | 66 % |
+| FEX, full TSO | 65 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
 
 Programs as Ubuntu ships them (xz with liblzma, gzip, bzip2 with libbz2, openssl's sha512), with their shared
@@ -125,20 +125,20 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-20T16:19, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-20T17:53, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.35 s, 79 % | 0.57 s, 86 % | 84 % |
-| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.35 s, 79 % | 0.58 s, 84 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.55 s, 69 % | 0.67 s, 73 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.68 s, 60 % | 1.53 s, 70 % | 0.71 s, 69 % | 66 % |
-| tso-arm, first run | yes | 1.37 s, 73 % | 1.56 s, 69 % | 0.95 s, 52 % | 64 % |
-| tso-arm, with profile | yes | 1.26 s, 79 % | 1.50 s, 71 % | 0.72 s, 68 % | 73 % |
-| ahead of time, TSO off | no | 1.07 s, 93 % | 1.17 s, 91 % | 0.54 s, 91 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.79 s, 56 % | 1.54 s, 69 % | 0.70 s, 70 % | 65 % |
-| ahead of time + tso-arm, with profile | yes | 1.09 s, 92 % | 1.21 s, 88 % | 0.70 s, 70 % | 83 % |
+| native Arm | - | 0.99 s, 100 % | 1.07 s, 100 % | 0.48 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.14 s, 87 % | 1.35 s, 79 % | 0.57 s, 84 % | 83 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 84 % | 84 % |
+| FEX default | no | 1.56 s, 63 % | 1.51 s, 71 % | 0.66 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 60 % | 1.54 s, 69 % | 0.72 s, 67 % | 65 % |
+| tso-arm, first run | yes | 1.32 s, 75 % | 1.53 s, 70 % | 0.85 s, 56 % | 67 % |
+| tso-arm, with profile | yes | 1.26 s, 79 % | 1.49 s, 72 % | 0.71 s, 68 % | 73 % |
+| ahead of time, TSO off | no | 1.06 s, 93 % | 1.17 s, 91 % | 0.54 s, 89 % | 91 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.56 s, 69 % | 0.70 s, 69 % | 64 % |
+| ahead of time + tso-arm, with profile | yes | 1.12 s, 88 % | 1.21 s, 88 % | 0.71 s, 68 % | 81 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -150,15 +150,15 @@ of the same programs (Raspberry Pi OS: other versions, so the native column is a
 program learned once with `tso-arm learn`.
 
 <!-- distro:begin -->
-Measured 2026-11-20T16:34, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
+Measured 2026-11-20T18:09, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
 
 | Program (its library) | native Arm | FEX full TSO | tso-arm, page protocol | tso-arm, learned |
 |---|---|---|---|---|
-| xz (liblzma) | 1.06 s, 100 % | 1.67 s, 63 % | 1.61 s, 66 % | 1.27 s, 83 % |
-| gzip (-) | 3.58 s, 100 % | 5.40 s, 66 % | 4.54 s, 79 % | 3.83 s, 93 % |
-| bzip2 (libbz2) | 1.02 s, 100 % | 1.89 s, 54 % | 1.47 s, 69 % | 1.23 s, 83 % |
-| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.65 s, 60 % | 0.66 s, 59 % | 0.62 s, 63 % |
-| geometric mean | 100 % | 61 % | 68 % | 80 % |
+| xz (liblzma) | 1.06 s, 100 % | 1.71 s, 62 % | 1.60 s, 66 % | 1.25 s, 85 % |
+| gzip (-) | 3.59 s, 100 % | 5.40 s, 66 % | 4.54 s, 79 % | 3.81 s, 94 % |
+| bzip2 (libbz2) | 1.02 s, 100 % | 1.88 s, 54 % | 1.46 s, 70 % | 1.23 s, 83 % |
+| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.65 s, 60 % | 0.64 s, 61 % | 0.64 s, 61 % |
+| geometric mean | 100 % | 61 % | 69 % | 80 % |
 
 Efficiency = native time / time. Throttling flags after the run: 0xe0000. Every output checked.
 <!-- distro:end -->
@@ -186,16 +186,18 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   (`tests/ci_profile.sh`: per guest function, translated against FEX's own code).
 - **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes section 35): sort,
   7-Zip, Python with threads, ffmpeg with x264 and Node with worker threads from x86-64 Ubuntu, packed with their
-  libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock):
+  libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock, the profiles from nothing):
 
   | | tso-arm | FEX, full TSO | FEX, no ordering | output |
   |---|---|---|---|---|
-  | sort, 4 threads | 2092 ms | 2838 ms | 1843 ms | the same |
-  | 7-Zip, xz with 4 threads | 3388 ms | 3507 ms | 3432 ms | the same |
-  | Python, threads | 2897 ms | 2885 ms | 2156 ms | the same |
-  | ffmpeg, x264 with 4 threads | 2938 ms | 2960 ms | 2240 ms | the same |
-  | Node, worker threads | 8183 ms | 8682 ms | 7013 ms | the same |
-  | Node, messages seen before their data | 0 | 0 | 113,884 | |
+  | sort, 4 threads | 2319 ms | 2464 ms | 2356 ms | the same |
+  | 7-Zip, xz with 4 threads | 3379 ms | 3399 ms | 3339 ms | the same |
+  | Python, threads | 2945 ms | 2956 ms | 2204 ms | the same |
+  | ffmpeg, x264 with 4 threads | 1725 ms | 2926 ms | 2242 ms | the same |
+  | Node, worker threads | 4968 ms | 8375 ms | 6711 ms | the same |
+  | Node, messages seen before their data | 0 | 0 | 88,665 | |
+
+  ffmpeg and Node faster than FEX without any ordering: tso-arm has FEX compile smaller units (notes section 43).
 
   The last row is message passing in JavaScript through a SharedArrayBuffer with plain stores: V8 compiles it to
   x86 code at run time, and only x86 order keeps the reader from seeing the flag before the data.

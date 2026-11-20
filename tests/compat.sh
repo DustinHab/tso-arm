@@ -104,8 +104,9 @@ prefix() { # mode -> what runs the program in that mode
     case $1 in
     here1 | here2) echo "" ;;
     tso) echo "$T run" ;;
-    full) echo "$T run --mode full" ;;
-    unordered) echo "$T run --mode unordered" ;;
+    # FEX's own settings in FEX's columns (tso-arm compiles smaller units, bin/tso-arm)
+    full) echo "env FEX_MAXINST=5000 $T run --mode full" ;;
+    unordered) echo "env FEX_MAXINST=5000 $T run --mode unordered" ;;
     esac
 }
 case_cmd() { # name -> command (program from the root file system, arguments)
