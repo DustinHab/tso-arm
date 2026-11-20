@@ -163,3 +163,14 @@ if [ "$1" != --here ]; then
     [ -z "$w" ] || [ "$w" = "0 0" ] || { echo "compat: messages seen before their data with x86 order kept: $w"; exit 1; }
 fi
 echo "compat: all outputs the same"
+# COMPAT_STATS=1: one more run of each with x86 order kept and the page protocol's statistics (after the rounds above,
+# so with the profile they left)
+if [ -n "$COMPAT_STATS" ] && [ "$1" != --here ]; then
+    for c in $cases; do
+        s=$(date +%s%N)
+        sh -c "$T run --stats $(case_cmd $c)" >/dev/null 2>$W/stats-$c </dev/null || true
+        e=$(date +%s%N)
+        echo "$c: $(( (e - s) / 1000000 )) ms"
+        grep '^tso-arm: \(handled\|claims\)' $W/stats-$c | sed 's/^/    /'
+    done | tee $W/stats.txt
+fi

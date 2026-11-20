@@ -51,5 +51,6 @@ jobs:
           name: compat-rootfs-${{ github.sha }}
       - name: Programs under tso-arm
         run: |
-          sh tests/compat.sh compat-rootfs.tar.zst
+          COMPAT_STATS=1 sh tests/compat.sh compat-rootfs.tar.zst
           cat build/compat/compat.md >>"$GITHUB_STEP_SUMMARY"
+          { echo; echo '```'; cat build/compat/stats.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
