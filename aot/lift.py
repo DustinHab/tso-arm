@@ -63,6 +63,14 @@ class Elf:
         for a, size, name in elfsyms.functions(path):
             self.syms[name] = (a, size)
             self.all.setdefault(name, []).append((a, size))
+        self.cold = elfsyms.cold_parts(path)  # (start, size) of the split-off cold parts of functions
+
+    def cold_part(self, a):
+        # the cold part that holds address a, or None
+        for lo, size in self.cold:
+            if lo <= a < lo + size:
+                return (lo, lo + size)
+        return None
 
     def lookup(self, spec):
         # NAME, or NAME@ADDRESS for a name several functions share
@@ -175,23 +183,46 @@ class Function:
             # C name: a shared name gets its address
             self.name = name if len(elf.all.get(name, [])) == 1 else f"{name}_{self.start:x}"
         self.region = (lo, hi)
+        self.regions = [(lo, hi)]
         # what FEX checks against the guest code: from the entry to the end of the region
         self.size = hi - self.start
         self.hashed = elf.read(self.start, self.size)
-        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-        md.detail = True
-        self.code = elf.read(lo, hi - lo)
-        self.insns = list(md.disasm(self.code, lo))
-        if sum(i.size for i in self.insns) != hi - lo:
-            raise LiftError(f"{self.name}: decoding stopped early")
+        self.md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        self.md.detail = True
+        self.insns = self.decode(lo, hi)
+        if "=" not in spec:
+            self.add_cold_parts()
         self.at = {i.address: i for i in self.insns}
         self.analyse()
+
+    def decode(self, lo, hi):
+        insns = list(self.md.disasm(self.elf.read(lo, hi - lo), lo))
+        if sum(i.size for i in insns) != hi - lo:
+            raise LiftError(f"{self.name}: decoding stopped early at {lo + sum(i.size for i in insns):#x}")
+        return insns
+
+    def add_cold_parts(self):
+        # the cold parts the function jumps into (elfsyms.py), decoded with it, until none is new: jumps between
+        # them and back into the function are internal then
+        seen = 0
+        while seen < len(self.insns):
+            new = []
+            for insn in self.insns[seen:]:
+                if insn.mnemonic.startswith(("j", "notrack j", "bnd j")) and insn.operands \
+                        and insn.operands[0].type == X.X86_OP_IMM and not self.inside(insn.operands[0].imm):
+                    part = self.elf.cold_part(insn.operands[0].imm)
+                    if part and part not in self.regions:
+                        self.regions.append(part)
+                        new.extend(self.decode(*part))
+            seen = len(self.insns)
+            self.insns.extend(new)
+        self.insns.sort(key=lambda i: i.address)
 
     def err(self, insn, msg):
         return LiftError(f"{self.name}+{insn.address - self.start:#x} ({insn.address:#x}: {insn.mnemonic} {insn.op_str}): {msg}")
 
     def inside(self, a):
-        return self.region[0] <= a < self.region[1]
+        return any(lo <= a < hi for lo, hi in self.regions)
 
     def jump_table(self, insn):
         # notrack jmp [idx*8 + table], bounded by an earlier "cmp idx, n; ja default" in the same block; or, in a
@@ -311,35 +342,74 @@ class Function:
                 leaders.add(nxt)
         self.leaders = leaders
 
-        # rsp offset from the entry value before each reachable instruction
+        # rsp offset from the entry value before each reachable instruction, and rbp's while it is a frame pointer
+        # (rsp plus a known offset: after "mov rbp, rsp", until rbp is written otherwise; "lea rbp, [rsp + k]" stays
+        # the address of a stack object, as compilers without frame pointers use it).
+        # With a frame pointer, rbp-based accesses are stack accesses at that offset, and "leave", "mov rsp, rbp" and
+        # "lea rsp, [rbp + k]" set the rsp offset (distributions build with frame pointers: Ubuntu since 24.04)
+        def is_reg(op, name):
+            return op.type == X.X86_OP_REG and insn.reg_name(op.reg) == name
+
+        def rbp_based(op):
+            return op.type == X.X86_OP_MEM and op.mem.base and insn.reg_name(op.mem.base) == "rbp" and not op.mem.index
+
         index = {i.address: k for k, i in enumerate(self.insns)}
         delta = {}
+        fpd = {}
         succ = {}
-        work = [(self.start, 0)]
+        work = [(self.start, 0, None)]
         while work:
-            a, d = work.pop()
+            a, d, fp = work.pop()
             k = index[a]
             while k < len(self.insns):
                 insn = self.insns[k]
                 if insn.address in delta:
                     if delta[insn.address] != d:
                         raise self.err(insn, f"rsp offset {d} meets {delta[insn.address]}")
+                    if fpd.get(insn.address) != fp:
+                        raise self.err(insn, f"frame pointer offset {fp} meets {fpd.get(insn.address)}")
                     break
                 delta[insn.address] = d
+                if fp is not None:
+                    fpd[insn.address] = fp
                 mn = insn.mnemonic
                 ops = insn.operands
                 if mn == "push":
                     d -= 8
                 elif mn == "pop":
                     d += 8
+                    if ops[0].type == X.X86_OP_REG and REGS[insn.reg_name(ops[0].reg)][0] == "rbp":
+                        fp = None
+                elif mn == "leave":
+                    if fp is None:
+                        raise self.err(insn, "leave without a frame pointer")
+                    d, fp = fp + 8, None
+                elif mn == "enter":
+                    raise self.err(insn, "enter")
                 elif mn in ("sub", "add") and ops[0].type == X.X86_OP_REG and insn.reg_name(ops[0].reg) == "rsp":
                     if ops[1].type != X.X86_OP_IMM:
                         raise self.err(insn, "rsp changed by a register")
                     d += -ops[1].imm if mn == "sub" else ops[1].imm
+                elif mn == "mov" and is_reg(ops[0], "rbp") and is_reg(ops[1], "rsp"):
+                    fp = d
+                elif (mn == "mov" and is_reg(ops[0], "rsp") and is_reg(ops[1], "rbp")) or \
+                        (mn == "lea" and is_reg(ops[0], "rsp") and rbp_based(ops[1])):
+                    if fp is None:
+                        raise self.err(insn, "rsp set from rbp without a frame pointer")
+                    d = fp + (ops[1].mem.disp if mn == "lea" else 0)
                 else:
                     for o in ops:
-                        if o.type == X.X86_OP_REG and insn.reg_name(o.reg) in ("rsp", "esp", "sp") and (o.access & capstone.CS_AC_WRITE):
+                        if o.type != X.X86_OP_REG:
+                            continue
+                        r = REGS.get(insn.reg_name(o.reg), (None,))[0]
+                        if r == "rsp" and (o.access & capstone.CS_AC_WRITE):
                             raise self.err(insn, "rsp written")
+                        if r == "rsp" and (o.access & capstone.CS_AC_READ):
+                            raise self.err(insn, "rsp read as a value")
+                        if r == "rbp" and fp is not None and (o.access & capstone.CS_AC_READ) and mn != "push":
+                            raise self.err(insn, "frame pointer read as a value")
+                        if r == "rbp" and (o.access & capstone.CS_AC_WRITE):
+                            fp = None
                 fall = True
                 targets = []
                 if mn == "ret":
@@ -362,13 +432,14 @@ class Function:
                         fall = False
                 elif mn in ("ud2", "hlt", "int3"):
                     fall = False
-                work.extend((t, d) for t in targets)
+                work.extend((t, d, fp) for t in targets)
                 nxt = insn.address + insn.size
                 succ[insn.address] = targets + ([nxt] if fall and nxt in self.at else [])
-                if not fall:
-                    break
+                if not fall or k + 1 < len(self.insns) and self.insns[k + 1].address != nxt:
+                    break  # nothing falls through into the next region (a cold part or the function)
                 k += 1
         self.delta = delta
+        self.fpd = fpd
         self.succ = succ
         # Stack accesses: incoming arguments, frame slots, objects whose address is taken
         self.nstack = 0
@@ -384,10 +455,12 @@ class Function:
             if insn.mnemonic == "sub" and insn.operands[0].type == X.X86_OP_REG and insn.reg_name(insn.operands[0].reg) == "rsp" \
                     and first_sub is None:
                 first_sub = d
+            if insn.mnemonic == "lea" and insn.operands[0].type == X.X86_OP_REG and insn.reg_name(insn.operands[0].reg) == "rsp":
+                continue  # "lea rsp, [rbp + k]": the stack pointer set from the frame pointer, no object's address
             for o in insn.operands:
-                if o.type != X.X86_OP_MEM or not o.mem.base or insn.reg_name(o.mem.base) != "rsp":
+                off = self.stack_offset(insn, o)
+                if off is None:
                     continue
-                off = d + o.mem.disp
                 if insn.mnemonic == "lea" or o.mem.index:
                     # an object reached through its address or an index: it stays on the guest stack
                     if off >= 0:
@@ -409,6 +482,18 @@ class Function:
             self.esc = (lo, top)
         self.nstack = (self.nstack + 7) & ~7
         self.frame_size = (-self.frame_min + 15) & ~15
+
+    def stack_offset(self, insn, op):
+        # a memory operand on the function's own stack: its offset from the entry rsp, through rsp or through rbp while
+        # rbp is the frame pointer; None for any other operand
+        if op.type != X.X86_OP_MEM or not op.mem.base:
+            return None
+        b = insn.reg_name(op.mem.base)
+        if b == "rsp" and insn.address in self.delta:
+            return self.delta[insn.address] + op.mem.disp
+        if b == "rbp" and insn.address in self.fpd:
+            return self.fpd[insn.address] + op.mem.disp
+        return None
 
     def stack_kind(self, off):
         if off >= 8:
@@ -453,12 +538,11 @@ class Lifter:
 
     # --- escape analysis -----------------------------------------------------------------------------------------------
     def slot(self, f, insn, op, d):
-        # a stack slot that is a host local (offset from the entry rsp), or None
-        m = op.mem
-        if not m.base or insn.reg_name(m.base) != "rsp" or m.index:
+        # a stack slot that is a host local (offset from the entry rsp, through rsp or the frame pointer), or None
+        if op.mem.index:
             return None
-        off = d + m.disp
-        return off if f.stack_kind(off) == "frame" else None
+        off = f.stack_offset(insn, op)
+        return off if off is not None and f.stack_kind(off) == "frame" else None
 
     def escapes(self, f):
         # Forward data flow over the function: a may-taint per register and per host stack slot, merged by union.
@@ -611,7 +695,13 @@ class Lifter:
         self.out = []
         self.temps = []
         self.fd = None  # flags of the current block: (kind, bits, values...)
+        prev_end = None
         for insn in f.insns:
+            if prev_end is not None and insn.address != prev_end:
+                # a gap between the function and a cold part of it: nothing falls through it
+                self.out.append(f"    aot_unreachable({prev_end:#x}ULL);")
+                self.fd = None
+            prev_end = insn.address + insn.size
             if insn.address in f.leaders:
                 self.fd = None
                 self.out.append(f"L_{insn.address:x}: ;")
@@ -622,6 +712,7 @@ class Lifter:
                 continue
             self.insn = insn
             self.d = f.delta[insn.address]
+            self.fp = f.fpd.get(insn.address)
             try:
                 self.emit_insn(insn)
             except LiftError as e:
@@ -657,7 +748,7 @@ class Lifter:
         decl.append("    (void)c; (void)V; (void)gsp; (void)A;")
         for ty, n in self.temps:
             decl.append(f"    {ty} {n};")
-        if f.start != f.region[0]:
+        if f.start != f.insns[0].address:
             decl.append(f"    goto L_{f.start:x}; // the entry lies inside the region")
         return head + decl + self.out + ["}"]
 
@@ -701,16 +792,32 @@ class Lifter:
     def address(self, op):
         # -> ("const", int) | ("stack", offset) | ("dyn", C expression, read-only table)
         m = op.mem
-        if m.segment and self.insn.reg_name(m.segment) not in ("cs", "ds", "ss", "es"):
+        seg = self.insn.reg_name(m.segment) if m.segment else None
+        if seg and seg not in ("cs", "ds", "ss", "es", "fs"):
             raise self.err("segment override")
         base = self.insn.reg_name(m.base) if m.base else None
         index = self.insn.reg_name(m.index) if m.index else None
+        if seg == "fs":
+            # thread-local storage (errno, the stack protector's canary at fs:0x28): guest memory at the thread's fs
+            # base, which FEX hands the translated code in its context
+            if base and REGS[base][1] != 64 or index and REGS[index][1] != 64 or base in ("rsp", "rip"):
+                raise self.err("fs-relative address of this form")
+            parts = ["c->fs_base"]
+            if base:
+                parts.append(base)
+            if index:
+                parts.append(f"{index} * {m.scale}" if m.scale != 1 else index)
+            if m.disp:
+                parts.append(f"{m.disp & M64:#x}ULL")
+            return ("dyn", "(" + " + ".join(parts) + ")", False)
         if base == "rip":
             return ("const", (self.insn.address + self.insn.size + m.disp) & M64)
         if base and REGS[base][1] != 64 or index and REGS[index][1] != 64:
             raise self.err("32-bit address")
         if base == "rsp":
             return ("stack", self.d + m.disp, index, m.scale)
+        if base == "rbp" and self.fp is not None:
+            return ("stack", self.fp + m.disp, index, m.scale)  # through the frame pointer
         if not base and not index:
             return ("const", m.disp & M64)
         parts = []
@@ -922,15 +1029,16 @@ class Lifter:
 
     def guest_nstack(self, target):
         # stack argument bytes a function that is not translated reads (decoded only for that); 0 if it has no
-        # symbol (PLT entries: memcpy and friends take register arguments)
+        # symbol (PLT entries: memcpy and friends take register arguments); None if it cannot be decoded far enough
+        # to tell (indirect jumps and the like)
         if target not in self.guest_stack_args:
             n = 0
             for name, entries in self.elf.all.items():
                 if any(a == target for a, s in entries):
                     try:
                         n = Function(self.elf, f"{name}@{target:x}").nstack
-                    except LiftError as e:
-                        raise self.err(f"cannot tell the stack arguments of {name}: {e}")
+                    except LiftError:
+                        n = None
                     break
             self.guest_stack_args[target] = n
         return self.guest_stack_args[target]
@@ -960,7 +1068,17 @@ class Lifter:
             # written before any translated code runs, names the target; a translated one is called directly
             return f"aot_dispatch_{self.pre[0]}(c, V, rld64(V, {self.gconst(got)}), {gsp_expr}, {self.call_args()})"
         n = self.guest_nstack(target)
-        if n:
+        view = "O" if self.ordered else "V"
+        if n is None:
+            # a callee too irregular to tell its stack arguments: every frame slot between the call's stack pointer and
+            # the entry's goes to the guest stack (this function's own part of it, unused while the frame is in host
+            # memory), which holds any stack arguments; objects already there stay
+            if tail:
+                raise self.err("tail call into guest code whose stack arguments are unknown")
+            for off in range(argp_off, 0, 8):
+                if self.f.stack_kind(off) == "frame" and off >= self.f.frame_min:
+                    self.e(f"gst64({view}, gsp + {off & M64:#x}ULL, hld64(F + {off - self.f.frame_min}));")
+        elif n:
             if tail:
                 raise self.err("tail call with stack arguments into guest code")
             # the outgoing stack arguments go where the x86 code has them, on the guest stack above the callee's
@@ -969,7 +1087,6 @@ class Lifter:
                 off = argp_off + k
                 kind = self.f.stack_kind(off)
                 if kind == "frame":
-                    view = "O" if self.ordered else "V"
                     self.e(f"gst64({view}, gsp + {off & M64:#x}ULL, hld64(F + {off - self.f.frame_min}));")
                 elif kind != "esc" or self.f.esc_host:
                     raise self.err("outgoing stack arguments for guest code outside the frame")
@@ -1007,6 +1124,14 @@ class Lifter:
 
     def i_mov(self, insn, ops):
         bits = self.bits0(ops)
+        if bits == 64 and ops[0].type == X.X86_OP_REG and ops[1].type == X.X86_OP_REG:
+            if insn_is_rsp(insn, ops[1]) and self.reg(ops[0])[0] == "rbp":
+                # the frame pointer: its value is the guest stack address it stands for (code that only keeps it, as
+                # callees that save rbp do, sees the right value); accesses through it are stack slots (address())
+                self.e(f"rbp = gsp + {self.d & M64:#x}ULL;")
+                return
+            if insn_is_rsp(insn, ops[0]):
+                return  # "mov rsp, rbp": the stack pointer, tracked statically
         self.dst(ops[0], self.src(ops[1], bits), bits)
 
     i_movabs = i_mov
@@ -1032,7 +1157,16 @@ class Lifter:
         self.e("rdx = (uint32_t)((int32_t)rax >> 31);")
 
     def i_lea(self, insn, ops):
+        if insn_is_rsp(insn, ops[0]):
+            return  # "lea rsp, [rbp + k]": the stack pointer, tracked statically
         self.wreg(ops[0], self.lea_value(ops[1]))
+
+    def i_leave(self, insn, ops):
+        # mov rsp, rbp; pop rbp: the saved rbp lies where the frame pointer points
+        off = self.fp
+        if off is None or self.f.stack_kind(off) != "frame":
+            raise self.err("leave without a frame slot")
+        self.e(f"rbp = hld64(F + {off - self.f.frame_min});")
 
     def i_push(self, insn, ops):
         v = self.src(ops[0], 64)
@@ -1319,7 +1453,12 @@ class Lifter:
         if self.f.inside(op.imm):
             self.e(f"goto L_{op.imm:x};")
             return
-        self.e(f"return {self.direct_call(op.imm, 'gsp', 0, True)};")
+        # a tail call: the callee starts 16 bytes below this function's entry, not at it. Guest code is entered through
+        # FEX's callback, which writes its return address where the callee starts; at gsp itself lies the return
+        # address of the guest caller when this function was entered from guest code that translated code had called
+        # (FEX then runs it on that very stack). Stack arguments of a tail callee never come through gsp: a translated
+        # one reads them through A, and guest code with stack arguments is refused above.
+        self.e(f"return {self.direct_call(op.imm, 'gsp - 16ULL', 0, True)};")
 
     def i_call(self, insn, ops):
         op = ops[0]

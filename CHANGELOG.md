@@ -13,6 +13,12 @@
   libraries), and the escape analysis follows addresses through vector registers too.
 - `tso-arm learn` stops with the program's exit status when the program fails with the given arguments (it learned
   nothing silently before).
+- `learn` works on programs as distributions build them: stripped (functions from the unwind information), with
+  frame pointers, cold parts split off by gcc, the stack protector and other thread-local storage, and calls of guest
+  functions whose stack arguments cannot be told. pigz, xz and zstd built that way translate fully.
+- Fixed: a tail call from translated code into guest code could overwrite the guest caller's return address when the
+  translated function had been entered from guest code that translated code had called.
+- `learn` also times the library with FEX's multiblock on and keeps that where it is faster.
 - Programs of a distribution as a test (`tests/compat.sh`, on every push): sort, 7-Zip, Python, ffmpeg with x264 and
   Node from x86-64 Ubuntu, with the same output in every mode, as fast as FEX's full TSO or faster, and message
   passing in JavaScript that keeps x86's order.

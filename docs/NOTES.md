@@ -1469,3 +1469,66 @@ input would leave most of it at full ordering (60 instead of 90 %); escalations 
 either (pigz about 1800, ffmpeg about 1100). Left as it was: the profile keeps the fallback, and from the second run
 on ffmpeg is as fast as under FEX's full TSO (2964 and 2937 ms). A rule by cost (the time recompiling code thrown
 away, against the time run) would tell them apart; open.
+
+## 36. Translating programs as distributions build them (2026-11-20)
+
+`learn` on the distribution's own programs (section 35) translated nothing: they are stripped, so no function was
+found at all (`aot/elfsyms.py`, section 35's commit, takes the bounds from `.eh_frame` then). With that, Python's
+profile showed why the translator still took none of its hot functions; the reasons, and what the translator does
+about each now:
+
+- **Frame pointers** (Ubuntu builds with them since 24.04, Fedora since 38): `push rbp; mov rbp, rsp` ... `leave` or
+  `lea rsp, [rbp - k]`. The analysis follows rbp's offset from the entry rsp beside rsp's own (`fpd` beside `delta`),
+  from `mov rbp, rsp` until rbp is written otherwise; an access through rbp is then a stack access at that offset
+  (frame slot, argument or object, as through rsp, also in the escape analysis), `leave`, `mov rsp, rbp` and
+  `lea rsp, [rbp + k]` set rsp's offset, and rbp's value is the guest stack address it stands for (`gsp + offset`),
+  which code that only saves and restores it sees right. rbp read as a value otherwise, rsp read as a value, and
+  `enter` are refused (they gave C that did not compile before). `lea rbp, [rsp + k]` stays the address of a stack
+  object, as code without frame pointers uses it.
+- **Cold parts**: gcc moves rarely run paths into a part of their own (`foo.cold` in `.text.unlikely`), reached by
+  jumps from the function and running in its frame. A jump into one was "conditional jump out of the function". Such
+  parts are found as symbols named `*.cold*` or, stripped, as FDEs whose first row does not have the CFA at rsp + 8 as
+  at a function's entry (they start inside the frame); the function decodes the parts it jumps into with it, and
+  jumps between them are internal. Between regions nothing falls through (the analysis stops there, the C gets an
+  `aot_unreachable` at each gap and a `goto` to the entry when a part lies before it).
+- **Thread-local storage** (`fs:`): the stack protector's canary at `fs:0x28` (`-fstack-protector-strong`, the
+  default of distributions) and errno; guest memory at the thread's fs base, which FEX already gave the translated
+  code in its context (`c->fs_base`).
+- **Calls of guest functions too irregular to tell their stack arguments** (indirect jumps): they made the caller
+  fail. Now every frame slot between the call's stack pointer and the entry's goes to the guest stack (this
+  function's own part of it), which holds any stack arguments.
+
+Python then translated 40 functions, and `learn`'s output check found the output wrong with all of them but right with
+each alone. `aotmin.py` (scratch: functions removed one by one while the output stays wrong, 41 builds) narrowed it to
+`PyDict_SetItem` and `PyType_Ready`, which do not call each other: both end in a tail call into guest code after
+`leave`. A tail call passed `gsp`, the function's entry, as the callee's stack pointer, and FEX's callback path writes
+its return address where the callee starts. When translated code is entered from guest code that translated code
+had called, FEX runs it on that very stack (`Bridge`: `Stack = RSP`), and at `gsp` lies the return address into
+that guest code; `PyType_Ready` tail-called guest code that called `PyDict_SetItem`, whose tail call overwrote it.
+Tail calls now pass `gsp - 16` (the same alignment; their stack arguments never come through `gsp`). pigz's and xz's
+libraries hold such tail calls (6 and 2), so this was wrong there as well, only never met.
+
+After that (on the Pi, `tso-arm learn`, outputs checked, times as `tso-arm run`):
+
+| | functions | left with FEX among the hot ones | with the library | without |
+|---|---|---|---|---|
+| pigz, built as distributions build (frame pointers, stack protector, cold parts) | 23 | 0 | 918 ms | 1019 ms |
+| xz, the same | 15 | 0 | 1122 ms | 1372 ms |
+| zstd, the same | 15 | 2 | 668 ms | 718 ms |
+| Python 3.14 of Ubuntu 26.04 | 40 (8 % of its cycles) | 16 | 4973 ms | 2870 ms |
+| sort of Ubuntu 26.04 (Rust) | 18 of 25 | 9 | 10198 ms | 2070 ms |
+
+The programs built the distributions' way translate fully now; before, nearly every function there stopped at a
+frame pointer, a cold part or the canary. Python's and sort's libraries are slower than none: little of their time
+is in their own translated code, and with a library FEX runs block by block (`FEX_MULTIBLOCK=0`), which alone costs
+Python 56 % (2908 against 4624 ms without a library) and sort 14 %. `learn` now times the library with multiblock on
+as well and keeps that when it is faster (`OUT.multiblock`, which `tso-arm run` follows). sort's 7 functions left out
+return a pair in `rax:rdx` (Rust's slices): translated functions return rax only, so the caller saw a stale rdx;
+`learn`'s check caught each of them.
+
+With multiblock as a third choice: Python 5026 ms with the library, 3673 ms with it and multiblock, 2869 ms without,
+so still left out (its eval loop stays with FEX and calls the small translated functions all the time; each call goes
+through the bridge into the host code and back); pigz built the distributions' way 869, 868 and 1016 ms, kept
+without multiblock. Full check on the Pi with all of this (pigz's and xz's libraries changed by the tail calls):
+libraries, the stubs' general path, views matrix, both litmus series, 64 threads, the CI tests, all correct;
+efficiency pigz 91, xz 89, zstd 70 %, mean 83 % (README table).

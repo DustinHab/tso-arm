@@ -10,9 +10,10 @@ builds the library FEX loads with TSO_AOT.
      into the guest for them (up to --max functions in all).
   5. The library (aot/build.sh), then the program's output with it, without ordering and under the page protocol,
      against a run without it; a function whose library alone changes the output is left out.
-  6. With --timed (as `tso-arm learn` runs it): the program as `tso-arm run` runs it, with the library and without,
-     in alternating rounds (TSO_ARM_LEARN_ROUNDS, default 3); a library that makes it more than 3 % slower on this
-     machine becomes OUT.slower and is not used.
+  6. With --timed (as `tso-arm learn` runs it): the program as `tso-arm run` runs it, without the library, with it,
+     and with it and FEX's multiblock on, in alternating rounds (TSO_ARM_LEARN_ROUNDS, default 3); a library that
+     makes it more than 3 % slower on this machine becomes OUT.slower and is not used, and OUT.multiblock records that
+     multiblock was 3 % faster (when much of the program stays with FEX).
 
 The chosen functions go to OUT.list, one per line.
   aot/auto.py BINARY OUT.so [--share PCT] [--max N] [--timed] -- ARGS...
@@ -110,14 +111,15 @@ def configs(lib):
     return {"off": off, "protocol": protocol}
 
 
-def run_env(lib):
-    """the environment of `tso-arm run` (x86 order kept), with the library or without"""
+def run_env(lib, multiblock=False):
+    """the environment of `tso-arm run` (x86 order kept), with the library or without; with the library, FEX's
+    multiblock off (block by block is cheaper when the hot code is translated) or on (better when much is not)"""
     env = dict(os.environ, TSO_VIEWS="1", FEX_VECTORTSOENABLED="1", FEX_MEMCPYSETTSOENABLED="1",
                FEX_DISABLETELEMETRY="1")
     for k in ("TSO_AOT", "FEX_MULTIBLOCK", "FEX_TSOENABLED", "TSO_VIEWS_PROFILE"):
         env.pop(k, None)
     if lib:
-        env.update(TSO_AOT=lib, FEX_MULTIBLOCK="0")
+        env.update(TSO_AOT=lib, FEX_MULTIBLOCK="1" if multiblock else "0")
     return env
 
 
@@ -129,18 +131,28 @@ def wall(env, binary, args):
 
 
 def timed(binary, args, out):
-    """step 6: keeps the library only if it does not make the program slower here"""
+    """step 6: keeps the library only if it does not make the program slower here, and with FEX's multiblock on
+    (OUT.multiblock) where that is faster"""
     rounds = max(1, int(os.environ.get("TSO_ARM_LEARN_ROUNDS", "3")))
     wall(run_env(None), binary, args)  # the page cache, and the page protocol's profile of the program
-    with_lib, without = [], []
+    t = {"without": [], "with": [], "multiblock": []}
     for _ in range(rounds):
-        without.append(wall(run_env(None), binary, args))
-        with_lib.append(wall(run_env(out), binary, args))
-    w, wo = min(with_lib), min(without)
-    how = f"{w * 1000:.0f} ms with the library, {wo * 1000:.0f} ms without (x86 order kept, best of {rounds})"
-    if w > wo * 1.03:
+        t["without"].append(wall(run_env(None), binary, args))
+        t["with"].append(wall(run_env(out), binary, args))
+        t["multiblock"].append(wall(run_env(out, multiblock=True), binary, args))
+    w, wm, wo = min(t["with"]), min(t["multiblock"]), min(t["without"])
+    best = min(w, wm)
+    how = (f"{w * 1000:.0f} ms with the library, {wm * 1000:.0f} ms with it and multiblock, {wo * 1000:.0f} ms "
+           f"without (x86 order kept, best of {rounds})")
+    if os.path.exists(out + ".multiblock"):
+        os.remove(out + ".multiblock")
+    if best > wo * 1.03:
         os.replace(out, out + ".slower")
         print(f"timed: {how}: slower on this machine, not used")
+        return
+    if wm < w * 0.97:
+        open(out + ".multiblock", "w").close()
+        print(f"timed: {how}: kept, with multiblock")
     else:
         print(f"timed: {how}: kept")
 
@@ -169,7 +181,7 @@ def main():
     a = ap.parse_args(argv[:i])
     args = argv[i + 1:]
     binary, out = os.path.abspath(a.binary), os.path.abspath(a.out)
-    for old in (out, out + ".slower", out + ".list"):
+    for old in (out, out + ".slower", out + ".list", out + ".multiblock"):
         if os.path.exists(old):
             os.remove(old)
     work = tempfile.mkdtemp(prefix="tso-auto-")

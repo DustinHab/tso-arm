@@ -171,7 +171,8 @@ cmd_run() {
     tso)
         export TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1
         if [ -f "$lib" ]; then
-            export TSO_AOT="$lib" FEX_MULTIBLOCK=0
+            # block by block unless learn found multiblock faster with this library (much of the program untranslated)
+            export TSO_AOT="$lib" FEX_MULTIBLOCK=$([ -f "$lib.multiblock" ] && echo 1 || echo 0)
         fi
         ;;
     full)
@@ -180,7 +181,7 @@ cmd_run() {
     unordered)
         export FEX_TSOENABLED=0
         if [ -f "$lib" ]; then
-            export TSO_AOT="$lib" FEX_MULTIBLOCK=0
+            export TSO_AOT="$lib" FEX_MULTIBLOCK=$([ -f "$lib.multiblock" ] && echo 1 || echo 0)
         fi
         ;;
     *) die "unknown mode $mode (tso, full, unordered)" ;;
@@ -248,7 +249,7 @@ cmd_status() {
 cmd_forget() {
     [ $# -ge 1 ] || die "forget: which program?"
     rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.slower" "$CACHE/aot/$(key "$1").so.list" \
-        "$CACHE/aot/$(key "$1").c"
+        "$CACHE/aot/$(key "$1").so.multiblock" "$CACHE/aot/$(key "$1").c"
     rm -f "$CACHE"/"$(basename "$1")"-*.prof
     echo "tso-arm: forgot $(basename "$1")"
 }
