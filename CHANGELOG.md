@@ -1,6 +1,9 @@
 # Changes
 
-## 0.3.3 (not released yet)
+## 0.3.3 (2026-11-20)
+
+Programs with large libraries start faster and need much less memory. The FEX patch changed, so this release brings
+FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.2 or older.
 
 - Programs with large libraries start faster and need much less memory: code and read-only data of a program and its
   libraries are mapped from their files instead of copied into every process (notes section 45). `ffmpeg -version`
