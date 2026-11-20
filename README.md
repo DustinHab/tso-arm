@@ -139,10 +139,12 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   buffering; forbidden x86 outcomes never show under tso-arm, also with translated thread functions, and do show
   without ordering.
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
-  Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner cases, more threads
-  than views, a dynamically linked program and the ring buffer there; then it measures the efficiency of pigz, xz and
-  zstd on that machine (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on
-  FEX's newest commit (`.github/workflows/upstream.yml`).
+  Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
+  cases, more threads than views, a dynamically linked program and the ring buffer there; then it measures the
+  efficiency of pigz, xz and zstd on that machine (`tests/ci_bench.sh`, in the run's summary). Every week the same
+  tests run with the patches on FEX's newest commit (`.github/workflows/upstream.yml`); on demand,
+  `.github/workflows/profile.yml` profiles a workload there (`tests/ci_profile.sh`: per guest function, translated
+  against FEX's own code).
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).

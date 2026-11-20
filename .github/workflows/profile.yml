@@ -1,0 +1,49 @@
+name: Profile
+
+# On demand: where a workload's time goes on GitHub's Arm runner with x86 order kept, with the translated functions
+# and with FEX's own code alone (tests/ci_profile.sh, after tests/ci_bench.sh has built and learned everything).
+on:
+  workflow_dispatch:
+    inputs:
+      workload:
+        description: pigz, xz or zstd
+        default: zstd
+
+jobs:
+  profile:
+    name: Profile on an Arm runner
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 python3-pip binutils \
+            gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          python3 -m pip install --user --break-system-packages 'capstone>=5,<6'
+          sudo apt-get install -y -q linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -y -q linux-tools-generic
+          sudo sysctl -w kernel.perf_event_paranoid=1
+
+      - name: FEX with the tso-arm patches (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+
+      - name: Build FEX
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: bin/tso-arm install --generic
+
+      - name: Machine
+        run: bin/tso-arm check
+
+      - name: Programs, learned
+        run: ROUNDS=1 sh tests/ci_bench.sh
+
+      - name: Profile
+        env:
+          WORKLOAD: ${{ inputs.workload }}
+        run: sh tests/ci_profile.sh "$WORKLOAD"
