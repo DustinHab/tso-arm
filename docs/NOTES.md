@@ -1668,3 +1668,10 @@ registers in the thread's context when the stack top is not known within a block
 ordinary loads and stores), and the views' pass took those for guest memory and added the view base. It leaves them
 alone now. `tests/x87.c` (sums and products in `long double`, `strtold`, `printf` of `long double`) gives the same
 result as FEX's full ordering in the CI.
+
+All three faults had stayed hidden because no test ran a shell or a signal handler. `tests/rootfs_check.sh` runs 25
+everyday commands of the Ubuntu root file system under tso-arm and under FEX's full ordering and compares the
+outputs: command substitution, pipelines, a loop of 100 forks, subshells, a trap, job control, `timeout`, reaping
+background jobs, `printf` of a `long double`, awk, sed and grep, md5sum and sha256sum, gzip, xz with two threads,
+tar, find with xargs, factor, date, perl (hashes, fork), Python (hashlib, subprocess, a fork pool of 4, fork beside 3
+running threads, SIGUSR1 and a timer signal). On the Pi all 25 the same, in 77 s for both modes.

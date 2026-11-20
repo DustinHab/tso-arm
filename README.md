@@ -168,6 +168,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 
   The last row is message passing in JavaScript through a SharedArrayBuffer with plain stores: V8 compiles it to
   x86 code at run time, and only x86 order keeps the reader from seeing the flag before the data.
+- **Everyday programs** (`tests/rootfs_check.sh`, notes section 39): 25 commands of the root file system `tso-arm
+  rootfs` fetches (shell pipelines, command substitution, traps and job control, coreutils, gzip, xz, tar, perl,
+  Python with subprocess, a fork pool, fork beside running threads and signal handlers) give the same output as
+  under FEX's full ordering.
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).

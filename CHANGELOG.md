@@ -16,7 +16,9 @@ Shells and programs with signal handlers. The FEX patch changed, so this release
   program reports the error). A fork costs about 2 ms more on the Pi, plus the copy of a large heap.
 - Fixed: x87 arithmetic (`long double`) could crash under the page protocol (Ubuntu's `seq`): FEX's accesses to the
   x87 registers in the thread's context went through the views.
-- `tests/fork.c`, `tests/signals.c` and `tests/x87.c` run in the CI.
+- `tests/fork.c`, `tests/signals.c` and `tests/x87.c` run in the CI; `tests/rootfs_check.sh` compares 25 everyday
+  commands of the root file system (shells, coreutils, compression, perl, Python with fork and signals) with FEX's
+  full ordering.
 
 ## 0.2.2 (2026-11-20)
 
