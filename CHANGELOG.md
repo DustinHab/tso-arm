@@ -2,6 +2,10 @@
 
 ## 0.3.1 (not released yet)
 
+- Faster translated code under the page protocol: the full guest state is written back only at the instruction
+  starts where a thread can leave its block (accesses to memory, control flow, block ends), no longer at every
+  instruction (notes section 42). The views' cost for openssl's sha512 went from 31 to 13 %, for xz from 14 to 9 %;
+  pigz ahead of time 92 instead of 90 %.
 - The page protocol's profile no longer takes one run's accident for good: after a program's first run, a code range
   that met shared memory enters the profile only when it does so again in the next run that changes the profile
   (notes section 41). One run of Ubuntu's xz with 4 threads had added 801 ranges that every later run then ordered

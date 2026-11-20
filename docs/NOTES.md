@@ -1778,3 +1778,37 @@ counts those runs (`runs N`); a run that escalates nothing new does not write it
 pending, then 921 (all 19 escalated again), 2 pending, 923, stable; times 1.24 to 1.33 s. A range that really
 meets shared memory now costs one more run of faults before it is ordered from the start; a run's accident costs
 one run.
+
+## 42. Exact state only where a thread can leave (2026-11-20)
+
+A thread can leave its block at an instruction start only where that start has a RIP entry: a boundary trap is
+written there (section 10), and a fault that cannot be completed repeats the instruction from there. FEX makes RIP
+entries only for instructions with a memory operand (its `GPRDirect` operand, `[reg]`, is one of them; plain
+registers are `GPR`), for control flow and for block ends. Still, every instruction start got the exact state of
+section 10: the register cache written back in full, MMX, DF and the AVX upper halves included. openssl's sha512,
+register arithmetic for the most part, lost 25 of its 31 % views cost (stage 1, no protocol) to that.
+
+Now the full write-back, the carry flag in ABI form and the register allocator's merge barrier come only at the exit
+points (`IsViewExitPoint`): instructions with a memory operand, control flow, block ends, divisions (a divide error
+has to report its own instruction), and `pushf`, `maskmovq` and `maskmovdqu`, which access memory without a memory
+operand; `lea` and `nop` with a memory operand access nothing and are none. A check at translation backs the list
+up: when an instruction that is no exit point creates an IR op that accesses guest memory (the ops of the view pass,
+the x87 registers in the thread's context left out), its kind (its table entry) becomes an exit point for good and
+the block is translated again. The first version took `GPRDirect` for a register: the check learned 32 kinds (MOV,
+CMP, ADD, MOVDQU, ...) in each program, the list's limit, after which every start is exact again; the outputs stayed
+right. With the operand types right, pigz, xz, zstd and Ubuntu's openssl, xz, gzip, bzip2, python3 and sort learned
+none, every output the same as without views.
+
+The views without the protocol (stage 1) against TSO off, at 1.8 GHz, best of 3:
+
+| | before | now | no exact starts at all |
+|---|---|---|---|
+| openssl dgst -sha512 (Ubuntu) | +31 % | +13 % | +7 % |
+| xz -T4 | +14 % | +9 % | +10 % |
+| zstd -T4 | +10 % | +11 % | +11 % |
+| pigz -p 4 | +4 % | +6 % | +6 % |
+
+Full check all correct (litmus series, views matrix, 12 to 64 threads, outputs), `tests/ci.sh` passed. Efficiency
+pigz 92 (was 90), xz 88, zstd 70 %, mean 83 %; the page protocol alone 73 %. Ubuntu's programs (`bench/distro.sh`):
+openssl learned 63 instead of 54 % (FEX's full TSO 60 %), with the protocol alone 59 instead of 51 %; mean 80
+instead of 78 %. What is left of openssl's cost is the address arithmetic of the views (section 40).

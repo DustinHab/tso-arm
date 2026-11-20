@@ -1,14 +1,16 @@
-From 28325696f9e8ee51a1e9e4e6c4377a0933b822f7 Mon Sep 17 00:00:00 2001
+From fb9ea6dcb6acb6c0a7a3cdfded2007de0cd5ef26 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
  FEXCore/Source/Interface/Context/Context.h    |   4 +
- FEXCore/Source/Interface/Core/Core.cpp        |  25 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  86 +-
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |  21 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
- .../Interface/IR/Passes/GuestViewPass.cpp     |  10 +
+ .../Source/Interface/Core/OpcodeDispatcher.h  |  30 +
+ FEXCore/Source/Interface/IR/IREmitter.h       |   7 +
+ .../Interface/IR/Passes/GuestViewPass.cpp     |  42 +
  FEXCore/include/FEXCore/Core/Context.h        |  10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   8 +
@@ -23,7 +25,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 762 ++++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 19 files changed, 1741 insertions(+), 95 deletions(-)
+ 21 files changed, 1868 insertions(+), 98 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -41,10 +43,109 @@ index dc85492..53dce36 100644
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd..dbc9ac2 100644
+index a1cddcd..19a0dad 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
-@@ -938,10 +938,13 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -519,6 +519,38 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
+   return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
+ }
+ 
++// tso-arm: instruction kinds (their table entries) that touched guest memory although IsViewExitPoint saw no access;
++// exit points from then on. Once the list is full, every instruction start is one.
++namespace {
++  constexpr uint32_t MaxViewExitKinds = 32;
++  std::atomic<const void*> ViewExitKinds[MaxViewExitKinds];
++  std::atomic<uint32_t> NumViewExitKinds {0};
++  std::mutex ViewExitKindsMutex;
++
++  bool IsLearnedViewExit(const void* Kind) {
++    const uint32_t N = NumViewExitKinds.load(std::memory_order_acquire);
++    if (N >= MaxViewExitKinds) {
++      return true;
++    }
++    for (uint32_t i = 0; i < N; ++i) {
++      if (ViewExitKinds[i].load(std::memory_order_relaxed) == Kind) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void LearnViewExit(const void* Kind) {
++    std::lock_guard lk(ViewExitKindsMutex);
++    if (IsLearnedViewExit(Kind)) {
++      return;
++    }
++    const uint32_t N = NumViewExitKinds.load(std::memory_order_relaxed);
++    ViewExitKinds[N].store(Kind, std::memory_order_relaxed);
++    NumViewExitKinds.store(N + 1, std::memory_order_release);
++  }
++} // namespace
++
+ ContextImpl::GenerateIRResult
+ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
+   FEXCORE_PROFILE_SCOPED("GenerateIR");
+@@ -529,6 +561,8 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+   uint64_t TotalInstructionsLength {0};
+ 
+   bool HasCustomIR {};
++  // tso-arm: an instruction touched guest memory without an exit point before it (see below)
++  bool ViewRetranslate {};
+ 
+   bool WantsDiskCachePatching = DiskCache.IsReadingDiskCache() || DiskCache.IsWritingDiskCache();
+ 
+@@ -637,11 +671,17 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+         // side effect here and (if that behaviour is required) we should handle
+         // that more explicitly later.
+         // tso-arm: with the page protocol a thread may be sent back to the dispatcher at any instruction start
+-        // that has a RIP entry (TSOTrapBlockBoundaries); the full guest state has to be in place there.
++        // that has a RIP entry (TSOTrapBlockBoundaries, faults that repeat an instruction); the full guest state has
++        // to be in place there. Such entries are made at the exit points only (IsViewExitPoint).
+         const bool ExactStarts = TSOViews::ExactStarts() && Config.Is64BitMode;
+-        Thread->OpDispatcher->FlushRegisterCache(true, false, ExactStarts);
++        bool HasEntry = ExtendedDebugInfo || Thread->OpDispatcher->CanHaveSideEffects(TableInfo, DecodedInfo);
++        if (ExactStarts) {
++          HasEntry =
++            ExtendedDebugInfo || IR::OpDispatchBuilder::IsViewExitPoint(TableInfo, DecodedInfo) || IsLearnedViewExit(TableInfo);
++        }
++        Thread->OpDispatcher->FlushRegisterCache(true, false, ExactStarts && HasEntry);
+ 
+-        if (ExtendedDebugInfo || Thread->OpDispatcher->CanHaveSideEffects(TableInfo, DecodedInfo)) {
++        if (HasEntry) {
+           if (ExactStarts) {
+             Thread->OpDispatcher->RectifyCarryABI();
+           }
+@@ -701,7 +741,17 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           }
+ 
+           Thread->OpDispatcher->SetForceTSO(ForceTSO);
++          const bool ViewCheck = ExactStarts && !HasEntry;
++          const size_t ViewCheckFrom = ViewCheck ? Thread->OpDispatcher->ListOffset() : 0;
+           std::invoke(Fn, Thread->OpDispatcher, DecodedInfo);
++          if (ViewCheck && Thread->OpDispatcher->AccessesGuestMemorySince(ViewCheckFrom)) {
++            LearnViewExit(TableInfo);
++            ViewRetranslate = true;
++            if (TSOViews::Knob("TSO_VIEWS_LOG")) {
++              fprintf(stderr, "tso-arm: %s at rip %#lx accesses memory, an exit point from now on\n", TableInfo->Name ?: "?",
++                      (unsigned long)InstAddress);
++            }
++          }
+           if (Thread->OpDispatcher->HadDecodeFailure()) {
+             HadDispatchError = true;
+           } else {
+@@ -781,6 +831,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+ 
+   Thread->FrontendDecoder->DelayedDisownBuffer();
+ 
++  // tso-arm: translated again, with the instruction kinds learned above as exit points
++  if (ViewRetranslate) {
++    return GenerateIR(Thread, GuestRIP, ExtendedDebugInfo, MaxInst);
++  }
++
+   IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
+ 
+   auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
+@@ -938,10 +993,13 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
@@ -61,7 +162,7 @@ index a1cddcd..dbc9ac2 100644
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -1143,6 +1146,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1201,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -160,8 +261,74 @@ index ae3ed51..238f494 100644
    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GetReg(Op->ArgPtr));
  
    InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 360d605..c9cc558 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -24,6 +24,7 @@
+ #include <cstdint>
+ #include <fmt/format.h>
+ #include <stddef.h>
++#include <string_view>
+ #include <utility>
+ #include <xxhash.h>
+ 
+@@ -284,6 +285,35 @@ public:
+     return CanHaveSideEffects;
+   }
+ 
++  // tso-arm: with the views, the instruction starts where a thread can leave its block: a boundary trap, or a fault
++  // that repeats the instruction. These are accesses to memory, control flow, block ends and faults with register
++  // operands; only they get the exact state and a RIP entry, the register-only instructions between them need
++  // neither. An instruction kind that touches guest memory anyway is learned during translation (Core.cpp).
++  static bool IsViewExitPoint(const FEXCore::X86Tables::X86InstInfo* TableInfo, FEXCore::X86Tables::DecodedOp Op) {
++    if (!TableInfo || !TableInfo->Name) {
++      return true;
++    }
++    if (TableInfo->Flags &
++        (X86Tables::InstFlags::FLAGS_DEBUG_MEM_ACCESS | X86Tables::InstFlags::FLAGS_SETS_RIP | X86Tables::InstFlags::FLAGS_BLOCK_END)) {
++      return true;
++    }
++    const std::string_view Name {TableInfo->Name};
++    // An address is formed, nothing is accessed
++    if (Name == "LEA" || Name == "NOP") {
++      return false;
++    }
++    // Registers are GPR operands; GPRDirect is memory addressed by a register alone
++    auto IsMemory = [](const X86Tables::DecodedOperand& Operand) {
++      return !Operand.IsNone() && !Operand.IsGPR() && !Operand.IsLiteral() && !Operand.IsLiteralRelocation() &&
++             !Operand.IsLiteralPatchable();
++    };
++    if (IsMemory(Op->Dest) || IsMemory(Op->Src[0]) || IsMemory(Op->Src[1]) || IsMemory(Op->Src[2])) {
++      return true;
++    }
++    // Divide errors, and accesses without a memory operand
++    return Name == "DIV" || Name == "IDIV" || Name == "PUSHF" || Name == "MASKMOVQ" || Name == "MASKMOVDQU" || Name == "VMASKMOVDQU";
++  }
++
+   template<typename F>
+   void ForeachDirection(F&& Routine) {
+     // Otherwise, prepare to branch.
+diff --git a/FEXCore/Source/Interface/IR/IREmitter.h b/FEXCore/Source/Interface/IR/IREmitter.h
+index 711ab54..a47d514 100644
+--- a/FEXCore/Source/Interface/IR/IREmitter.h
++++ b/FEXCore/Source/Interface/IR/IREmitter.h
+@@ -44,6 +44,13 @@ public:
+     return IRListView(&DualListData);
+   }
+ 
++  // tso-arm: the current end of the node list, and whether a node created since such a point accesses guest memory
++  // (defined with the view pass, which knows these ops)
++  size_t ListOffset() const {
++    return DualListData.ListSize();
++  }
++  bool AccessesGuestMemorySince(size_t From);
++
+   /**
+    * @name IR allocation routines
+    *
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
-index dd0ddac..9fc2ccf 100644
+index dd0ddac..0957833 100644
 --- a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 +++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 @@ -192,6 +192,16 @@ namespace {
@@ -181,6 +348,43 @@ index dd0ddac..9fc2ccf 100644
          // An escalated instruction orders all its accesses; plain ops get barriers around them
          const bool Ordered_ = Site.Ordered || Escalated;
          const bool Fenced = Escalated && !Site.Ordered;
+@@ -301,4 +311,36 @@ namespace {
+ fextl::unique_ptr<Pass> CreateGuestViewPass(const Context::ContextImpl* CTX) {
+   return fextl::make_unique<GuestViewPass>(CTX);
+ }
++
++bool IREmitter::AccessesGuestMemorySince(size_t From) {
++  const uintptr_t ListBegin = DualListData.ListBegin();
++  const uintptr_t DataBegin = DualListData.DataBegin();
++  const auto OpOf = [&](OrderedNodeWrapper W) {
++    return W.GetNode(ListBegin)->Op(DataBegin);
++  };
++  for (size_t Offset = From; Offset + sizeof(OrderedNode) <= DualListData.ListSize(); Offset += sizeof(OrderedNode)) {
++    const auto* IROp = reinterpret_cast<Ref>(ListBegin + Offset)->Op(DataBegin);
++    switch (IROp->Op) {
++    case OP_PUSH:
++    case OP_POP:
++    case OP_PUSHTWO:
++    case OP_POPTWO:
++    case OP_MEMCPY:
++    case OP_MEMSET: return true;
++    default: break;
++    }
++    const auto Site = SiteOf(IROp->Op);
++    if (Site.Index < 0 || IROp->Args[Site.Index].IsInvalid()) {
++      continue;
++    }
++    // The x87 registers in the thread's context are no guest memory
++    const auto* A = OpOf(IROp->Args[Site.Index]);
++    if (A->Op == OP_FORMCONTEXTADDRESS ||
++        ((A->Op == OP_ADD || A->Op == OP_ADDSHIFT || A->Op == OP_SUB) && OpOf(A->Args[0])->Op == OP_FORMCONTEXTADDRESS)) {
++      continue;
++    }
++    return true;
++  }
++  return false;
++}
+ } // namespace FEXCore::IR
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
 index ddec229..c47887a 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
