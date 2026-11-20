@@ -1763,3 +1763,18 @@ holds the parent until the child has called execve or exited, whatever the child
 `tests/fork.c` has a vfork child that closes all its descriptors, works a while, and writes a flag before it exits;
 the parent must find the flag set. With 0.2.3's FEX that test fails, corrupts the output or hangs; with the fix the
 loop of Python subprocesses passed 20 times out of 20.
+## 41. A profile that does not take one run's accident for good (2026-11-20)
+
+The page protocol's profile records the code ranges that met shared memory, and every later run translates them
+ordered from the start. It only grew: a range in it never left again. Ubuntu's xz with 4 threads, 10 runs with one
+profile: 902 ranges after the first run, 923 after the second, then stable, but in another series the fourth run
+added 801 at once (that run, by its timing, shared pages the others did not), and every run from then on ordered
+those as well: 1.4 instead of 1.26 s.
+
+Now only the program's first run (which starts from nothing) puts its ranges into the profile at once. After it, a
+range that escalates goes into the profile as pending (`pend`, not applied at the start of the next run); it enters
+the profile when it escalates again in the next run that changes the profile, and is dropped otherwise. The profile
+counts those runs (`runs N`); a run that escalates nothing new does not write it. The same 10 runs: 902, then 19
+pending, then 921 (all 19 escalated again), 2 pending, 923, stable; times 1.24 to 1.33 s. A range that really
+meets shared memory now costs one more run of faults before it is ordered from the start; a run's accident costs
+one run.

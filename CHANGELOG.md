@@ -1,5 +1,12 @@
 # Changes
 
+## 0.3.1 (not released yet)
+
+- The page protocol's profile no longer takes one run's accident for good: after a program's first run, a code range
+  that met shared memory enters the profile only when it does so again in the next run that changes the profile
+  (notes section 41). One run of Ubuntu's xz with 4 threads had added 801 ranges that every later run then ordered
+  (1.4 instead of 1.26 s).
+
 ## 0.3.0 (2026-11-20)
 
 Programs as distributions ship them: `tso-arm learn` translates the hot functions of a program's shared libraries
