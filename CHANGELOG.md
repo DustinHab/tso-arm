@@ -1,31 +1,37 @@
 # Changes
 
-## Unreleased
+## 0.2.0 (2026-11-20)
 
-- `tso-arm learn` times the program with the translated functions and without, as `tso-arm run` runs it, and keeps
-  them only if they do not make it slower on this machine (on GitHub's Neoverse N2 zstd's translated functions,
-  ordered throughout, are slower than FEX's own code); `tso-arm status` tells which.
-- Where the kernel lets `ldapr` and `stlr` be unaligned within 16 bytes (FEAT_LSE2, as on the Neoverse N2), the
-  translated code uses them there instead of a barrier; `tso-arm check` shows whether it does.
-- The CI benchmark fails when a program's output is wrong (it went on before) and measures each newer core feature
-  against a build without it; `.github/workflows/profile.yml` profiles a workload on GitHub's Arm runner on demand.
-- Translated code tests for stack objects in host memory with one instruction instead of four (3 to 6 % shorter
-  libraries), and the escape analysis follows addresses through vector registers too.
-- `tso-arm learn` stops with the program's exit status when the program fails with the given arguments (it learned
-  nothing silently before).
-- `learn` works on programs as distributions build them: stripped (functions from the unwind information), with
-  frame pointers, cold parts split off by gcc, the stack protector and other thread-local storage, and calls of guest
-  functions whose stack arguments cannot be told. pigz, xz and zstd built that way translate fully.
-- Fixed: a tail call from translated code into guest code could overwrite the guest caller's return address when the
-  translated function had been entered from guest code that translated code had called.
-- `learn` also times the library with FEX's multiblock on and keeps that where it is faster.
-- Translated functions return rdx too (16-byte results such as Rust's slices), as a pair in two registers. This
-  changes the FEX patches: libraries carry the number of their interface and FEX ignores one of another (`learn`
-  translates it again), and `tso-arm` refuses an installed FEX built with other patches than its own
-  (`tso-arm install` updates it).
-- Programs of a distribution as a test (`tests/compat.sh`, on every push): sort, 7-Zip, Python, ffmpeg with x264 and
-  Node from x86-64 Ubuntu, with the same output in every mode, as fast as FEX's full TSO or faster, and message
-  passing in JavaScript that keeps x86's order.
+Programs as distributions ship them. `tso-arm learn` translates stripped programs built with frame pointers, the
+stack protector and gcc's split-off cold parts, keeps what it translated only where that makes the program faster
+on the machine at hand, and translated code returns 16-byte results right. Programs of x86-64 Ubuntu (sort, 7-Zip,
+Python, ffmpeg with x264, Node) are tested on every push: the same output in every mode, as fast as under FEX's full
+TSO or faster, and message passing between Node's threads that keeps x86's order. On the Raspberry Pi 5, with x86
+order kept: 82 % of native speed (pigz 90 %, xz 88 %, zstd 70 %).
+
+Install: download `tso-arm-0.2.0-linux-arm64.tar.gz`, unpack it and run `tso-arm-0.2.0/bin/tso-arm install`, or
+`bin/tso-arm install` in a clone. The FEX patches changed: `tso-arm` refuses an FEX installed for 0.1.0 until
+`tso-arm install` replaces it, and FEX does not use what `learn` translated with 0.1.0 (it says so; `learn`
+translates it again).
+
+- **Programs of a distribution** (`tests/compat.sh`, `tools/compat_rootfs.sh`): sort, 7-Zip, Python with threads,
+  ffmpeg with x264 and Node with worker threads from x86-64 Ubuntu, run with x86 order kept, with FEX's full TSO and
+  without ordering, outputs compared, on every push (`.github/workflows/compat.yml`).
+- **`learn` on such programs**: functions of stripped programs from the unwind information; frame pointers; cold
+  parts; thread-local storage (the stack protector's canary); calls of guest functions whose stack arguments cannot
+  be told. pigz, xz and zstd built the distributions' way translate fully.
+- **`learn` measures before it keeps**: the program as `tso-arm run` runs it, with the library, with it and FEX's
+  multiblock, and without; a slower library is not used (`tso-arm status` says so). It stops with the program's exit
+  status when the program fails with the given arguments.
+- **Fixed**: translated functions return rdx as well as rax (Rust's slices, C++'s pairs), as a pair in two
+  registers; libraries carry the number of their interface. A tail call from translated code into guest code could
+  overwrite the guest caller's return address when the function had been entered from guest code that translated
+  code had called. The escape analysis follows addresses through vector registers.
+- **Newer cores**: ordered accesses with an offset in the instruction (`ldapur`, `stlur`, FEAT_LRCPC2), and unaligned
+  `ldapr`/`stlr` within 16 bytes where the kernel allows them (FEAT_LSE2), each measured against a build without it
+  in the CI. The test for stack objects in host memory takes one instruction instead of four.
+- **CI**: the benchmark fails on a wrong output (it went on before); `.github/workflows/profile.yml` profiles a
+  workload on GitHub's Arm runner on demand, per guest function, translated against FEX's own code.
 
 ## 0.1.0 (2026-11-20)
 
