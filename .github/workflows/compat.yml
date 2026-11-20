@@ -1,0 +1,55 @@
+name: Compat
+
+# Programs of an x86-64 Linux distribution under tso-arm: an x86-64 runner packs them with their libraries
+# (tools/compat_rootfs.sh), an Arm runner runs them with x86 order kept, with FEX's full TSO and without ordering and
+# compares their outputs (tests/compat.sh), message passing between Node worker threads included.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  rootfs:
+    name: Programs from x86-64 Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q nodejs ffmpeg p7zip-full zstd
+      - name: Root file system
+        run: sh tools/compat_rootfs.sh compat-rootfs.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compat-rootfs-${{ github.sha }}
+          retention-days: 3
+          path: compat-rootfs.tar.zst
+
+  run:
+    name: Run on an Arm runner
+    needs: rootfs
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd
+      - name: FEX with the tso-arm patches (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+      - name: Build FEX
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: bin/tso-arm install --generic
+      - uses: actions/download-artifact@v4
+        with:
+          name: compat-rootfs-${{ github.sha }}
+      - name: Programs under tso-arm
+        run: |
+          sh tests/compat.sh compat-rootfs.tar.zst
+          cat build/compat/compat.md >>"$GITHUB_STEP_SUMMARY"

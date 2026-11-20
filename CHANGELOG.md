@@ -13,6 +13,9 @@
   libraries), and the escape analysis follows addresses through vector registers too.
 - `tso-arm learn` stops with the program's exit status when the program fails with the given arguments (it learned
   nothing silently before).
+- Programs of a distribution as a test (`tests/compat.sh`, on every push): sort, 7-Zip, Python, ffmpeg with x264 and
+  Node from x86-64 Ubuntu, with the same output in every mode, as fast as FEX's full TSO or faster, and message
+  passing in JavaScript that keeps x86's order.
 
 ## 0.1.0 (2026-11-20)
 

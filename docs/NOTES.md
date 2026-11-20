@@ -1414,3 +1414,34 @@ pointers) lost its taint, and a store of it to guest memory would not have count
 address where guest code could find it. Vector registers carry the taint now. For pigz, xz and zstd the translated C
 comes out the same to the byte (`lift.py`'s classification of every function unchanged); it matters for programs
 that do this.
+
+## 35. Programs of a distribution (2026-11-20)
+
+pigz, xz and zstd say little about programs with JIT compilers, hand-written SIMD, thread pools and interpreters.
+`tools/compat_rootfs.sh` takes programs from an x86-64 machine (here WSL with Ubuntu 26.04: glibc 2.43, Python
+3.14, Node 22, ffmpeg with libx264, 7-Zip 26, the Rust coreutils' sort) with every library `ldd` names for them and
+for Python's extension modules, the dynamic loader, Python's standard library, the files they load themselves that
+`ldd` does not show (7-Zip's codecs in `7z.so` beside its binary, the JavaScript Ubuntu's Node keeps outside
+`libnode`, found as paths in its strings), symbolic links resolved; 226 paths, 419 MB, 144 MB packed. Nothing is
+installed. `tests/compat.sh` unpacks it on the Arm machine, sets `FEX_ROOTFS` and runs each program with x86 order
+kept, with FEX's full TSO and without ordering, outputs compared (`--here` runs them twice natively on the x86
+machine: all outputs fixed there). The work: sort of 2 million lines with `--parallel=4`, 7-Zip compressing 64 MB
+to xz with 4 threads (at `-mx=5` that input became one block and one thread), 16 Python threads hashing (hashlib
+leaves the interpreter lock) and a producer/consumer queue, ffmpeg encoding 4 s of `testsrc2` with x264 on 4 threads
+(the md5 of its packets), and Node: 4 worker threads summing over a SharedArrayBuffer, then message passing through
+one with plain stores (`a[0] = i; a[256] = i` in the worker, `Atomics.load` of the flag and a plain load of the data
+in the main thread, a message wrong when the data is older than the flag).
+
+On the Pi 5 (best of 3, default clock) everything is in the README; in short: the outputs agree in all modes; tso-arm
+is as fast as FEX's full TSO or faster (sort 2092 against 2838 ms, Node 8183 against 8682 ms, the others within 4 %),
+and the messages: 0 wrong with tso-arm, 0 with FEX's full TSO, 113,884 of 3 million without ordering. So tso-arm keeps
+x86's order in code that V8 compiles at run time as well: those pages are shared between the worker and the main
+thread, the protocol orders them.
+
+The first run of each program is slower under tso-arm (ffmpeg 5.8 s against 2.9 s): the page protocol learns which
+pages the threads share and keeps that for the next run (section 12). Things found on the way, in the tests
+themselves: 7-Zip's codecs and Node's externalized builtins missing from the first root file system, and the script
+first running the x86 programs without FEX.
+
+`.github/workflows/compat.yml` does the same on every push: an x86-64 runner packs the programs of its Ubuntu 24.04
+(Node 18, ffmpeg 6, p7zip 16, GNU sort), an Arm runner runs them.

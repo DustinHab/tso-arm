@@ -145,6 +145,21 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   tests run with the patches on FEX's newest commit (`.github/workflows/upstream.yml`); on demand,
   `.github/workflows/profile.yml` profiles a workload there (`tests/ci_profile.sh`: per guest function, translated
   against FEX's own code).
+- **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes section 35): sort,
+  7-Zip, Python with threads, ffmpeg with x264 and Node with worker threads from x86-64 Ubuntu, packed with their
+  libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock):
+
+  | | tso-arm | FEX, full TSO | FEX, no ordering | output |
+  |---|---|---|---|---|
+  | sort, 4 threads | 2092 ms | 2838 ms | 1843 ms | the same |
+  | 7-Zip, xz with 4 threads | 3388 ms | 3507 ms | 3432 ms | the same |
+  | Python, threads | 2897 ms | 2885 ms | 2156 ms | the same |
+  | ffmpeg, x264 with 4 threads | 2938 ms | 2960 ms | 2240 ms | the same |
+  | Node, worker threads | 8183 ms | 8682 ms | 7013 ms | the same |
+  | Node, messages seen before their data | 0 | 0 | 113,884 | |
+
+  The last row is message passing in JavaScript through a SharedArrayBuffer with plain stores: V8 compiles it to
+  x86 code at run time, and only x86 order keeps the reader from seeing the flag before the data.
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).
@@ -189,7 +204,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tools/package.sh`, `tools/release_notes.sh`, `.github/workflows/release.yml` | the release packages (FEX prebuilt for any Armv8.0 core) and their notes from `CHANGELOG.md` |
 | `aot/` | translation of hot x86-64 functions to C ahead of time (`lift.py`, chosen by `auto.py`; the lists in `aot/lists/`) |
 | `litmus/` | x86-64 litmus tests that detect reordering |
-| `tests/` | correctness tests: CI, corner cases of the views, more threads than views, cores without `ldapr`, emulated cores |
+| `tests/` | correctness tests: CI, corner cases of the views, more threads than views, cores without `ldapr`, emulated cores, programs of a distribution |
 | `bench/` | microbenchmarks of ordered accesses, workload and efficiency runs, Box64 |
 | `tools/` | board check, sync and run scripts for the test machine |
 | `docs/NOTES.md` | measurements, decisions and findings in order |
