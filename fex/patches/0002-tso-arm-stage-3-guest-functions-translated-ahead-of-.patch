@@ -1,4 +1,4 @@
-From 08c36952d021e10009ff78b39999d2e0131ac302 Mon Sep 17 00:00:00 2001
+From e9c0ff5d2db81bd72077481e9864ff254ae6cf8b Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -18,12 +18,12 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  13 +
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  21 +
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  45 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 698 ++++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 702 ++++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  65 +-
  .../LinuxSyscalls/ThreadManager.cpp           |  17 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 544 ++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  18 +
- 19 files changed, 1451 insertions(+), 88 deletions(-)
+ 19 files changed, 1455 insertions(+), 88 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..0e2e8c9 100644
@@ -516,7 +516,7 @@ index 41aba2d..482bbe0 100644
        }
        break;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d..488cd32 100644
+index 76be33d..0cecd22 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -30,7 +30,9 @@ $end_info$
@@ -966,7 +966,7 @@ index 76be33d..488cd32 100644
      }
    }
  
-@@ -844,17 +966,372 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -844,17 +966,376 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
    const int S = Base / Window;
    const uint16_t Bit = uint16_t(1U << S);
    VLOG("tso-arm: detach slot %d\n", S);
@@ -1297,6 +1297,9 @@ index 76be33d..488cd32 100644
 +  if (IsOwnerSlot(Me)) {
 +    SlotUsers[Me] = 1;
 +  }
++  // The profile so far is the parent's to write; the child writes it only if it learns something itself (a shell's
++  // children would otherwise rewrite it at every exit)
++  ProfileChanged = false;
 +
 +  // A single thread: every private page is its own (plain accesses), unless the process runs fully ordered
 +  const bool Own = IsOwnerSlot(Me) && SlotUsed[Me] && !FallbackActive.load() && !Stage1();
@@ -1310,10 +1313,11 @@ index 76be33d..488cd32 100644
 +      SetState(Start, R.End, uint8_t(Me));
 +    }
 +    if (!(R.Prot & PROT_WRITE)) {
-+      // Unchanged in both processes until one makes it writable
++      // Unchanged in both processes until one makes it writable. Without any rights (reservations, guard pages) the
++      // views have none either, whatever the page states say.
 +      R.ForkShared = true;
 +      ++Shared;
-+      if (Own) {
++      if (Own && (R.Prot & PROT_READ)) {
 +        Apply(Start, R.End);
 +      }
 +      continue;
@@ -1343,7 +1347,7 @@ index 76be33d..488cd32 100644
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1339,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1343,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -1352,7 +1356,7 @@ index 76be33d..488cd32 100644
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -878,6 +1355,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -878,6 +1359,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    ProfileChanged = true;
  }
  
@@ -1385,7 +1389,7 @@ index 76be33d..488cd32 100644
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +1403,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +1407,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -1401,7 +1405,7 @@ index 76be33d..488cd32 100644
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,6 +1420,16 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,6 +1424,16 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -1418,7 +1422,7 @@ index 76be33d..488cd32 100644
        LastChange[P] = Now; // a page that is really shared comes back quickly and is caught by MayMigrate
        ++Moved;
      }
-@@ -933,9 +1455,22 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -933,9 +1459,22 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const int View = FaultAddress / Window;
    const bool Ordered = View >= Slots;
    if (View >= 2 * Slots || Slot == 0 || (Ordered ? View - Slots : View) != Slot) {
@@ -1441,7 +1445,7 @@ index 76be33d..488cd32 100644
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,6 +1481,24 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,6 +1485,24 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -1466,7 +1470,7 @@ index 76be33d..488cd32 100644
    // The same address faulting over and over means the protocol is stuck: hand it to the normal fault path
    // (an atomic reported as a read first becomes shared read-only, then faults again as a write and is upgraded)
    if (LastFault == FaultAddress) {
-@@ -1069,6 +1622,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1069,6 +1626,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        EnterFallback(Now - StartNs);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -1474,7 +1478,7 @@ index 76be33d..488cd32 100644
        }
        return Result;
      }
-@@ -1088,6 +1642,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +1646,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -1482,7 +1486,7 @@ index 76be33d..488cd32 100644
        }
        return Result;
      }
-@@ -1098,10 +1653,13 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1098,10 +1657,13 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      ++Count.Stale;
      Protect(FaultAddress & ~PageMask, 1ULL << PageShift, ViewProt(St, Mask, Slot, Ordered, GP));
    } else {

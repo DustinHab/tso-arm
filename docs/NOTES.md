@@ -1649,8 +1649,12 @@ What FEX does now (`TSOViewMemory::AfterForkChild`, `AfterForkParent`, `Unshare`
 `tests/fork.c` checks that the child sees what the parent wrote before the fork and keeps its own writes, with and
 without other threads running (the child starts a thread of its own as well), that memory mapped shared stays
 shared, that read-only memory made writable after the fork stays separate on either side, vfork, and the time per
-fork. On the Pi: 3.7 to 3.9 ms per fork and wait under tso-arm against 1.8 ms under FEX's full ordering; the child
-of the test copies 76 KB in 8 ranges in about 1 ms, and one with a 4 MB heap buffer 4.1 MB in 3.7 ms. A program
+fork. On the Pi: 2.8 ms per fork and wait under tso-arm against 1.8 ms under FEX's full ordering; the child of the
+test copies 76 KB in 8 ranges in about 1 ms, and one with a 4 MB heap buffer 4.1 MB in 3.7 ms. The first version
+took 3.7 ms: `strace -c` showed every child rewriting the parent's profile at its exit (the parent's unsaved changes
+came along; the child now writes only what it learns itself), and the child recomputing the views' rights of a
+128 MB reservation without any rights, page by page. What remains is mostly the child's first touch of its new
+pages, in guest memory and in its views, where a fork's copy-on-write keeps the parent's page tables. A program
 with a large heap pays for its size at every fork, also one followed by execve (the kernel's copy-on-write costs
 nothing until a page is written); vfork and `posix_spawn` cost nothing extra.
 

@@ -13,7 +13,8 @@ Shells and programs with signal handlers. The FEX patch changed, so this release
   stacks and heaps and one of them crashed. The child gets its own copy of the writable memory now, made while the
   parent waits; read-only memory stays shared until either side makes it writable, memory the program mapped shared
   stays shared, and a vfork child runs on its parent's memory as the program asked (so `posix_spawn` of a missing
-  program reports the error). A fork costs about 2 ms more on the Pi, plus the copy of a large heap.
+  program reports the error). A fork costs about 1 ms more on the Pi (2.8 against 1.8 ms), plus the copy of a large
+  heap.
 - Fixed: x87 arithmetic (`long double`) could crash under the page protocol (Ubuntu's `seq`): FEX's accesses to the
   x87 registers in the thread's context went through the views.
 - `tests/fork.c`, `tests/signals.c` and `tests/x87.c` run in the CI; `tests/rootfs_check.sh` compares 25 everyday
