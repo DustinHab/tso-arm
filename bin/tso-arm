@@ -158,7 +158,7 @@ cmd_run() {
     [ $# -ge 1 ] || die "run: which program?"
     prog=$1
     shift
-    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $1"
+    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $prog"
     k=$(kind "$prog")
     [ "$k" = other ] && die "$prog is not an x86-64 Linux program"
     if [ "$k" = dynamic ] && [ -z "$FEX_ROOTFS" ] && ! grep -qs '"RootFS"' "$HOME/.fex-emu/Config.json"; then

@@ -7,6 +7,9 @@ set -e
 [ $# = 1 ] || { echo "usage: tools/compat_rootfs.sh OUT.tar.zst" >&2; exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo "run this on an x86-64 machine" >&2; exit 1; }
 out=$(readlink -f "$1")
+# the distribution's programs, not others the machine may have in /usr/local or /opt (GitHub's runners bring Node)
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 list=$T/files

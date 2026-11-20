@@ -39,7 +39,8 @@ sevenzip=$(sed -n 's/^exec "\{0,1\}\(\/[^" ]*\).*/\1/p' ${root:-}/usr/bin/7z 2>/
 # inputs, made the same way on any machine
 [ -f $W/lines.txt ] || awk 'BEGIN { s = 12345; for (i = 0; i < 2000000; i++) { s = (s * 1103515245 + 12345) % 2147483648
     printf "%08x %d line %d\n", s, s % 1000, i } }' >$W/lines.txt
-[ -f $W/corpus.bin ] || { cat $W/lines.txt; head -c 33554432 $W/lines.txt | od -An -tx1; } | head -c 67108864 >$W/corpus.bin
+[ -f $W/corpus.bin ] || { cat $W/lines.txt; head -c 33554432 $W/lines.txt | od -An -tx1; } 2>/dev/null |
+    head -c 67108864 >$W/corpus.bin
 cat >$W/threads.py <<'EOF'
 import hashlib, queue, threading
 data = bytes(range(256)) * 16384

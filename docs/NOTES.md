@@ -1444,4 +1444,28 @@ themselves: 7-Zip's codecs and Node's externalized builtins missing from the fir
 first running the x86 programs without FEX.
 
 `.github/workflows/compat.yml` does the same on every push: an x86-64 runner packs the programs of its Ubuntu 24.04
-(Node 18, ffmpeg 6, p7zip 16, GNU sort), an Arm runner runs them.
+(Node 18, ffmpeg 6, p7zip 16, GNU sort), an Arm runner runs them. The programs come from `/usr/bin` only: GitHub's
+image has a Node of its own in `/usr/local/bin`, which the first run packed instead.
+
+**First runs and the fallback.** ffmpeg's first run (`tso-arm run --stats`): 4884 faults handled in 0.70 s, 3888
+escalations, each throwing away translated code that FEX compiles again (7721 block compiles in 5.4 s over all
+threads: x264's hand-written SIMD makes large blocks), fallback to full ordering only after 3.6 s, since the faults
+came at about 1350 per second, under the budget of 5000. First runs of everything (`TSO_VIEWS_PROFILE=none`, one run
+each, default clock), with the budget and window that the knobs allow:
+
+| first run | FEX full TSO | 5000/s over 1000 faults (default) | 2000/s | 1000/s | 1000/s over 300 faults |
+|---|---|---|---|---|---|
+| pigz | 1302 ms | 1135 ms | 1092 ms | 1100 ms | 1073 ms (falls back at 1.05 s) |
+| xz | 1233 ms | 1330 ms | 1281 ms | 1340 ms | 1281 ms |
+| zstd | 692 ms | 798 ms (0.36 s) | 815 ms | 827 ms | 812 ms |
+| sort | 2052 ms | 2305 ms (0.57 s) | 2270 ms | 2263 ms | 2264 ms |
+| 7-Zip | 3379 ms | 3485 ms (3.45 s) | 3431 ms | 3503 ms | 3477 ms |
+| Python | 2928 ms | 3218 ms (0.64 s) | 3289 ms | 3255 ms | 3150 ms |
+| ffmpeg | 2949 ms | 5679 ms (3.58 s) | 4411 ms | 4363 ms | 3993 ms (1.74 s) |
+| Node | 8549 ms | 7955 ms (0.51 s) | 9289 ms | 8183 ms | 9014 ms |
+
+A tighter budget gives ffmpeg's first run back 1.7 s but makes pigz fall back near its end, which on a longer
+input would leave most of it at full ordering (60 instead of 90 %); escalations per second do not tell the two apart
+either (pigz about 1800, ffmpeg about 1100). Left as it was: the profile keeps the fallback, and from the second run
+on ffmpeg is as fast as under FEX's full TSO (2964 and 2937 ms). A rule by cost (the time recompiling code thrown
+away, against the time run) would tell them apart; open.
