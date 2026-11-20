@@ -28,6 +28,8 @@ import sys
 import tempfile
 import time
 
+import elfsyms  # aot/elfsyms.py, beside this file
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIFT = os.path.join(ROOT, "aot", "lift.py")
 # FEX with the tso-arm patches (TSO_ARM_FEX, as `tso-arm learn` sets it); it also names its blocks for perf
@@ -41,12 +43,9 @@ def run(cmd, env=None, timeout=None):
 
 
 def symbols(binary):
-    """(address, lift.py name) of the text symbols, sorted; a name that occurs more than once gets @address"""
-    syms = []
-    for line in run(["nm", "-n", binary]).stdout.splitlines():
-        p = line.split()
-        if len(p) == 3 and p[1] in "tTwW":
-            syms.append((int(p[0], 16), p[2]))
+    """(address, lift.py name) of the functions, sorted (aot/elfsyms.py: the symbol table, or a stripped program's
+    unwind information); a name that occurs more than once gets @address"""
+    syms = [(a, n) for a, _, n in elfsyms.functions(binary)]
     counts = collections.Counter(n for _, n in syms)
     return [(a, n if counts[n] == 1 else f"{n}@{a:x}") for a, n in syms]
 

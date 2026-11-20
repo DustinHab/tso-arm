@@ -27,6 +27,8 @@ import sys
 import capstone
 from capstone import x86 as X
 
+import elfsyms  # aot/elfsyms.py, beside this file
+
 M64 = (1 << 64) - 1
 T = {8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint64_t", 128: "u128"}
 S = {8: "int8_t", 16: "int16_t", 32: "int32_t", 64: "int64_t"}
@@ -57,11 +59,10 @@ class Elf:
         self.relocs = self.relocated_slots()
         self.syms = {}
         self.all = {}  # name -> every (address, size): static functions of different files may share a name
-        for line in subprocess.run(["nm", "-S", path], capture_output=True, text=True).stdout.splitlines():
-            p = line.split()
-            if len(p) == 4 and p[2] in "tTwW":
-                self.syms[p[3]] = (int(p[0], 16), int(p[1], 16))
-                self.all.setdefault(p[3], []).append((int(p[0], 16), int(p[1], 16)))
+        # from the symbol table, or from the unwind information of a stripped program (aot/elfsyms.py)
+        for a, size, name in elfsyms.functions(path):
+            self.syms[name] = (a, size)
+            self.all.setdefault(name, []).append((a, size))
 
     def lookup(self, spec):
         # NAME, or NAME@ADDRESS for a name several functions share
