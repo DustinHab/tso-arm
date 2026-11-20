@@ -115,6 +115,9 @@ faster than with full ordering.
   ordered one.
 - **Fallback:** a program whose threads hand data back and forth constantly (zstd) or uses more threads at once than
   the address space has views for (15 on a 39-bit kernel) goes on with full ordering, as fast as FEX's own.
+- **Compile units** (notes section 43): FEX compiles from each place a function is entered everything reachable
+  from there; tso-arm limits that to 150 instructions (`FEX_MAXINST`), so programs with large functions entered at
+  many points (ffmpeg, Node) no longer compile the same code again and again.
 
 ## Efficiency
 
