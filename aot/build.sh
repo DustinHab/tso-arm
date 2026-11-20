@@ -32,5 +32,11 @@ if grep -qw lrcpc /proc/cpuinfo && [ -z "$AOT_NORCPC" ]; then
 else
     march=armv8-a
 fi
+# AOT_U16 where ldapr and stlr may be unaligned within 16 bytes here (FEAT_LSE2 and the kernel allowing it): those
+# need no barrier then. AOT_NOU16=1 leaves it out, for comparing
+if [ -z "$AOT_NOU16" ] && clang -O1 -march=$march -o "$rt/probe" "$dir/unaligned_probe.c" 2>/dev/null &&
+    "$rt/probe" >/dev/null 2>&1; then
+    features="$features -DAOT_U16=1"
+fi
 clang ${CFLAGS:--O2} -march=$march $features -fPIC -shared -I"$dir" -fno-strict-aliasing -Wno-unused-label \
     -Wno-unused-variable -Wno-unused-but-set-variable -o "$out" "$in" "$rt/aot-rt.c"

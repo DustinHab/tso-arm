@@ -22,6 +22,20 @@ has() { echo "$f" | grep -qw "$1" && echo yes || echo no; }
 say "FEAT_LRCPC (ldapr)" "$(has lrcpc) (no: ldar instead, slower)"
 say "FEAT_LRCPC2 (ldapur)" "$(has ilrcpc) (yes: translated code orders accesses with an offset in one instruction)"
 say "FEAT_LSE2 (unaligned atomics)" "$(has uscat)"
+if command -v clang >/dev/null; then
+    d=$(mktemp -d)
+    m=armv8-a
+    [ "$(has lrcpc)" = yes ] && m=armv8.2-a+rcpc
+    if clang -O1 -march=$m -o "$d/probe" aot/unaligned_probe.c 2>/dev/null; then
+        case $("$d/probe" | sed -n 's/^within16 //p') in
+        yes) r="allowed within 16 bytes (translated code needs no barrier for them)" ;;
+        no) r="fault (translated code puts a barrier after them instead)" ;;
+        *) r="unknown" ;;
+        esac
+        say "unaligned ldapr, stlr" "$r"
+    fi
+    rm -rf "$d"
+fi
 say "FEAT_LSE (atomics)" "$(has atomics)"
 command -v readelf >/dev/null && say "readelf" "found" || bad "readelf" "missing (binutils)"
 gv=$(getconf GNU_LIBC_VERSION 2>/dev/null | sed 's/^glibc //')

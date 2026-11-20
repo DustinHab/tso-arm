@@ -1946,6 +1946,39 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
 #ifndef AOT_WORDS
 #define AOT_WORDS 0 // unaligned loads of this many bytes and more read the covering aligned words with ldapr
 #endif
+// AOT_U16: the machine lets ldapr and stlr be unaligned within 16 bytes (FEAT_LSE2 with SCTLR_EL1.nAA set by the
+// kernel; aot/build.sh asks aot/unaligned_probe.c), so those take no barrier either; across 16 bytes they still do
+#ifndef AOT_U16
+#define AOT_U16 0
+#endif
+#ifdef __ARM_FEATURE_RCPC
+#define AOT_LDA "ldapr"
+#else
+#define AOT_LDA "ldar"
+#endif
+static inline uint8_t uld8(uint8_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static inline uint16_t uld16(uint8_t *p)
+{
+    uint32_t v;
+    __asm__ volatile(AOT_LDA "h %w0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    return (uint16_t)v;
+}
+static inline uint32_t uld32(uint8_t *p)
+{
+    uint32_t v;
+    __asm__ volatile(AOT_LDA " %w0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    return v;
+}
+static inline uint64_t uld64(uint8_t *p)
+{
+    uint64_t v;
+    __asm__ volatile(AOT_LDA " %x0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    return v;
+}
+static inline void ust8(uint8_t *p, uint8_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+static inline void ust16(uint8_t *p, uint16_t v) { __asm__ volatile("stlrh %w0, [%1]" ::"r"((uint32_t)v), "r"(p) : "memory"); }
+static inline void ust32(uint8_t *p, uint32_t v) { __asm__ volatile("stlr %w0, [%1]" ::"r"(v), "r"(p) : "memory"); }
+static inline void ust64(uint8_t *p, uint64_t v) { __asm__ volatile("stlr %x0, [%1]" ::"r"(v), "r"(p) : "memory"); }
 #define ORDERED(bits, T)                                                                                               \
     static inline T old##bits(uint8_t *O, uint8_t *V, uint64_t a)                                                      \
     {                                                                                                                  \
@@ -1953,6 +1986,8 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
             return *(volatile T##u *)(V + a);                                                                          \
         if (__builtin_expect((a & (bits / 8 - 1)) == 0, 1))                                                            \
             return __atomic_load_n((T *)(O + a), __ATOMIC_ACQUIRE);                                                    \
+        if (AOT_U16 && (a & 15) + bits / 8 <= 16)                                                                      \
+            return uld##bits(O + a);                                                                                   \
         if (AOT_WORDS && bits / 8 >= AOT_WORDS) {                                                                      \
             const uint64_t lo = a & ~7ULL;                                                                             \
             const unsigned sh = (unsigned)(a & 7) * 8;                                                                 \
@@ -1974,6 +2009,10 @@ static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
         }                                                                                                              \
         if (__builtin_expect((a & (bits / 8 - 1)) == 0, 1)) {                                                          \
             __atomic_store_n((T *)(O + a), v, __ATOMIC_RELEASE);                                                       \
+            return;                                                                                                    \
+        }                                                                                                              \
+        if (AOT_U16 && (a & 15) + bits / 8 <= 16) {                                                                    \
+            ust##bits(O + a, v);                                                                                       \
             return;                                                                                                    \
         }                                                                                                              \
         __asm__ volatile("dmb ish" ::: "memory");                                                                      \

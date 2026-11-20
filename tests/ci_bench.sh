@@ -98,29 +98,49 @@ model=$(lscpu | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
     for w in pigz xz zstd; do
         echo "- $w: $(grep -E '^(profile|chosen):' $R/build/ci-learn-$w.log | tr '\n' ' ')"
     done
-    # on FEAT_LRCPC2 cores: the same translated code with the offsets in the ordered accesses (LDAPUR, STLUR) and
-    # without (an ADD before LDAPR, STLR), in alternating rounds on this machine
-    if grep -qw ilrcpc /proc/cpuinfo; then
+    # what newer cores' features bring to the translated code: the learned library as built here against the same
+    # code built without one of them, in alternating rounds on this machine. NOIMMO: offsets in the ordered accesses
+    # (ldapur, stlur; FEAT_LRCPC2). NOU16: unaligned ldapr and stlr within 16 bytes (FEAT_LSE2, if the kernel allows)
+    sw=""
+    grep -qw ilrcpc /proc/cpuinfo && sw="$sw NOIMMO"
+    clang -O1 -march=armv8.2-a+rcpc -o $R/build/ci-probe $R/aot/unaligned_probe.c 2>/dev/null &&
+        $R/build/ci-probe >/dev/null 2>&1 && sw="$sw NOU16"
+    if [ -n "$sw" ]; then
         echo
-        echo "Ordered accesses with the offset in the instruction (\`ldapur\`, \`stlur\`) against without, x86 order kept,"
-        echo "the same translated code built both ways, alternating rounds:"
+        echo "The learned code as built here against built without one of this core's features, x86 order kept,"
+        echo "alternating rounds (offsets: \`ldapur\`, \`stlur\`; unaligned: \`ldapr\`, \`stlr\` within 16 bytes):"
         echo
-        echo "| | with | without |"
-        echo "|---|---|---|"
+        h="| | as built |" l="|---|---|"
+        for s in $sw; do
+            case $s in NOIMMO) h="$h without offsets |" ;; NOU16) h="$h without unaligned |" ;; esac
+            l="$l---|"
+        done
+        echo "$h"
+        echo "$l"
         A=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/aot
         for w in pigz xz zstd; do
             c=$(ls $A/$w-*.c | head -n 1)
-            AOT_NOIMMO=1 sh $R/aot/build.sh $c $R/build/ci-noimmo-$w.so
+            for s in $sw; do
+                env AOT_$s=1 sh $R/aot/build.sh $c $R/build/ci-$s-$w.so
+                eval "b_$s="
+            done
             want=$($N/$w $(args_of $w) | md5sum | cut -c1-32)
             eval "n=\$native_$w"
-            a="" b=""
+            a=""
             for i in $(seq $rounds); do
                 t=$(once $T run $X/$w $(args_of $w))
                 a=$(lower "$a" "$t")
-                t=$(once $T run --aot $R/build/ci-noimmo-$w.so $X/$w $(args_of $w))
-                b=$(lower "$b" "$t")
+                for s in $sw; do
+                    t=$(once $T run --aot $R/build/ci-$s-$w.so $X/$w $(args_of $w))
+                    eval "b_$s=\$(lower \"\$b_$s\" $t)"
+                done
             done
-            echo "| $w | $((100 * n / a)) % | $((100 * n / b)) % |"
+            row="| $w | $((100 * n / a)) % |"
+            for s in $sw; do
+                eval "b=\$b_$s"
+                row="$row $((100 * n / b)) % |"
+            done
+            echo "$row"
         done
     fi
 } >$R/build/ci-bench.md # into a file, not through a pipe: a wrong output has to stop the script, not one side of a pipe
