@@ -18,7 +18,7 @@ xz and zstd; the full table is below):
 | | efficiency |
 |---|---|
 | **tso-arm**, with functions translated ahead of time | **82 %** (pigz 90 %, xz 88 %, zstd 70 %) |
-| tso-arm, page protocol alone | 72 % |
+| tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
 
