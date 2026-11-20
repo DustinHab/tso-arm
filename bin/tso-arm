@@ -35,7 +35,8 @@ usage: tso-arm COMMAND [...]
         of this release (from its package, or fetched from GitHub), otherwise built from source.
         --source: built from source for this machine's core; --generic: from source for any Armv8.0 core
   uninstall [--all]     remove FEX and the command again (--all: what 'learn' translated as well)
-  rootfs                fetch an x86-64 root file system for dynamically linked programs (FEX's own tool)
+  rootfs [OPTIONS]      fetch an x86-64 root file system for dynamically linked programs with FEX's own tool:
+        without options Ubuntu 24.04, unpacked (about 2 GB); with options the tool's own (rootfs --help)
   binfmt [register | unregister]
         whether x86-64 programs started directly (./program) run through tso-arm; register and unregister change
         that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
@@ -330,6 +331,9 @@ cmd_rootfs() {
     F=$(fex)
     fetcher="$(dirname "$F")/FEXRootFSFetcher"
     [ -x "$fetcher" ] || die "FEXRootFSFetcher not found next to $F"
+    # without options: Ubuntu 24.04, unpacked, without questions (what tso-arm is tested with); with options, the
+    # fetcher's own (--help)
+    [ $# -gt 0 ] || set -- -y -x --distro-name=ubuntu --distro-version=24.04
     exec "$fetcher" "$@"
 }
 

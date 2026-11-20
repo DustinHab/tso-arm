@@ -31,6 +31,7 @@ kernel):
 git clone https://github.com/DustinHab/tso-arm && cd tso-arm
 bin/tso-arm install                     # FEX with the tso-arm patches, prebuilt: a few seconds
 bin/tso-arm check                       # whether this machine can run it
+bin/tso-arm rootfs                      # once, for dynamically linked programs: x86-64 Ubuntu from FEX's server
 bin/tso-arm run ./program args...       # an x86-64 Linux program, x86 memory order kept
 bin/tso-arm learn ./program args...     # optional: translate its hot functions ahead of time
 ```
@@ -49,10 +50,15 @@ about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md
 `learn` runs the program a few times with the given arguments (profile, then a check of the translated functions
 against a run without them, then both timed against each other), so give it an input whose processing has no side
 effects. Afterwards every `tso-arm run` of that program uses the translated functions, unless they made it slower
-on this machine; `tso-arm status` and `tso-arm forget` show and drop what was learned. Dynamically linked programs need an x86-64 root file system (`tso-arm rootfs`, FEX's own tool);
-`learn` translates their own functions, those of their libraries stay with FEX. Built the way distributions build
-programs (position-independent, linked dynamically), pigz reaches 82 % and xz 85 % with what `learn` translated
-(notes section 29).
+on this machine; `tso-arm status` and `tso-arm forget` show and drop what was learned.
+
+Dynamically linked programs need an x86-64 root file system: `tso-arm rootfs` fetches Ubuntu 24.04 with FEX's own
+tool (unpacked, about 2 GB, 95 s on a Pi 5), or `FEX_ROOTFS` names a directory with the x86-64 libraries. `learn` translates such a
+program's own functions; those of its libraries stay with FEX. It takes programs as distributions ship them, stripped
+and built with frame pointers and the stack protector; built that way, pigz reaches 82 % and xz 85 % with what
+`learn` translated (notes sections 29 and 36). Where little of a program's time is in its own code, or its code calls
+back and forth across the border to FEX all the time (an interpreter's loop, closures), `learn` finds the translation
+slower and leaves it out (notes section 38).
 
 pigz as distributions build it, on the Pi 5 (a 100 MB file, default clock; wall times as comments, output shortened,
 `tools/readme_demo.sh`):
@@ -194,7 +200,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm check` | the machine's requirements |
 | `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
-| `tso-arm rootfs` | an x86-64 root file system for dynamically linked programs |
+| `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
 | `tso-arm binfmt [register \| unregister]` | x86-64 programs started directly (`./program`) run through tso-arm; register and unregister need root |
 | `tso-arm version` | the version, and the FEX it uses |
 
