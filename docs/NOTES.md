@@ -1580,3 +1580,16 @@ out again). Python's eval loop stays with FEX (computed gotos) and calls its sma
 time; sort's translated functions call back into FEX for each comparison (Rust closures through pointers). Making
 these crossings cheap would take FEX's JIT calling translated code directly, or translating whole call graphs with
 their indirect targets; `learn` already keeps such libraries out.
+
+**Started directly** (`tso-arm binfmt`): `sudo tso-arm binfmt register` registers `bin/tso-arm-binfmt` with
+binfmt_misc for x86-64 executables and position-independent ones (qemu-user's magic and mask) and in
+`/etc/binfmt.d`; the interpreter hands the program to `tso-arm run`. The CI registers it on its runner, starts an
+x86-64 test program directly and checks that it no longer starts once unregistered.
+
+**`tso-arm rootfs` as a user meets it**, in a HOME of its own on the Pi: FEX's fetcher took 95 s for Ubuntu 24.04 from
+FEX's server (1.9 GB extracted) and set it as FEX's root file system, in `~/.config/fex-emu/Config.json`. `tso-arm`
+looked for that setting in `~/.fex-emu/Config.json` only, where FEX keeps it just when that directory exists, and so
+refused every dynamically linked program right after `tso-arm rootfs` had fetched one. It reads it where FEX does now
+(`FEX_APP_CONFIG_LOCATION`, else `~/.fex-emu` if it exists, else `$XDG_CONFIG_HOME/fex-emu`, and the installed FEX's own
+configuration). Then x86-64 `bash`, `python3` and `sort` of that root file system ran, and `sort --parallel=4` of 2
+million lines gave the same output as the Arm `sort`.

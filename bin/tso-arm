@@ -82,6 +82,21 @@ cmd_uninstall() {
     fi
 }
 
+# Whether FEX has an x86-64 root file system for dynamically linked programs: FEX_ROOTFS, or "RootFS" in its
+# configuration, which it reads where FEX does (Source/Common/Config.cpp): FEX_APP_CONFIG_LOCATION, else ~/.fex-emu
+# if that exists, else $XDG_CONFIG_HOME/fex-emu (~/.config/fex-emu); or in the configuration of the FEX installed
+has_rootfs() {
+    [ -n "$FEX_ROOTFS" ] && return 0
+    if [ -n "$FEX_APP_CONFIG_LOCATION" ]; then
+        c=$FEX_APP_CONFIG_LOCATION
+    elif [ -d "$HOME/.fex-emu" ]; then
+        c=$HOME/.fex-emu/
+    else
+        c=${XDG_CONFIG_HOME:-$HOME/.config}/fex-emu/
+    fi
+    grep -qs '"RootFS"' "${c%/}/Config.json" "$PREFIX/share/fex-emu/Config.json"
+}
+
 # binfmt_misc: x86-64 ELF files, executables and position-independent ones (the magic and mask qemu-user registers)
 BINFMT_MAGIC='\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00'
 BINFMT_MASK='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
@@ -218,7 +233,7 @@ cmd_run() {
     [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $prog"
     k=$(kind "$prog")
     [ "$k" = other ] && die "$prog is not an x86-64 Linux program"
-    if [ "$k" = dynamic ] && [ -z "$FEX_ROOTFS" ] && ! grep -qs '"RootFS"' "$HOME/.fex-emu/Config.json"; then
+    if [ "$k" = dynamic ] && ! has_rootfs; then
         die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
     fi
     F=$(fex)
@@ -250,11 +265,11 @@ cmd_learn() {
     [ $# -ge 1 ] || die "learn: which program?"
     prog=$1
     shift
-    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $1"
+    [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $prog"
     case $(kind "$prog") in
     static | pie) ;;
     dynamic)
-        if [ -z "$FEX_ROOTFS" ] && ! grep -qs '"RootFS"' "$HOME/.fex-emu/Config.json"; then
+        if ! has_rootfs; then
             die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
         fi
         echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, those of its libraries stay with FEX"

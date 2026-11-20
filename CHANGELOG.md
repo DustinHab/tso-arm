@@ -1,5 +1,12 @@
 # Changes
 
+## Unreleased
+
+- `tso-arm binfmt [register | unregister]`: x86-64 programs started directly (`./program`) run through tso-arm.
+- Fixed: after `tso-arm rootfs`, dynamically linked programs were refused, since `tso-arm` looked for FEX's setting
+  in `~/.fex-emu` only; it reads it where FEX does (`~/.config/fex-emu` when `~/.fex-emu` does not exist).
+- `tests/transitions.sh` measures what a call across the border of translated code costs.
+
 ## 0.2.0 (2026-11-20)
 
 Programs as distributions ship them. `tso-arm learn` translates stripped programs built with frame pointers, the

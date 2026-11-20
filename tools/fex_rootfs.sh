@@ -5,5 +5,6 @@ cd ~
 timeout 3000 FEXRootFSFetcher -y -x --distro-name=ubuntu --distro-version=24.04 --force-ui=tty >~/tso-arm/out/rootfs.log 2>&1
 echo "rc=$?"
 tail -n 8 ~/tso-arm/out/rootfs.log
-ls -la ~/.fex-emu ~/.fex-emu/RootFS 2>/dev/null
-cat ~/.fex-emu/Config.json 2>/dev/null
+# FEX keeps them in ~/.fex-emu if that exists, else in ~/.local/share/fex-emu and ~/.config/fex-emu
+ls -la ~/.fex-emu/RootFS ~/.local/share/fex-emu/RootFS 2>/dev/null
+cat ~/.fex-emu/Config.json ~/.config/fex-emu/Config.json 2>/dev/null
