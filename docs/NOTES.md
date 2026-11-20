@@ -1593,3 +1593,15 @@ refused every dynamically linked program right after `tso-arm rootfs` had fetche
 (`FEX_APP_CONFIG_LOCATION`, else `~/.fex-emu` if it exists, else `$XDG_CONFIG_HOME/fex-emu`, and the installed FEX's own
 configuration). Then x86-64 `bash`, `python3` and `sort` of that root file system ran, and `sort --parallel=4` of 2
 million lines gave the same output as the Arm `sort`.
+
+**Profiles of programs from a root file system.** On GitHub's N2, ffmpeg and Node stayed slower under tso-arm than
+under FEX's full TSO even at their best of three rounds (2.8 against 1.7 s, 6.1 against 4.3 s): with `--stats` after
+the rounds, both escalated anew in every run (1920 escalations, fallback after 1.4 and 0.3 s) instead of starting in
+the fallback their profile records; on the Pi Node did the same. Node left no profile at all (strace: nothing under
+`~/.cache/tso-arm`). FEX gives a program of the root file system its guest path as its name (`/usr/bin/node`, as the
+program sees itself), and the profile's name came from a `stat` of that path on the host: no such file, no profile.
+Python's and the Pi's ffmpeg had one only because the Pi has an Arm `python3` and `ffmpeg` at those paths, so the
+profile was bound to another program's file; GitHub's runner has no ffmpeg. The profile now takes size and time from
+the file in the root file system when there is one there, and keeps the guest path as its name (which stays the same
+when the root file system is mounted elsewhere). On the Pi: Node's second run started in the fallback (8829 against
+9762 ms), and after the compat rounds no program escalated any more; the CI tests passed.

@@ -1,5 +1,12 @@
 # Changes
 
+## Unreleased
+
+- Fixed: programs of an x86-64 root file system (dynamically linked ones) got no page protocol profile, or one bound
+  to a host program of the same path, so their later runs did not start from what the first had learned (Node and,
+  on GitHub's runner, ffmpeg stayed slower than under FEX's full TSO). The FEX patch changes with it.
+- `tso-arm rootfs` without options fetches Ubuntu 24.04 without questions.
+
 ## 0.2.1 (2026-11-20)
 
 Dynamically linked programs right after `tso-arm rootfs`, and x86-64 programs started directly. FEX and its patches
