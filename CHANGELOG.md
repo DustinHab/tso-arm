@@ -1,10 +1,13 @@
 # Changes
 
-## Unreleased
+## 0.2.2 (2026-11-20)
+
+Programs of an x86-64 root file system learn from their earlier runs. The FEX patch changed, so this release brings
+FEX prebuilt anew; `tso-arm install` replaces the one of 0.2.0 or 0.2.1.
 
 - Fixed: programs of an x86-64 root file system (dynamically linked ones) got no page protocol profile, or one bound
-  to a host program of the same path, so their later runs did not start from what the first had learned (Node and,
-  on GitHub's runner, ffmpeg stayed slower than under FEX's full TSO). The FEX patch changes with it.
+  to a host program of the same path, so their later runs did not start from what the first had learned. On
+  GitHub's Neoverse N2, ffmpeg went from 2.8 s to 1.7 s (FEX's full TSO: 1.7 s) and Node from 6.1 s to 5.2 s (5.1 s).
 - `tso-arm rootfs` without options fetches Ubuntu 24.04 without questions.
 
 ## 0.2.1 (2026-11-20)
