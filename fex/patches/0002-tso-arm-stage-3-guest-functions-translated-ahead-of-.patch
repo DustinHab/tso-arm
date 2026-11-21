@@ -1,4 +1,4 @@
-From 8c1f9b065d58b5b250c0a7714e38c3b530dafea7 Mon Sep 17 00:00:00 2001
+From e44bea3cc86579d63e2c7c1d9cfefb553cb3c726 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -29,7 +29,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |   8 +
  .../LinuxSyscalls/FileManagement.cpp          |  16 +-
  .../LinuxSyscalls/FileManagement.h            |   1 +
- .../LinuxSyscalls/SignalDelegator.cpp         |  90 +-
+ .../LinuxSyscalls/SignalDelegator.cpp         | 105 +-
  .../LinuxSyscalls/SignalDelegator.h           |  11 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  43 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  49 +-
@@ -40,7 +40,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.cpp           |  19 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 787 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 36 files changed, 2559 insertions(+), 184 deletions(-)
+ 36 files changed, 2574 insertions(+), 184 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -1048,7 +1048,7 @@ index b11f096..af7434c 100644
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index da2b971..620dd59 100644
+index da2b971..54028e9 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -65,12 +65,6 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
@@ -1225,7 +1225,29 @@ index da2b971..620dd59 100644
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1132,6 +1181,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1019,6 +1068,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+   for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
+     RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
+   }
++
++  // tso-arm: a signal the process was started with ignored (execve keeps SIG_IGN: nohup's SIGHUP) is ignored for the
++  // guest as well. Every guest action began at SIG_DFL, so a program that asks at its start (Go's runtime) took the
++  // signal for not ignored, installed a handler and died of the hangup nohup was there to keep away. The host's
++  // disposition of such a signal stays SIG_IGN until the guest asks for something else.
++  for (int Signal = 1; Signal <= int(MAX_SIGNALS); ++Signal) {
++    if (Signal == SIGKILL || Signal == SIGSTOP || HostHandlers[Signal].Required.load(std::memory_order_relaxed)) {
++      continue;
++    }
++    struct sigaction Current {};
++    if (::sigaction(Signal, nullptr, &Current) == 0 && Current.sa_handler == SIG_IGN) {
++      HostHandlers[Signal].GuestAction.sigaction_handler.handler = SIG_IGN;
++      PublishGuestAction(Signal);
++    }
++  }
+ }
+ 
+ SignalDelegator::~SignalDelegator() {
+@@ -1132,6 +1196,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;

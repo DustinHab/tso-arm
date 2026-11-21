@@ -1,5 +1,13 @@
 # Changes
 
+## 0.3.11 (not released yet)
+
+- Fixed in FEX: a program started with a signal ignored (nohup's SIGHUP; execve keeps it ignored) saw that signal
+  at its default instead. A Go program under nohup installed its handler for SIGHUP and died of the hangup nohup was
+  there to keep away. FEX takes such signals as ignored for the program now (notes section 53).
+- `tests/sigign.c` (in `tests/ci.sh`): signals ignored across execve.
+- The patches apply to FEX's newest commit again (an include next to one FEX added).
+
 ## 0.3.10 (2026-11-21)
 
 A thread no longer waits for good in code another thread patched. Update from 0.3.9. The FEX patch changed, so this

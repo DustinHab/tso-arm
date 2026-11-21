@@ -39,6 +39,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -o $B/fdfull tests/fdfull.c
     $CC -O2 -static -pthread -o $B/exactstart tests/exactstart.c
     $CC -O2 -static -pthread -o $B/xmc tests/xmc.c
+    $CC -O2 -static -o $B/sigign tests/sigign.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -74,6 +75,13 @@ ok "$out"
 # the program's own signal handlers, in every mode
 for m in tso full unordered; do
     out=$(last $T run --mode $m $B/signals) || fail "signals, $m: $out"
+    ok "$m: $out"
+done
+
+# signals ignored across execve, as nohup leaves SIGHUP (FEX began a new process with every signal at its default;
+# notes section 53)
+for m in tso full unordered; do
+    out=$(last $T run --mode $m $B/sigign) || fail "sigign, $m: $out"
     ok "$m: $out"
 done
 

@@ -2273,3 +2273,21 @@ every such exit; xz with FEX's 5000-instruction units took 1.74 to 2.16 s instea
 no longer a branch inside its block (FEX's multiblock), which throwing the translation away cannot reach, but an exit
 to its own address, which the linker links back. `xmc 2000 loop`: right in every mode and block by block
 (`tests/ci.sh`). Efficiency afterwards (README): pigz 91, xz 88, zstd 70 %, mean 82 %.
+
+## 53. Go's own tests: signals ignored across execve (2026-11-21)
+
+After CPython's suite, Go's: the official x86-64 toolchain (go1.27.4 from go.dev, checked against its published
+SHA256) under tso-arm and under FEX's full ordering, `go test -short` with the compiler, the linker and every test
+binary run under FEX (`gotest1.sh`). sync, sync/atomic, context and time passed in both modes; os/signal failed in
+both, `TestDetectNohup` and `TestNohup`: run under nohup, the test binary found SIGHUP "not ignored", and died of the
+SIGHUP it sent itself.
+
+execve keeps a signal that is ignored ignored; nohup relies on it. FEX began every guest action of a new process at
+SIG_DFL, whatever the process was started with, so the guest asking at its start (Go's runtime looks at every
+signal and leaves an ignored one alone) saw SIGHUP as not ignored, installed its handler and, when SIGHUP came, did
+what a Go program does with a signal it was not told to catch. The other direction worked already: a guest that
+ignores a signal has FEX set the host's disposition to SIG_IGN, which survives the execve. The signal delegator now
+takes, after setting up its own handlers, every signal whose host disposition is SIG_IGN as ignored for the guest
+too (not the ones FEX needs itself). `tests/sigign.c` ignores SIGHUP and SIGUSR1, executes itself, and the new image
+must see both ignored and live through a SIGHUP: under FEX before, in every mode, "not ignored"; now right, and in
+`tests/ci.sh`. Go's os/signal then passed in both modes.

@@ -189,7 +189,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
   cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, signals
   that meet (two at once, one raised while another thread changes its action), code rewritten while another thread
-  runs, a thread sent back to the dispatcher in the middle of a block, fork and vfork with no descriptor left, x87
+  runs, a thread sent back to the dispatcher in the middle of a block, fork and vfork with no descriptor left,
+  signals ignored across execve, x87
   arithmetic, a dynamically linked
   program, a shared library translated ahead of time that the program loads and
   unloads three times, and the ring buffer there, also after a start with one thread (the views asleep); then it
