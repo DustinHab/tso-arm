@@ -1,7 +1,7 @@
 #!/bin/sh
 # On an x86-64 Linux machine: a root file system with the programs tests/compat.sh runs, taken from this machine (the
 # programs, every shared library they and Python's extension modules need, the dynamic loader, Python's standard
-# library), packed for the Arm machine. Nothing is installed or changed here.
+# library, the distribution's JDK), packed for the Arm machine. Nothing is installed or changed here.
 #   tools/compat_rootfs.sh OUT.tar.zst
 set -e
 [ $# = 1 ] || { echo "usage: tools/compat_rootfs.sh OUT.tar.zst" >&2; exit 1; }
@@ -25,6 +25,11 @@ need() { # program names: the program itself; for a shell wrapper its exec targe
     done
 }
 need sort python3 node ffmpeg 7z
+# the distribution's Java, its whole directory (the JVM finds its libraries and modules from where its binary lies;
+# GitHub's runners bring other JDKs beside it)
+jdk=$(ls -d /usr/lib/jvm/java-*-openjdk-amd64 2>/dev/null | sort -V | tail -n 1)
+[ -n "$jdk" ] && [ -x "$jdk/bin/javac" ] || { echo "missing: a JDK in /usr/lib/jvm (default-jdk-headless)" >&2; exit 1; }
+echo "$jdk" >>$list
 py=$(python3 -c 'import sys; print(sys.prefix + "/lib/python" + sys.version[:sys.version.index(".", 2)])')
 echo "$py" >>$list
 # the JavaScript files a distribution's Node keeps outside its library ("externalized builtins")
@@ -53,5 +58,7 @@ done
 sort -u $list -o $list
 echo "$(wc -l <$list) paths, $(du -chL $(cat $list) 2>/dev/null | tail -n 1 | cut -f1)"
 # -h: symbolic links become the files they name, so the root file system needs no links of the host's layout
-tar -C / -chf - $(sed 's|^/||' $list) 2>/dev/null | zstd -q -T0 -12 -o "$out" -f
+# (and without what a JDK needs only to build others: its modules for jlink, headers, manual pages)
+tar -C / -chf - --exclude='usr/lib/jvm/*/jmods' --exclude='usr/lib/jvm/*/include' --exclude='usr/lib/jvm/*/man' \
+    --exclude='usr/lib/jvm/*/docs' $(sed 's|^/||' $list) 2>/dev/null | zstd -q -T0 -12 -o "$out" -f
 echo "$out: $(du -h "$out" | cut -f1)"

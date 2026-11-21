@@ -186,9 +186,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   without ordering.
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
-  cases, more threads than views, fork without exec, the program's signal handlers, x87 arithmetic, a dynamically
-  linked program, a shared library translated ahead of time that the program loads and unloads three times, and the
-  ring buffer there; then it measures the efficiency of pigz, xz and zstd on that machine
+  cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, x87
+  arithmetic, a dynamically linked program, a shared library translated ahead of time that the program loads and
+  unloads three times, and the ring buffer there, also after a start with one thread (the views asleep); then it
+  measures the efficiency of pigz, xz and zstd on that machine
   (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on FEX's newest commit
   (`.github/workflows/upstream.yml`); on demand, `.github/workflows/profile.yml` profiles a workload there
   (`tests/ci_profile.sh`: per guest function, translated against FEX's own code).
@@ -213,8 +214,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   `tso-arm rootfs` fetches (shell pipelines, command substitution, traps and job control, coreutils, gzip, xz, tar,
   perl, Python with subprocess, a fork pool, fork beside running threads and signal handlers, git packing a
   repository with 4 threads, make with 4 jobs, rsync) give the same output as under FEX's full ordering.
-- **Rare failures** (`tests/soak.sh`, notes section 44): git, xz, sort, Python and make with 4 threads or jobs, 20
-  runs each with the profile, without one and block by block, every output against full ordering: 300 of 300 right.
+- **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
+  jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
+  of 1,500 right (every run wakes the views once); in CI 5 runs each.
 - **Other cores, emulated** (`tests/vm_run.sh`, notes section 27): Cortex-A53, Cortex-A72, Neoverse N1, Cortex-A710
   and Neoverse V1 in a full system emulation; all tests correct (one crash on the V1 with 20 threads that did not
   come back in 86 further runs there and 150 on the Pi).

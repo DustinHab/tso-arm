@@ -1951,4 +1951,4 @@ the main thread alone (translated asleep), then by two threads: 20 million messa
 
 Node wakes the views at once (V8 starts its threads), and the efficiency table's programs all run four threads:
 pigz 91, xz 88, zstd 70 %, mean 83 %. Full check all correct, `tests/ci.sh` passed, `rootfs_check` 28 of 28,
-`tests/soak.sh` 75 of 75.
+`tests/soak.sh` with 100 rounds 1,500 of 1,500 (each run wakes the views once: every case starts with one thread).

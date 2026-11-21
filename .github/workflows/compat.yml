@@ -2,8 +2,9 @@ name: Compat
 
 # Programs of an x86-64 Linux distribution under tso-arm: an x86-64 runner packs them with their libraries
 # (tools/compat_rootfs.sh), an Arm runner runs them with x86 order kept, with FEX's full TSO and without ordering and
-# compares their outputs (tests/compat.sh), message passing between Node worker threads included. Then the root file
-# system `tso-arm rootfs` fetches, and everyday commands of it against FEX's full ordering (tests/rootfs_check.sh).
+# compares their outputs (tests/compat.sh), message passing between Node worker threads and between Java threads
+# included. Then the root file system `tso-arm rootfs` fetches, and everyday commands of it against FEX's full
+# ordering (tests/rootfs_check.sh).
 on:
   push:
   workflow_dispatch:
@@ -18,7 +19,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q nodejs ffmpeg p7zip-full zstd
+          sudo apt-get install -y -q nodejs ffmpeg p7zip-full zstd default-jdk-headless
       - name: Root file system
         run: sh tools/compat_rootfs.sh compat-rootfs.tar.zst
       - uses: actions/upload-artifact@v4

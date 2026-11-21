@@ -1,9 +1,11 @@
 #!/bin/sh
 # Programs of an x86-64 Linux distribution under tso-arm, from the root file system tools/compat_rootfs.sh packs:
-# multi-threaded work with a fixed output (sort, 7-Zip, Python threads, ffmpeg with x264, Node worker threads), each
-# with x86 order kept (tso-arm), with FEX's full TSO and without ordering; outputs compared, wall times. And message
-# passing in JavaScript: a worker thread writes data and then a flag into a SharedArrayBuffer with plain stores, the
-# main thread reads the flag and then the data; only x86's order keeps it from seeing the flag before the data.
+# multi-threaded work with a fixed output (sort, 7-Zip, Python threads, ffmpeg with x264, Node worker threads, Java's
+# parallel sort and streams), each with x86 order kept (tso-arm), with FEX's full TSO and without ordering; outputs
+# compared, wall times. And message passing in JavaScript and in Java, compiled to x86 code at run time: a thread
+# writes data and then a flag, another reads the flag and then the data, all four plain moves on x86-64 (in
+# JavaScript a SharedArrayBuffer with plain stores, in Java a release store and an acquire load for the flag); only
+# x86's order keeps the reader from seeing the flag before the data.
 #   tests/compat.sh ROOTFS.tar.zst|DIR      on the Arm machine (unpacks a tar to build/compat-rootfs)
 #   tests/compat.sh --here                  on the x86-64 machine itself, twice: are the outputs fixed?
 # ROUNDS (default 3): best wall time of that many runs per program and mode.
@@ -35,6 +37,8 @@ else
 fi
 sevenzip=$(sed -n 's/^exec "\{0,1\}\(\/[^" ]*\).*/\1/p' ${root:-}/usr/bin/7z 2>/dev/null || true)
 [ -n "$sevenzip" ] || sevenzip=/usr/bin/7z
+# the distribution's Java: its own directory (the JVM finds its libraries and modules from where its binary lies)
+jdk=$(ls -d ${root:-}/usr/lib/jvm/java-*-openjdk-* 2>/dev/null | sort -V | tail -n 1)
 
 # inputs, made the same way on any machine
 [ -f $W/lines.txt ] || awk 'BEGIN { s = 12345; for (i = 0; i < 2000000; i++) { s = (s * 1103515245 + 12345) % 2147483648
@@ -99,6 +103,62 @@ if (isMainThread) {
   }
 }
 EOF
+cat >$W/Workers.java <<'EOF'
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.IntStream;
+
+// parallel work with a fixed result (a parallel sort, a concurrent map filled from a parallel stream), then message
+// passing: one thread writes the data with a plain store and the flag with a release store, the other reads the flag
+// with an acquire load and then the data. A correct Java program; on x86-64 the JIT makes all four plain moves.
+public class Workers {
+    static final VarHandle AA = MethodHandles.arrayElementVarHandle(int[].class);
+
+    static long mix(long x) {
+        x ^= x >>> 33;
+        x *= 0xff51afd7ed558ccdL;
+        return x ^ (x >>> 33);
+    }
+
+    public static void main(String[] args) throws Exception {
+        long[] v = new long[1 << 22];
+        long s = 12345;
+        for (int i = 0; i < v.length; i++) {
+            s = s * 6364136223846793005L + 1442695040888963407L;
+            v[i] = s >>> 11;
+        }
+        Arrays.parallelSort(v);
+        long h = 0;
+        for (long x : v) h = h * 31 + x;
+        ConcurrentHashMap<Integer, Long> m = new ConcurrentHashMap<>();
+        IntStream.range(0, 4_000_000).parallel()
+            .forEach(i -> m.merge((int) Long.remainderUnsigned(mix(i), 10007), 1L, Long::sum));
+        long h2 = 0;
+        for (int k = 0; k < 10007; k++) h2 = h2 * 31 + m.getOrDefault(k, 0L);
+        int[] a = new int[512];
+        final int n = 20_000_000;
+        Thread w = new Thread(() -> {
+            for (int i = 1; i <= n; i++) {
+                a[0] = i;
+                AA.setRelease(a, 256, i);
+            }
+        });
+        w.start();
+        long wrong = 0;
+        int seen = 0;
+        while (seen < n) {
+            int f = (int) AA.getAcquire(a, 256);
+            int d = a[0];
+            if (d < f) wrong++;
+            seen = f;
+        }
+        w.join();
+        System.out.println("sum " + Long.toHexString(h) + " " + Long.toHexString(h2) + " mp-wrong " + wrong);
+    }
+}
+EOF
 
 prefix() { # mode -> what runs the program in that mode
     case $1 in
@@ -116,9 +176,21 @@ case_cmd() { # name -> command (program from the root file system, arguments)
     python) echo "${root}/usr/bin/python3 $W/threads.py" ;;
     ffmpeg) echo "${root}/usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=25:duration=4 -c:v libx264 -preset fast -threads 4 -f md5 -" ;;
     node) echo "${root}/usr/bin/node $W/workers.js" ;;
+    java) echo "$jdk/bin/java -Xmx1g -cp $W/java-${jdk##*/} Workers" ;;
     esac
 }
-cases=${CASES:-sort 7zip python ffmpeg node}
+cases=${CASES:-sort 7zip python ffmpeg node java}
+# Java's program compiled once, by the distribution's javac in the first mode (tso-arm on the Arm machine)
+case " $cases " in
+*" java "*)
+    [ -n "$jdk" ] || { echo "compat: no Java in the root file system (/usr/lib/jvm)"; exit 1; }
+    if [ ! -f $W/java-${jdk##*/}/Workers.class ]; then
+        mkdir -p $W/java-${jdk##*/}
+        sh -c "$(prefix ${modes%% *}) $jdk/bin/javac -d $W/java-${jdk##*/} $W/Workers.java" </dev/null ||
+            { echo "compat: javac failed"; exit 1; }
+    fi
+    ;;
+esac
 {
     echo "| program | $(echo $modes | sed 's/ / | /g') | output |"
     echo "|---$(for m in $modes; do printf '|---'; done)|---|"
@@ -135,7 +207,7 @@ cases=${CASES:-sort 7zip python ffmpeg node}
                 [ -z "$best" ] || [ $t -lt $best ] && best=$t
             done
             case $c in
-            node) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
+            node | java) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
             *) sum=$(md5sum <$W/out-$c-$m | cut -c1-8) ;;
             esac
             [ -s $W/out-$c-$m ] || sum="no-output($(head -c 80 $W/err-$c-$m | tr '\n|' '  '))"
@@ -146,22 +218,26 @@ cases=${CASES:-sort 7zip python ffmpeg node}
         same=yes
         for s in $sums; do
             case $c in
-            node) [ "${s%%_mp-wrong*}" = "${first%%_mp-wrong*}" ] || same=no ;;
+            node | java) [ "${s%%_mp-wrong*}" = "${first%%_mp-wrong*}" ] || same=no ;;
             *) [ "$s" = "$first" ] || same=no ;;
             esac
         done
         echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums") |"
-        if [ $c = node ]; then
-            echo "| node message passing, wrong |$(for s in $sums; do printf ' %s |' "${s##*mp-wrong_}"; done) |"
-        fi
+        case $c in
+        node | java)
+            echo "| $c message passing, wrong |$(for s in $sums; do printf ' %s |' "${s##*mp-wrong_}"; done) |" ;;
+        esac
     done
 } >$W/compat.md
 cat $W/compat.md
 # failed: an output that differs, or a message seen before its data with x86 order kept (tso-arm, FEX full TSO)
 ! grep -q DIFFERENT $W/compat.md || { echo "compat: outputs differ"; exit 1; }
 if [ "$1" != --here ]; then
-    w=$(sed -n 's/^| node message passing, wrong | \([0-9]*\) | \([0-9]*\) |.*/\1 \2/p' $W/compat.md)
-    [ -z "$w" ] || [ "$w" = "0 0" ] || { echo "compat: messages seen before their data with x86 order kept: $w"; exit 1; }
+    for c in node java; do
+        w=$(sed -n "s/^| $c message passing, wrong | \([0-9]*\) | \([0-9]*\) |.*/\1 \2/p" $W/compat.md)
+        [ -z "$w" ] || [ "$w" = "0 0" ] ||
+            { echo "compat: $c: messages seen before their data with x86 order kept: $w"; exit 1; }
+    done
 fi
 echo "compat: all outputs the same"
 # COMPAT_STATS=1: one more run of each with x86 order kept and the page protocol's statistics (after the rounds above,
