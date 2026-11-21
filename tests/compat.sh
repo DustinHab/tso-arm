@@ -332,8 +332,9 @@ esac
             best=""
             n=0
             for i in $(seq $rounds); do
-                # HotSpot crashes now and then (SIGILL or SIGSEGV in code it has just compiled) under FEX, with the
-                # patches and without (notes section 47): such a run is repeated, twice at most, and counted
+                # HotSpot crashed now and then (SIGILL or SIGSEGV in code it had just compiled) under FEX without the
+                # patches (notes section 52, fixed in them; the weekly run uses FEX's newest commit): such a run is
+                # repeated, twice at most, and counted
                 for try in 1 2 3; do
                     s=$(date +%s%N)
                     sh -c "$(prefix $m) $(case_cmd $c)" >$W/out-$c-$m 2>$W/err-$c-$m </dev/null || true
@@ -352,19 +353,30 @@ esac
             node | java | go) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
             *) sum=$(md5sum <$W/out-$c-$m | cut -c1-8) ;;
             esac
-            [ -s $W/out-$c-$m ] || sum="no-output($(head -c 80 $W/err-$c-$m | tr '\n|' '  '))"
+            # one word, as the other sums (the loops below split them at spaces)
+            [ -s $W/out-$c-$m ] || sum="no-output($(head -c 80 $W/err-$c-$m | tr '\n| ' '___'))"
             sums="$sums $sum"
             row="$row $best ms |"
         done
         first=$(echo $sums | cut -d' ' -f1)
         same=yes
+        unordered_crash=""
+        k=0
         for s in $sums; do
+            k=$((k + 1))
+            m=$(echo $modes | cut -d' ' -f$k)
+            # without x86 order a program whose threads share data may crash (V8 did, now and then, on GitHub's
+            # runners): one of the wrong outcomes the mode is there to show, not a fault of the translation
+            if [ $m = unordered ] && case $c in node | java | go) true ;; *) false ;; esac && case $s in no-output*) true ;; *) false ;; esac; then
+                unordered_crash=yes
+                continue
+            fi
             case $c in
             node | java | go) [ "${s%%_mp-wrong*}" = "${first%%_mp-wrong*}" ] || same=no ;;
             *) [ "$s" = "$first" ] || same=no ;;
             esac
         done
-        echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums")${crashes:+ (runs repeated after a JVM crash:${crashes#,})} |"
+        echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums")${unordered_crash:+ (crashed without x86 order)}${crashes:+ (runs repeated after a JVM crash:${crashes#,})} |"
         case $c in
         node | java | go)
             echo "| $c message passing, wrong |$(for s in $sums; do printf ' %s |' "${s##*mp-wrong_}"; done) |" ;;
