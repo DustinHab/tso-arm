@@ -1,4 +1,4 @@
-From 2d4e083a37aeedf6d8e5b14a7c91e348481942e5 Mon Sep 17 00:00:00 2001
+From 7fab5d2c96a2ccbb61f7833a2e6ab9b1c86af52b Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -16,11 +16,15 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/include/FEXCore/Core/Context.h        |  10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |  24 +-
+ Source/Common/FDUtils.h                       |  32 +
+ Source/Common/FEXServerClient.cpp             |   6 +-
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  15 +
  .../LinuxEmulation/ArchHelpers/MContext.h     |   8 +
+ .../LinuxSyscalls/FileManagement.cpp          |  16 +-
+ .../LinuxSyscalls/FileManagement.h            |   1 +
  .../LinuxSyscalls/SignalDelegator.cpp         |  90 +-
  .../LinuxSyscalls/SignalDelegator.h           |  11 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  13 +
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  25 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  32 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 102 ++-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 814 ++++++++++++++++--
@@ -28,7 +32,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.cpp           |  19 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 787 +++++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 24 files changed, 2131 insertions(+), 138 deletions(-)
+ 28 files changed, 2190 insertions(+), 146 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -527,6 +531,87 @@ index a7ac53a..be3cf49 100644
  inline uint64_t Nanos() {
    timespec T;
    clock_gettime(CLOCK_MONOTONIC, &T);
+diff --git a/Source/Common/FDUtils.h b/Source/Common/FDUtils.h
+index f4e1d6b..943374f 100644
+--- a/Source/Common/FDUtils.h
++++ b/Source/Common/FDUtils.h
+@@ -3,8 +3,10 @@
+ 
+ #include <FEXCore/fextl/fmt.h>
+ 
++#include <algorithm>
+ #include <fcntl.h>
+ #include <linux/limits.h>
++#include <sys/resource.h>
+ #include <unistd.h>
+ 
+ namespace FEX {
+@@ -15,4 +17,34 @@ inline int get_fdpath(int fd, char* SymlinkPath) {
+   return readlinkat(AT_FDCWD, Path.c_str(), SymlinkPath, PATH_MAX);
+ }
+ 
++// tso-arm: FEX's own descriptors that stay open (its server's socket, the root file system's and /proc's directories,
++// the code map, the log) go to a range of their own, just below the limit on open files and far from the small
++// numbers a program uses. They took the lowest free numbers before: a program started with its standard input closed
++// read FEX's server socket as stdin, and a child that checked that a small descriptor it had not inherited was closed
++// found FEX's there and could write into it (CPython's test_cmd_line, test_tempfile, test_posix). The new descriptor
++// is close-on-exec, as all of these are opened, unless one is to live past an execve (KeepOnExec).
++inline int MoveFEXFD(int FD, bool KeepOnExec = false) {
++  if (FD < 0) {
++    return FD;
++  }
++  int Base = 3;
++  struct rlimit Limit {};
++  if (getrlimit(RLIMIT_NOFILE, &Limit) == 0 && Limit.rlim_cur != RLIM_INFINITY && Limit.rlim_cur > 256) {
++    Base = static_cast<int>(std::min<rlim_t>(Limit.rlim_cur, 1 << 20)) - 64;
++  }
++  if (FD >= Base) {
++    return FD;
++  }
++  const int Cmd = KeepOnExec ? F_DUPFD : F_DUPFD_CLOEXEC;
++  int High = fcntl(FD, Cmd, Base);
++  if (High < 0 && FD < 3) {
++    High = fcntl(FD, Cmd, 3);
++  }
++  if (High < 0) {
++    return FD;
++  }
++  close(FD);
++  return High;
++}
++
+ } // namespace FEX
+diff --git a/Source/Common/FEXServerClient.cpp b/Source/Common/FEXServerClient.cpp
+index 0680323..92cce19 100644
+--- a/Source/Common/FEXServerClient.cpp
++++ b/Source/Common/FEXServerClient.cpp
+@@ -65,7 +65,7 @@ int RequestPIDFDPacket(int ServerSocket, PacketType Type) {
+     return -1;
+   }
+ 
+-  return NewFD;
++  return FEX::MoveFEXFD(NewFD);
+ }
+ 
+ static int ServerFD {-1};
+@@ -241,7 +241,7 @@ void UnlinkServerSocketPath() {
+ }
+ 
+ bool SetupClient(std::string_view InterpreterPath) {
+-  ServerFD = FEXServerClient::ConnectToAndStartServer(InterpreterPath);
++  ServerFD = FEX::MoveFEXFD(FEXServerClient::ConnectToAndStartServer(InterpreterPath));
+   if (ServerFD == -1) {
+     return false;
+   }
+@@ -476,7 +476,7 @@ int RequestCodeMapFD(int ServerSocket, int ProgramFD, bool HasMultiblock) {
+     return -1;
+   }
+ 
+-  return NewFD;
++  return FEX::MoveFEXFD(NewFD);
+ }
+ 
+ /**  @} */
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 index bed03b9..04b559a 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
@@ -600,6 +685,73 @@ index 02bb6bf..2c7cbe0 100644
    FEXCore::Core::CPUState GuestState;
  
    // Arm64 doesn't have a red zone
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+index 7172460..91c5e0a 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+@@ -8,6 +8,7 @@ $end_info$
+ 
+ #include "Common/Config.h"
+ #include "Common/FDUtils.h"
++#include "Common/FEXServerClient.h"
+ #include "Common/JSONPool.h"
+ 
+ #include "FEXCore/Config/Config.h"
+@@ -231,7 +232,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
+   }
+ 
+   if (!LDPath().empty()) {
+-    RootFSFD = open(LDPath().c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC);
++    RootFSFD = FEX::MoveFEXFD(open(LDPath().c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC));
+     if (RootFSFD == -1) {
+       RootFSFD = AT_FDCWD;
+     } else {
+@@ -339,7 +340,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
+   }
+ 
+   // Keep an fd open for /proc, to bypass chroot-style sandboxes
+-  ProcFD = open("/proc", O_RDONLY | O_CLOEXEC);
++  ProcFD = FEX::MoveFEXFD(open("/proc", O_RDONLY | O_CLOEXEC));
+   if (ProcFD != -1) {
+     // Track the st_dev of /proc, to check for inode equality
+     struct stat Buffer;
+@@ -1296,6 +1297,15 @@ void FileManager::UpdatePID(uint32_t PID) {
+     ProcFDInode = 0;
+     return;
+   }
++
++  // tso-arm: and the server's socket, which a program that closes every descriptor it lists closed as well
++  ServerSocketInode = 0;
++  if (const int Server = FEXServerClient::GetServerFD(); Server >= 0) {
++    FDpath = fextl::fmt::format("self/fd/{}", Server);
++    if (fstatat(ProcFD, FDpath.c_str(), &Buffer, AT_SYMLINK_NOFOLLOW) >= 0) {
++      ServerSocketInode = Buffer.st_ino;
++    }
++  }
+ }
+ 
+ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
+@@ -1307,6 +1317,8 @@ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
+     Match = "/proc";
+   } else if (inode == CodeMapInode) {
+     Match = "code map";
++  } else if (ServerSocketInode && inode == ServerSocketInode) {
++    Match = "server socket";
+   }
+   if (Match) {
+     struct stat Buffer;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
+index b11f096..af7434c 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
+@@ -192,6 +192,7 @@ private:
+   int64_t RootFSFDInode = 0;
+   int64_t ProcFDInode = 0;
+   int64_t CodeMapInode = 0;
++  int64_t ServerSocketInode = 0;
+   dev_t ProcFSDev;
+ };
+ } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 index da2b971..620dd59 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
@@ -816,10 +968,18 @@ index c37d82c..8a4b9e7 100644
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432b..cb35e9d 100644
+index a7a432b..c99d2ee 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-@@ -17,6 +17,7 @@ $end_info$
+@@ -8,6 +8,7 @@ $end_info$
+ */
+ 
+ #include "CodeLoader.h"
++#include "Common/FDUtils.h"
+ 
+ #include "FEXHeaderUtils/StringArgumentParser.h"
+ #include "Linux/Utils/ELFContainer.h"
+@@ -17,6 +18,7 @@ $end_info$
  #include "LinuxSyscalls/SignalDelegator.h"
  #include "LinuxSyscalls/Syscalls.h"
  #include "LinuxSyscalls/Syscalls/Thread.h"
@@ -827,7 +987,34 @@ index a7a432b..cb35e9d 100644
  #include "LinuxSyscalls/Utils/Threads.h"
  #include "LinuxSyscalls/x32/Syscalls.h"
  #include "LinuxSyscalls/x64/Syscalls.h"
-@@ -683,6 +684,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -352,10 +354,12 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
+       if (NeedsFDCopy) {
+         // FEX needs the FD to live past execve when binfmt_misc isn't used,
+         // so duplicate the FD if FD_CLOEXEC is set, which removes the FD_CLOEXEC flag.
+-        Args.dirfd = dup(Args.dirfd);
++        // tso-arm: in FEX's own range (FEX::MoveFEXFD), not on the lowest free number, which is the new program's
++        // standard input when the caller closed it before execve (CPython's posix_spawn and preexec_fn tests)
++        Args.dirfd = FEX::MoveFEXFD(dup(Args.dirfd), true);
+         FDExecCopy = true;
+       } else if (NeedsLoaderFD) {
+-        Args.dirfd = open(Filename.c_str(), O_RDONLY);
++        Args.dirfd = FEX::MoveFEXFD(open(Filename.c_str(), O_RDONLY), true);
+         if (Args.dirfd == -1) {
+           CloseSeccompFD();
+           return -errno;
+@@ -441,7 +445,10 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
+     if (*OldArgv) {
+       // The direct fallback uses the executable path as argv[0]. An FD-backed load uses the
+       // binfmt preserve-argv0 layout, so the caller-supplied argv[0] has to stay in the vector.
+-      if (!NeedsLoaderFD) {
++      // tso-arm: an execveat of a descriptor (fexecve) is an FD-backed load as well (FEX_EXECVEFD, the loader drops
++      // the first argument): its argv[0] went, and the program saw its arguments shifted by one (CPython's
++      // test_posix.test_fexecve: python took -c for its own name)
++      if (!NeedsLoaderFD && !IsFDExec) {
+         ++OldArgv;
+       }
+       while (*OldArgv) {
+@@ -683,6 +690,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
  
        if (Result != 0) {
          // Parent
@@ -838,7 +1025,7 @@ index a7a432b..cb35e9d 100644
          // Unlock the mutexes on both sides of the fork
          FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, false);
  
-@@ -962,6 +967,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
+@@ -962,6 +973,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -850,7 +1037,7 @@ index a7a432b..cb35e9d 100644
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +984,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +990,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();

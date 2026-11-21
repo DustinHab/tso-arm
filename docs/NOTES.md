@@ -2083,3 +2083,36 @@ Left for later.
 On the Pi (best of 3, cooled): tso-arm 2496 ms, full TSO 2440 ms, no ordering 2425 ms; messages seen before their
 data 0, 0, 84 of 20 million; the three times within 3 %. In the CI the Arm runner builds it with Ubuntu 24.04's
 Go.
+
+## 49. FEX's own descriptors (2026-11-21)
+
+CPython's whole suite left a group of failures under both modes that had one cause: FEX opens descriptors of its own
+in every process (its server's socket, the root file system's directory, `/proc`, later the code map and the log),
+and they took the lowest free numbers. FEX hides three of them from listings of `/proc/self/fd` (by their inode, for
+Chromium, which closes what it finds there), not the socket.
+
+- A program started with its standard input closed found FEX's server socket as stdin (`test_cmd_line`'s
+  `test_no_stdin`, `test_no_std_streams`).
+- FEX's `execve` opens the program's file and hands the descriptor to the next FEX through `FEX_EXECVEFD` (without
+  binfmt_misc, as on the Pi). After a `posix_spawn` file action or a `preexec_fn` that closed descriptor 0, that was
+  0: the new program had its own executable as standard input (`test_posix`'s `posix_spawn` tests,
+  `test_subprocess`'s `test_swap_std_fds_with_one_closed`).
+- A child that checked that a descriptor it had not inherited was closed found FEX's there, open, and wrote into it
+  (`test_tempfile`'s `test_noinherit`, `test_subprocess`'s `test_close_fds` and `test_pass_fds`).
+
+`FEX::MoveFEXFD` (Common/FDUtils.h) moves such a descriptor to just below the limit on open files (64 below it; 960
+with the usual 1024), close-on-exec unless it has to live past an `execve`; the server's socket, the two directories,
+the log and the code map, and the two descriptors `execve` hands on. The socket is hidden from `/proc/self/fd` like
+the others. A program that tries every number up to its limit with `fstat` still finds them
+(`test_pass_fds_redirected`); hiding them from that as well would take FEX answering every call on them with EBADF and
+a lower limit shown to the program.
+
+And one in `execve` itself: an `execveat` of a descriptor (`fexecve`) loads through `FEX_EXECVEFD` as well, and the
+loader then drops the first argument as binfmt_misc's copy of the path; FEX had left the program's `argv[0]` out for
+that case only where it opened the descriptor itself, so a program run with `fexecve` saw its arguments shifted by one
+(`test_posix`'s `test_fexecve`: python took `-c` for its name).
+
+In the six test files concerned (`test_cmd_line test_tempfile test_posix test_subprocess test_platform test_os`,
+1,048 cases) 3 fail now instead of 14, in both modes alike: `test_pass_fds_redirected`, an environment test of
+`PYTHONPATH`, and `platform.architecture` through a symbolic link. `tests/ci.sh`, `rootfs_check` 28 of 28,
+`tests/soak.sh` 45 of 45.

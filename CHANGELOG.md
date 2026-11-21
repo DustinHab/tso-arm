@@ -1,5 +1,14 @@
 # Changes
 
+## 0.3.6 (not released yet)
+
+- Fixed in FEX: its own descriptors (its server's socket, the root file system's directory and others) took the
+  lowest free numbers, so a program started with its standard input closed read FEX's socket as stdin, a program
+  run after a `posix_spawn` that closed descriptor 0 got its own executable as stdin, and a child could find and write
+  into FEX's socket on a number it had not inherited. They live just below the limit on open files now, and the
+  socket is hidden from `/proc/self/fd` like the others (notes section 49).
+- Fixed in FEX: a program started with `fexecve` saw its arguments shifted by one (its `argv[0]` went).
+
 ## 0.3.5 (2026-11-21)
 
 Go programs run. Nothing changed in the FEX patch: update from 0.3.4 by fetching this tso-arm; FEX stays.
