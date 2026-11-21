@@ -1,5 +1,14 @@
 # Changes
 
+## 0.3.5 (not released yet)
+
+- Go programs run: Go's runtime preempts goroutines with a signal and resumes them with the state its handler saw,
+  which FEX does not give exactly in the middle of translated code (Go programs crashed within a second, under FEX
+  without the patches as well; notes section 48). `tso-arm run` turns that preemption off
+  (`GODEBUG=asyncpreemptoff=1`; `TSO_ARM_GO_PREEMPT=1` keeps it); goroutines stop at Go's own safe points then.
+- `tests/compat.sh` runs a Go program as well (goroutines, channels, a mutex, and message passing through
+  sync/atomic that only x86 order keeps right).
+
 ## 0.3.4 (2026-11-21)
 
 Single-threaded programs run without the views, and signal delivery fixed: a thread that got a signal during a

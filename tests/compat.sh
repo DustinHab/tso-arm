@@ -1,11 +1,12 @@
 #!/bin/sh
 # Programs of an x86-64 Linux distribution under tso-arm, from the root file system tools/compat_rootfs.sh packs:
 # multi-threaded work with a fixed output (sort, 7-Zip, Python threads, ffmpeg with x264, Node worker threads, Java's
-# parallel sort and streams), each with x86 order kept (tso-arm), with FEX's full TSO and without ordering; outputs
-# compared, wall times. And message passing in JavaScript and in Java, compiled to x86 code at run time: a thread
-# writes data and then a flag, another reads the flag and then the data, all four plain moves on x86-64 (in
-# JavaScript a SharedArrayBuffer with plain stores, in Java a release store and an acquire load for the flag); only
-# x86's order keeps the reader from seeing the flag before the data.
+# parallel sort and streams, goroutines), each with x86 order kept (tso-arm), with FEX's full TSO and without
+# ordering; outputs compared, wall times. And message passing in JavaScript, Java and Go: a thread writes data and then
+# a flag, another reads the flag and then the data (in JavaScript a SharedArrayBuffer with plain stores, in Java a
+# release store and an acquire load for the flag, in Go sync/atomic's store and load); on x86-64 all plain moves but
+# Go's store, an XCHG, and only x86's order keeps the reader from seeing the flag before the data. The Go program is
+# built for amd64 with the go command here if there is one (GOARCH=amd64), else taken from $COMPAT_DIR/goworkers.
 #   tests/compat.sh ROOTFS.tar.zst|DIR      on the Arm machine (unpacks a tar to build/compat-rootfs)
 #   tests/compat.sh --here                  on the x86-64 machine itself, twice: are the outputs fixed?
 # ROUNDS (default 3): best wall time of that many runs per program and mode.
@@ -159,6 +160,125 @@ public class Workers {
     }
 }
 EOF
+cat >$W/workers.go <<'EOF'
+// Parallel work with a fixed result (chunks sorted by goroutines and merged, a channel pipeline through four
+// workers, a mutex-guarded map), then message passing: one goroutine writes the data plainly and the flag with
+// atomic.StoreInt64, another reads the flag with atomic.LoadInt64 and then the data. A correct Go program (atomics
+// order the plain accesses around them); on amd64 the store is an XCHG and the load a plain MOV.
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sort"
+	"sync"
+	"sync/atomic"
+)
+
+type padded struct {
+	v int64
+	_ [56]byte
+}
+
+func main() {
+	data := make([]uint64, 1<<22)
+	s := uint64(12345)
+	for i := range data {
+		s = s*6364136223846793005 + 1442695040888963407
+		data[i] = s >> 11
+	}
+	const parts = 8
+	var wg sync.WaitGroup
+	n := len(data) / parts
+	for p := 0; p < parts; p++ {
+		wg.Add(1)
+		go func(c []uint64) {
+			defer wg.Done()
+			sort.Slice(c, func(i, j int) bool { return c[i] < c[j] })
+		}(data[p*n : (p+1)*n])
+	}
+	wg.Wait()
+	// merge the sorted parts
+	idx := make([]int, parts)
+	var h uint64
+	for k := 0; k < len(data); k++ {
+		best := -1
+		for p := 0; p < parts; p++ {
+			if idx[p] < n && (best < 0 || data[p*n+idx[p]] < data[best*n+idx[best]]) {
+				best = p
+			}
+		}
+		h = h*31 + data[best*n+idx[best]]
+		idx[best]++
+	}
+	// a pipeline: numbers through four workers, squares summed modulo a prime by the receiver
+	in, out := make(chan uint64, 64), make(chan uint64, 64)
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for x := range in {
+				out <- x * x % 7919
+			}
+		}()
+	}
+	go func() {
+		for i := uint64(0); i < 400000; i++ {
+			in <- i
+		}
+		close(in)
+	}()
+	go func() { wg.Wait(); close(out) }()
+	var total uint64
+	for v := range out {
+		total += v
+	}
+	// a map filled by goroutines under a mutex
+	var mu sync.Mutex
+	m := map[uint64]uint64{}
+	var wg2 sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg2.Add(1)
+		go func(w uint64) {
+			defer wg2.Done()
+			for i := w; i < 400000; i += 4 {
+				k := (i * 2654435761) % 10007
+				mu.Lock()
+				m[k]++
+				mu.Unlock()
+			}
+		}(uint64(w))
+	}
+	wg2.Wait()
+	var h2 uint64
+	for k := uint64(0); k < 10007; k++ {
+		h2 = h2*31 + m[k]
+	}
+	// message passing
+	var dat, flag padded
+	const msgs = 20000000
+	done := make(chan struct{})
+	go func() {
+		for i := int64(1); i <= msgs; i++ {
+			dat.v = i
+			atomic.StoreInt64(&flag.v, i)
+		}
+		close(done)
+	}()
+	var wrong, seen int64
+	for seen < msgs {
+		f := atomic.LoadInt64(&flag.v)
+		d := dat.v
+		if d < f {
+			wrong++
+		}
+		seen = f
+	}
+	<-done
+	runtime.KeepAlive(&dat)
+	fmt.Printf("sum %x %x %x mp-wrong %d\n", h, total, h2, wrong)
+}
+EOF
 
 prefix() { # mode -> what runs the program in that mode
     case $1 in
@@ -177,9 +297,19 @@ case_cmd() { # name -> command (program from the root file system, arguments)
     ffmpeg) echo "${root}/usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=25:duration=4 -c:v libx264 -preset fast -threads 4 -f md5 -" ;;
     node) echo "${root}/usr/bin/node $W/workers.js" ;;
     java) echo "$jdk/bin/java -Xmx1g -XX:ErrorFile=$W/hs_err_%p.log -cp $W/java-${jdk##*/} Workers" ;;
+    go) echo "$W/goworkers" ;;
     esac
 }
-cases=${CASES:-sort 7zip python ffmpeg node java}
+cases=${CASES:-sort 7zip python ffmpeg node java go}
+# Go's program for amd64, built here (Go cross-compiles), or one built elsewhere; without either no Go row
+if command -v go >/dev/null 2>&1 && [ ! -x $W/goworkers -o $W/workers.go -nt $W/goworkers ]; then
+    (cd $W && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOCACHE=$W/gocache go build -o goworkers workers.go) ||
+        { echo "compat: go build failed"; exit 1; }
+fi
+if [ ! -x $W/goworkers ]; then
+    case " $cases " in *" go "*) echo "compat: no go command and no $W/goworkers: no Go row" ;; esac
+    cases=$(echo " $cases " | sed 's/ go / /')
+fi
 # Java's program compiled once, by the distribution's javac in the first mode (tso-arm on the Arm machine)
 case " $cases " in
 *" java "*)
@@ -219,7 +349,7 @@ esac
             done
             [ $n = 0 ] || crashes="$crashes, $m $n"
             case $c in
-            node | java) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
+            node | java | go) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
             *) sum=$(md5sum <$W/out-$c-$m | cut -c1-8) ;;
             esac
             [ -s $W/out-$c-$m ] || sum="no-output($(head -c 80 $W/err-$c-$m | tr '\n|' '  '))"
@@ -230,13 +360,13 @@ esac
         same=yes
         for s in $sums; do
             case $c in
-            node | java) [ "${s%%_mp-wrong*}" = "${first%%_mp-wrong*}" ] || same=no ;;
+            node | java | go) [ "${s%%_mp-wrong*}" = "${first%%_mp-wrong*}" ] || same=no ;;
             *) [ "$s" = "$first" ] || same=no ;;
             esac
         done
         echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums")${crashes:+ (runs repeated after a JVM crash:${crashes#,})} |"
         case $c in
-        node | java)
+        node | java | go)
             echo "| $c message passing, wrong |$(for s in $sums; do printf ' %s |' "${s##*mp-wrong_}"; done) |" ;;
         esac
     done
@@ -245,7 +375,7 @@ cat $W/compat.md
 # failed: an output that differs, or a message seen before its data with x86 order kept (tso-arm, FEX full TSO)
 ! grep -q DIFFERENT $W/compat.md || { echo "compat: outputs differ"; exit 1; }
 if [ "$1" != --here ]; then
-    for c in node java; do
+    for c in node java go; do
         w=$(sed -n "s/^| $c message passing, wrong | \([0-9]*\) | \([0-9]*\) |.*/\1 \2/p" $W/compat.md)
         [ -z "$w" ] || [ "$w" = "0 0" ] ||
             { echo "compat: $c: messages seen before their data with x86 order kept: $w"; exit 1; }

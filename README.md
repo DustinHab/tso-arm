@@ -196,8 +196,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   (`tests/ci_profile.sh`: per guest function, translated against FEX's own code).
 - **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes sections 35 and 47):
   sort, 7-Zip, Python with threads, ffmpeg with x264, Node with worker threads and Java from x86-64 Ubuntu, packed
-  with their libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock, the profiles from
-  nothing):
+  with their libraries (`tools/compat_rootfs.sh`), and a Go program built for amd64; on the Pi 5 (best of 3,
+  default clock, the profiles from nothing):
 
   | | tso-arm | FEX, full TSO | FEX, no ordering | output |
   |---|---|---|---|---|
@@ -209,13 +209,16 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   | Node, messages seen before their data | 0 | 0 | 105,922 | |
   | Java, parallel sort and streams | 4042 ms | 4272 ms | 2854 ms | the same |
   | Java, messages seen before their data | 0 | 0 | 3,131,256 | |
+  | Go, goroutines, channels, a mutex | 2496 ms | 2440 ms | 2425 ms | the same |
+  | Go, messages seen before their data | 0 | 0 | 84 | |
 
   sort, ffmpeg and Node faster than FEX without any ordering: tso-arm has FEX compile smaller units (notes section
   43).
 
   The message rows: JavaScript through a SharedArrayBuffer with plain stores, Java with a release store and an
-  acquire load (a correct Java program). V8 and HotSpot compile them to plain x86 moves at run time, and only x86
-  order keeps the reader from seeing the flag before the data. HotSpot crashes in 1 to 3 of 30 runs under FEX,
+  acquire load (a correct Java program), Go with sync/atomic's store and load. V8 and HotSpot compile them to plain
+  x86 moves at run time, Go's load is one as well, and only x86 order keeps the reader from seeing the flag before
+  the data. HotSpot crashes in 1 to 3 of 30 runs under FEX,
   with the patches and without (in code it has just compiled); `tests/compat.sh` repeats such a run and says so.
 - **Everyday programs** (`tests/rootfs_check.sh`, notes sections 39 and 44): 28 commands of the root file system
   `tso-arm rootfs` fetches (shell pipelines, command substitution, traps and job control, coreutils, gzip, xz, tar,
@@ -253,6 +256,12 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically, and those of its shared libraries that have a build ID (distributions build them with one); what the
   translator cannot take stays with FEX.
+- **Go programs** (notes section 48): Go's runtime preempts goroutines with a signal and resumes them at the
+  interrupted instruction with the registers its handler saw, which FEX does not give exactly in the middle of
+  translated code (Go programs crash within a second, under FEX without the patches as well). `tso-arm run` turns
+  that preemption off (`GODEBUG=asyncpreemptoff=1`, which only Go programs read; `TSO_ARM_GO_PREEMPT=1` keeps it):
+  goroutines stop at Go's own safe points then, as before Go 1.14 (also for programs started through binfmt_misc,
+  which go through `tso-arm run`).
 - **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Arm runner (notes sections 32 and
   33; the latest on a Neoverse N2: with x86 order kept pigz 78 % and xz 94 %, against 68 and 73 % under FEX's full
   TSO; zstd as fast as FEX's full TSO, since `learn` found its translated functions slower there and left them out;

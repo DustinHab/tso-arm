@@ -2040,3 +2040,33 @@ compares had failed alike); the first Java numbers ran on the wrong libraries an
 now waits for a server the tests before it started and fails aloud; `tests/cpython_suite.sh` runs each mode in a
 session of its own and ends what is left of it; `tso-arm run` says so when FEX's server serves another root file
 system than `FEX_ROOTFS` names.
+
+## 48. Go programs (2026-11-21)
+
+A Go program built for amd64 (`tests/compat.sh` builds it with the go command, which cross-compiles, or takes one
+built elsewhere): eight goroutines sort parts of 4 million numbers, which are merged; a channel pipeline through four
+workers; a map filled by four goroutines under a mutex; and message passing, the data stored plainly and the flag
+with `atomic.StoreInt64` (an XCHG on amd64), the flag read with `atomic.LoadInt64` (a plain MOV) and then the data.
+
+Go 1.26's program crashed within a second in every mode, FEX's full TSO and no ordering as well, and under FEX
+without the patches in 3 of 3 runs: unexpected fault addresses, "unknown caller pc", stack traces through
+`runtime.asyncPreempt`. Go's runtime preempts a goroutine that runs for long with SIGURG; its handler pushes a call
+to `asyncPreempt` onto the goroutine's stack with the interrupted address as the return address, and `asyncPreempt`
+saves the registers the handler saw, may switch goroutines, restores them and returns there. That needs the exact
+state at an instruction boundary. FEX delivers a signal that comes in while translated code runs at once, with the
+registers spilled from the host's and the address of the guest instruction the host's lay in: in the middle of an
+instruction's translation, or with values the block keeps elsewhere, that is not a state any instruction boundary
+had, and after the handler changed the address FEX goes on with that state. With `GODEBUG=asyncpreemptoff=1` all
+modes run right, 10 of 10 each; messages seen before their data 0 under tso-arm and full TSO, 23 to 601 without
+ordering.
+
+`tso-arm run` (and so binfmt_misc, which goes through it) adds `asyncpreemptoff=1` to `GODEBUG` unless it is set
+there already or `TSO_ARM_GO_PREEMPT=1`: only Go programs read the variable, and they stop goroutines at their own
+safe points then (calls, the loops of the runtime), as all Go versions before 1.14 did; a goroutine in a long loop
+without calls is not preempted. What would make preemption work: delivering an asynchronous signal that comes in
+during translated code at the thread's next exact instruction start (the views' boundary traps lead a thread there)
+instead of at once.
+
+On the Pi (best of 3, cooled): tso-arm 2496 ms, full TSO 2440 ms, no ordering 2425 ms; messages seen before their
+data 0, 0, 84 of 20 million; the three times within 3 %. In the CI the Arm runner builds it with Ubuntu 24.04's
+Go.

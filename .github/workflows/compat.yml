@@ -38,7 +38,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools golang-go
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
