@@ -5,6 +5,7 @@
 # fetched once into build/cpython-VERSION, where the logs stay: full.log and tso.log, every test case's result in
 # full.xml and tso.xml).
 #   tests/cpython_suite.sh [TESTS...]     exit status 1 if a test case fails under tso-arm only
+# SUITE_TIME: seconds for all tests in one mode (default 7200).
 # Needs the root file system `tso-arm rootfs` fetches (or ROOTFS=directory), curl for the first run, and the host's
 # python3 to read the test cases' results (without it only whole tests are compared).
 set -u
@@ -48,7 +49,7 @@ for m in full tso; do
     # keeps FEX's server alive, with this root file system for every later FEX program whatever FEX_ROOTFS says.
     # Whatever is left of the session goes afterwards.
     rm -f "$D/$m.xml"
-    (cd "$W" && PYTHONHOME=/usr PYTHONPATH="$D" exec setsid timeout 7200 $T run --mode $m "$PY" -m test -j1 \
+    (cd "$W" && PYTHONHOME=/usr PYTHONPATH="$D" exec setsid timeout ${SUITE_TIME:-7200} $T run --mode $m "$PY" -m test -j1 \
         --timeout 900 --junit-xml "$D/$m.xml" $tests) >"$D/$m.log" 2>&1 &
     p=$!
     wait $p

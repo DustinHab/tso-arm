@@ -2023,6 +2023,15 @@ settings of full TSO 1, full ordering with the patches 2, tso-arm 3, SIGILL or S
 just compiled (HotSpot patches code that other threads run, which x86 allows, and FEX's translation can meet it half
 written). Not to be told apart at these numbers; `tests/compat.sh` repeats such a run, twice at most, and names it.
 
+**A wider run** with the released 0.3.4 (its prebuilt FEX): `test_subprocess test_os test_io test_socket
+test_select test_poll test_epoll test_time test_faulthandler test_asyncio test_multiprocessing_forkserver test_pty
+test_fcntl test_mmap test_threading`, 47 test files and 5,297 cases, 10.6 minutes per mode. The same 5 cases fail
+in both: four of `test_subprocess` find descriptors open in a child that should not be (5, 6, 8, 9: FEX opens its
+own in every process, the root file system's directory, its server's socket, and keeps them at low numbers where a
+child that lists its descriptors sees them; FEX tracks them only in builds with assertions), and
+`test_multiprocessing_forkserver`'s `test_flags`, whose child exits with 1. None fails under tso-arm only
+(`SUITE_TIME` gives the run more than the default two hours per mode).
+
 **Two faults of the test set-up on the way.** The orphaned children of the hanging daemon-thread test (five, from
 the first runs on) kept FEX's server alive for four hours, and it served Ubuntu's root file system to every FEX
 program, whatever `FEX_ROOTFS` said: FEX takes the root file system from its server. `tests/ci.sh`'s dynamically

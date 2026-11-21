@@ -225,7 +225,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   signals, fork, memory maps, selectors and `concurrent.futures` from the interpreter's own release (Python 3.12.3,
   750 cases), run by the root file system's python3: no case fails under tso-arm that passes under FEX's full
   ordering, and none fails under either. They found three faults in signal delivery, two of them FEX's own
-  (`test_signal` crashed under FEX without the patches in every run), fixed in the patches.
+  (`test_signal` crashed under FEX without the patches in every run), fixed in the patches. A wider run, 47 test
+  files with 5,297 cases (also subprocess, os, io, sockets, select, poll and epoll, asyncio, multiprocessing with a
+  fork server, pty, fcntl, faulthandler): the same 5 fail in both modes, FEX's (the file descriptors FEX keeps open
+  in every process, which a child that lists its own sees).
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.
