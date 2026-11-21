@@ -6,6 +6,12 @@
 # file system `tso-arm rootfs` fetches (or ROOTFS=directory).
 #   tests/rootfs_check.sh          exit status 1 if an output differs or a command fails under tso-arm
 set -u
+# SIGPIPE at its default for every command, as from a terminal: GitHub's runner starts its steps with it ignored,
+# which a program keeps through execve (FEX as well since notes section 53), and a writer into a closed pipe then gets
+# EPIPE and reports a write error or not, depending on how the processes happen to run
+if [ -z "${TSO_DEFAULT_SIGPIPE:-}" ] && env --default-signal=PIPE true 2>/dev/null; then
+    TSO_DEFAULT_SIGPIPE=1 exec env --default-signal=PIPE sh "$0" "$@"
+fi
 cd "$(dirname "$0")/.."
 T=bin/tso-arm
 if [ -z "${ROOTFS:-}" ]; then

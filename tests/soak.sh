@@ -9,6 +9,10 @@
 # Needs the root file system `tso-arm rootfs` fetches (or ROOTFS=directory).
 #   tests/soak.sh [ROUNDS]     exit status 1 if any run failed or gave another output
 set -u
+# SIGPIPE at its default, as from a terminal (tests/rootfs_check.sh says why)
+if [ -z "${TSO_DEFAULT_SIGPIPE:-}" ] && env --default-signal=PIPE true 2>/dev/null; then
+    TSO_DEFAULT_SIGPIPE=1 exec env --default-signal=PIPE sh "$0" "$@"
+fi
 cd "$(dirname "$0")/.."
 T=$PWD/bin/tso-arm
 rounds=${1:-20}
