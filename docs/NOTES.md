@@ -2224,3 +2224,39 @@ had taken with it), 75 failing in both modes, and under tso-arm only `test_get` 
 Efficiency afterwards (README): pigz 91, xz 88, zstd 69 %, mean 82 % (zstd a point down, within what it varies
 between sessions); the constants made anew at each exact start cost nothing measurable. HotSpot's occasional crash
 (sections 47 and 50) was not this: 5 of 100 runs with the views throughout afterwards (SIGILL and SIGSEGV), as before.
+
+## 52. Code patched while it is translated: HotSpot's crashes (2026-11-21)
+
+HotSpot crashed in a few runs of a hundred in every mode, under FEX without the patches as well (sections 47, 50,
+51). Under full ordering, 80 runs of `Workers` with `-XX:ErrorFile` (`javacrash.sh`): 4 crashes, one SIGILL "sent
+by kill" (FEX raises the guest's SIGILL for an instruction it cannot decode) and three SIGSEGV at addresses no
+program uses (0x402c9ffe9, 0xfeac21c8b3). All four were in methods C1 had just compiled, at their very entry
+(offsets 0, 0x20 and 0x24 of the nmethod): where HotSpot patches code while other threads may run into it (the
+verified entry made not entrant, call sites bound), each step one atomic store so that a processor fetching the
+instruction sees it old or new.
+
+FEX finds out that guest code changed by protecting each page it translated from against writes
+(`MarkGuestExecutableRange`): a store faults, the translations of the page go, the protection goes, the store runs
+again. A page is protected after its translation is done (`CompileBlock`, the decoder's code pages). A store while
+the decoder read the bytes, which a page without translations takes without a fault, went unseen: the translation
+of the bytes before it, or of a mix of old and new bytes (the decoder reads them one at a time), stayed valid, and
+the protection set afterwards waited for the next store. `tests/xmc.c` does what HotSpot does, many times: a
+function begins with `mov $1, %eax` (b8 01) and its first two bytes change by one atomic 2-byte store to a jump to
+`mov $2, %eax` (eb 04) and back, while another thread calls it. Natively every call returns 1 or 2 (two runs,
+870,000 calls during 20,000 patches each); under FEX without the patches, and under tso-arm 0.3.8 in every mode,
+every run crashed within two seconds (b8 04 is `mov $4`, eb 01 a jump into the middle of an instruction).
+
+The decoder now protects a page before it reads from it (`Decoder::ProtectCodePage`, at the block's entry and at
+each further page it reaches), unless translated code from the page is tracked already, which keeps the page
+protected (`LookupCache::HasCodePage`). The compile holds `CodeInvalidationMutex` shared; a store during it faults,
+FEX's handler of self-modifying code waits for that mutex, and when the translation is done throws it away with
+the page's others and lifts the protection: the next call translates the bytes as they are then. xmc: every call 1
+or 2, every mode (`tests/ci.sh`). HotSpot under full ordering, the same 80 runs: no crash; with the views
+throughout 100 of 100 right (5 of 100 crashed before), as `tso-arm run` runs it 80 of 80. The protection costs a
+`mprotect` for each page a block is read from that holds no translated code yet; efficiency afterwards (README):
+pigz 90, xz 88, zstd 69 %, mean 82 %, as before.
+
+A loop on the spot (`jmp .`, which HotSpot writes over an entry for the moment between the stores of a five-byte
+patch) is another matter: xmc in its first form, which patched through such a loop, did not end in any run with the
+protection in place (a thread that runs into the loop stays in its translation, a branch to itself, after the
+translation was thrown away). HotSpot's window is a few nanoseconds; it was not seen in any of its runs.

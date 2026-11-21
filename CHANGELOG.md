@@ -1,5 +1,18 @@
 # Changes
 
+## 0.3.9 (not released yet)
+
+- Fixed in FEX: code another thread wrote while FEX translated it could stay translated as it was before the write,
+  or as a mix of old and new bytes. FEX protected a page of guest code against writes only after it had translated
+  from it; a store in between went unseen. A JIT that patches a method's entry while another thread runs into it
+  was concerned: HotSpot (Java) crashed now and then, under FEX without the patches as well (4 of 80 runs). The page
+  is protected before its bytes are read now, and a store waits until the translation is done and throws it away
+  (notes section 52): no crash in 260 runs since.
+- `tests/xmc.c` (in `tests/ci.sh`): a function patched two bytes at a time while another thread calls it; under FEX
+  without the patches every run crashed.
+- `tests/ci.sh` takes the test programs' exit status: a pipe into `tail` had passed one that crashed or reported a
+  failure only by its status (the litmus tests report a forbidden outcome so).
+
 ## 0.3.8 (2026-11-21)
 
 What CPython's whole test suite found with the views throughout (no fallback by fault rate). Update from 0.3.7.

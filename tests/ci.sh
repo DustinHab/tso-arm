@@ -17,6 +17,13 @@ fail() {
     exit 1
 }
 ok() { echo "ok:   $*"; }
+# last COMMAND...: the command's last line of output, and its exit status (a pipe into tail gave tail's, so a test
+# program that crashed or reported a failure by its status passed)
+last() {
+    o=$("$@") && s=0 || s=$?
+    printf '%s\n' "$o" | tail -n 1
+    return $s
+}
 
 if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were built elsewhere
     $CC -O2 -static -pthread -o $B/mp litmus/mp.c
@@ -31,6 +38,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/smc tests/smc.c
     $CC -O2 -static -o $B/fdfull tests/fdfull.c
     $CC -O2 -static -pthread -o $B/exactstart tests/exactstart.c
+    $CC -O2 -static -pthread -o $B/xmc tests/xmc.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -54,7 +62,7 @@ done
 
 # fork without exec: the child's memory is its own (guest memory is shared memory under the views), memory mapped
 # shared stays shared, read-only memory made writable after the fork is copied
-out=$($T run $B/fork | tail -n 1) || fail "$out"
+out=$(last $T run $B/fork) || fail "$out"
 ok "$out"
 
 # private file mappings: a read-only one is mapped from the file itself, and stays private when it is made writable
@@ -65,35 +73,42 @@ ok "$out"
 
 # the program's own signal handlers, in every mode
 for m in tso full unordered; do
-    out=$($T run --mode $m $B/signals | tail -n 1) || fail "signals, $m: $out"
+    out=$(last $T run --mode $m $B/signals) || fail "signals, $m: $out"
     ok "$m: $out"
 done
 
 # signals that meet: two at once (the second while FEX still handles the first), and one raised while another
 # thread changes its action; FEX without the patches crashes in both (notes section 47)
 for m in tso full unordered; do
-    out=$($T run --mode $m $B/sigrace 5000 | tail -n 1) || fail "sigrace, $m: $out"
+    out=$(last $T run --mode $m $B/sigrace 5000) || fail "sigrace, $m: $out"
     ok "$m: $out"
 done
 
 # code rewritten while a second thread runs (the views awake): every call runs the bytes just written, also when
 # another thread wrote them (notes section 50)
 for m in tso full unordered; do
-    out=$($T run --mode $m $B/smc 2000 | tail -n 1) || fail "smc, $m: $out"
+    out=$(last $T run --mode $m $B/smc 2000) || fail "smc, $m: $out"
+    ok "$m: $out"
+done
+
+# code patched by another thread while this one runs it, two bytes at a time as HotSpot does: FEX without the
+# patches translated a mix of old and new bytes and crashed in every run (notes section 52)
+for m in tso full unordered; do
+    out=$(last $T run --mode $m $B/xmc 2000) || fail "xmc, $m: $out"
     ok "$m: $out"
 done
 
 # a thread sent back to the dispatcher at an instruction start finds the guest registers as they are there (CPython's
 # GC list unlink, whose rcx FEX had set to 0 ahead of time; notes section 51)
 for m in tso full unordered; do
-    out=$(TSO_VIEWS_BUDGET=0 TSO_VIEWS_PROFILE=none $T run --mode $m $B/exactstart 1000 | tail -n 1) || fail "exactstart, $m: $out"
+    out=$(last env TSO_VIEWS_BUDGET=0 TSO_VIEWS_PROFILE=none $T run --mode $m $B/exactstart 1000) || fail "exactstart, $m: $out"
     ok "$m: $out"
 done
 
 # fork, vfork and posix_spawn's clone with the program's descriptors nearly or all used up: none of them lost
 # (notes section 51)
 for m in tso full unordered; do
-    out=$($T run --mode $m $B/fdfull 5 | tail -n 1) || fail "fdfull, $m: $out"
+    out=$(last $T run --mode $m $B/fdfull 5) || fail "fdfull, $m: $out"
     ok "$m: $out"
 done
 
@@ -105,7 +120,7 @@ ok "$got"
 
 # litmus tests: no forbidden outcome under the page protocol (mp exits 1 if there was one)
 for v in mp vec rep stack stackflag vecflag repflag vecwait lb; do
-    out=$($T run $B/mp $v $N | tail -n 1) || fail "litmus $v: $out"
+    out=$(last $T run $B/mp $v $N) || fail "litmus $v: $out"
     ok "litmus $v: $out"
 done
 
@@ -113,7 +128,7 @@ done
 python3 aot/lift.py $B/mp out/aot/ci-mp.c thread_a thread_b thread_pair >/dev/null
 sh aot/build.sh out/aot/ci-mp.c out/aot/ci-mp.so
 for v in mp vec rep vecflag repflag vecwait lb; do
-    out=$(TSO_VIEWS_PROFILE=none $T run --aot out/aot/ci-mp.so $B/mp $v $N | tail -n 1) || fail "litmus $v, translated: $out"
+    out=$(last env TSO_VIEWS_PROFILE=none $T run --aot out/aot/ci-mp.so $B/mp $v $N) || fail "litmus $v, translated: $out"
     ok "litmus $v, translated: $out"
 done
 

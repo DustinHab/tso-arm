@@ -1,4 +1,4 @@
-From 8413a8ad36e79be9ad41e3b067c9b681c47b1f18 Mon Sep 17 00:00:00 2001
+From e9932631efdf822257a8c225f2d5dca17a411fc5 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -7,8 +7,11 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Interface/Context/Context.h    |   4 +
  FEXCore/Source/Interface/Core/Core.cpp        | 101 +-
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |  21 +
+ FEXCore/Source/Interface/Core/Frontend.cpp    |  20 +-
+ FEXCore/Source/Interface/Core/Frontend.h      |   6 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   2 +-
+ FEXCore/Source/Interface/Core/LookupCache.h   |   7 +
  .../Source/Interface/Core/OpcodeDispatcher.h  |  30 +
  FEXCore/Source/Interface/IR/IREmitter.h       |  15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  46 +-
@@ -35,7 +38,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.cpp           |  19 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 787 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 31 files changed, 2509 insertions(+), 180 deletions(-)
+ 34 files changed, 2540 insertions(+), 182 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -273,6 +276,72 @@ index c903d3b..6fd5a81 100644
      // Make sure to adjust the refcounter so we don't clear the cache now
      ldr(ARMEmitter::WReg::w2, STATE_PTR(CpuStateFrame, SignalHandlerRefCounter));
      add(ARMEmitter::Size::i32Bit, ARMEmitter::Reg::r2, ARMEmitter::Reg::r2, 1);
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index 94e4ac5..eee3115 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -1634,12 +1634,16 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+ 
+       if (OpMinPage != CurrentCodePage) {
+         CurrentCodePage = OpMinPage;
+-        BlockInfo.CodePages.insert(CurrentCodePage);
++        if (BlockInfo.CodePages.insert(CurrentCodePage).second) {
++          ProtectCodePage(CurrentCodePage);
++        }
+       }
+ 
+       if (OpMaxPage != CurrentCodePage) {
+         CurrentCodePage = OpMaxPage;
+-        BlockInfo.CodePages.insert(CurrentCodePage);
++        if (BlockInfo.CodePages.insert(CurrentCodePage).second) {
++          ProtectCodePage(CurrentCodePage);
++        }
+       }
+ 
+       LastFieldReadSize = 0;
+@@ -1779,6 +1783,17 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+   }
+ }
+ 
++void Decoder::ProtectCodePage(uint64_t Page) {
++  // Pages that hold translated code are protected already (a write took the protection away together with the
++  // translations); the compile holds CodeInvalidationMutex, so this does not change before it is done
++  if (CTX->Config.SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK || !Thread || !Thread->LookupCache || !CTX->SyscallHandler) {
++    return;
++  }
++  if (!Thread->LookupCache->HasCodePage(Page)) {
++    CTX->SyscallHandler->MarkGuestExecutableRange(Thread, Page, FEXCore::Utils::FEX_PAGE_SIZE);
++  }
++}
++
+ void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t PC, uint64_t MaxInst) {
+   FEXCORE_PROFILE_SCOPED("DecodeInstructions");
+   BlockInfo.TotalInstructionCount = 0;
+@@ -1828,6 +1843,7 @@ void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState*
+   CurrentCodePage = PC & FEXCore::Utils::FEX_PAGE_MASK;
+ 
+   BlockInfo.CodePages = {CurrentCodePage};
++  ProtectCodePage(CurrentCodePage);
+ 
+   EntryBlock = true;
+   FinalInstruction = false;
+diff --git a/FEXCore/Source/Interface/Core/Frontend.h b/FEXCore/Source/Interface/Core/Frontend.h
+index ade14bc..d4f515b 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.h
++++ b/FEXCore/Source/Interface/Core/Frontend.h
+@@ -110,6 +110,12 @@ private:
+   DecodedBlockStatus DecodeInstructionImpl(uint64_t PC);
+   DecodedBlockStatus DecodeInstruction(uint64_t PC);
+ 
++  // tso-arm: a page of guest code is protected against writes before the decoder reads it, not after its
++  // translation is done: a write in between went unseen, and the translation of the bytes before it, or of a mix of
++  // old and new bytes, stayed valid (HotSpot patching a method's entry while another thread ran into it). A write
++  // now waits in FEX's handler of self-modifying code until the translation is done, and throws it away.
++  void ProtectCodePage(uint64_t Page);
++
+   void BranchTargetInMultiblockRange();
+   bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
+   bool InstCanContinue() const;
 diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
 index ae3ed51..238f494 100644
 --- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
@@ -320,6 +389,24 @@ index 7c12607..892afe8 100644
  }
  
  DEF_OP(Push) {
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index 391d485..1ba432d 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -293,6 +293,13 @@ public:
+     return Shared->AddBlockExecutableRange(Addresses, Start, Length, lk);
+   }
+ 
++  // tso-arm: whether code translated from the page at Page is tracked, so that a write to the page is caught
++  bool HasCodePage(uint64_t Page) {
++    auto lk = Shared->AcquireReadLock();
++    auto It = Shared->CodePages.find(Page >> 12);
++    return It != Shared->CodePages.end() && !It->second.empty();
++  }
++
+   // Adds to Guest -> Host code mapping
+   void AddBlockMapping(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode) {
+     std::optional<FEXCore::SHMStats::AccumulationBlock<uint64_t>> LockTime(
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 index 360d605..c9cc558 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h

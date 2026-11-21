@@ -18,6 +18,7 @@ $CC -O2 -static -pthread -o build/ci/sigrace tests/sigrace.c
 $CC -O2 -static -pthread -o build/ci/smc tests/smc.c
 $CC -O2 -static -o build/ci/fdfull tests/fdfull.c
 $CC -O2 -static -pthread -o build/ci/exactstart tests/exactstart.c
+$CC -O2 -static -pthread -o build/ci/xmc tests/xmc.c
 $CC -O2 -static -o build/ci/x87 tests/x87.c
 $CC -O2 -static -o build/ci/filemap tests/filemap.c
 # dynamically linked, with this machine's C library as the root file system
