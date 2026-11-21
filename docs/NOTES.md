@@ -2116,3 +2116,9 @@ In the six test files concerned (`test_cmd_line test_tempfile test_posix test_su
 1,048 cases) 3 fail now instead of 14, in both modes alike: `test_pass_fds_redirected`, an environment test of
 `PYTHONPATH`, and `platform.architecture` through a symbolic link. `tests/ci.sh`, `rootfs_check` 28 of 28,
 `tests/soak.sh` 45 of 45.
+
+The whole suite afterwards (`JOBS=3 tests/cpython_suite.sh all`): 75 cases fail in both modes, none under tso-arm
+only (87 and 86 before). Five processes were left behind after it, multiprocessing's resource tracker and pool
+workers of a test: regrtest starts its workers in sessions of their own, out of reach of the suite's session, and
+they kept FEX's server alive. The suite marks its processes in their environment now and ends every one that carries
+the mark, wherever it went.

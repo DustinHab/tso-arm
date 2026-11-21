@@ -229,9 +229,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   750 cases), run by the root file system's python3: no case fails under tso-arm that passes under FEX's full
   ordering, and none fails under either. They found three faults in signal delivery, two of them FEX's own
   (`test_signal` crashed under FEX without the patches in every run), fixed in the patches. The whole suite
-  (`tests/cpython_suite.sh all`, 39,988 cases): none fails under tso-arm only; 86 fail in both modes, most because
-  Ubuntu's Python 3.12.3 carries changes the release's own tests do not expect, the rest FEX's (such as the file
-  descriptors FEX keeps open in every process, which a child that lists its own sees).
+  (`tests/cpython_suite.sh all`, 39,988 cases): none fails under tso-arm only; 75 fail in both modes, most because
+  Ubuntu's Python 3.12.3 carries changes the release's own tests do not expect, a few FEX's. It found FEX's own file
+  descriptors on the numbers a program uses (a closed standard input became FEX's socket) and `fexecve` losing
+  `argv[0]`, fixed in the patches (notes section 49): 87 failed before.
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.

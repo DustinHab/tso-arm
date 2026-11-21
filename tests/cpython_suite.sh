@@ -57,13 +57,20 @@ run() {
         # In a session of its own: a test's time limit ends its worker, not the worker's children, and one left
         # behind keeps FEX's server alive, with this root file system for every later FEX program whatever
         # FEX_ROOTFS says. Whatever is left of the session goes afterwards.
+        # regrtest starts its workers in sessions of their own, so the processes of this run also carry a mark in
+        # their environment, which they pass on (multiprocessing's resource tracker and pool workers of a test were
+        # left behind once, out of every session)
         rm -f "$D/$n$m.xml"
-        (cd "$W" && PYTHONHOME=/usr PYTHONPATH="$D" exec setsid timeout ${SUITE_TIME:-7200} $T run --mode $m "$PY" -m test \
-            -j${JOBS:-1} --timeout 900 --junit-xml "$D/$n$m.xml" "$@") >"$D/$n$m.log" 2>&1 &
+        mark=TSO_CPYTHON_SUITE_RUN=$$-$n$m
+        (cd "$W" && export "$mark" && PYTHONHOME=/usr PYTHONPATH="$D" exec setsid timeout ${SUITE_TIME:-7200} $T run --mode $m \
+            "$PY" -m test -j${JOBS:-1} --timeout 900 --junit-xml "$D/$n$m.xml" "$@") >"$D/$n$m.log" 2>&1 &
         p=$!
         wait $p
         e=$?
         pkill -KILL -s $p 2>/dev/null
+        for f in /proc/[0-9]*/environ; do
+            grep -qzx "$mark" "$f" 2>/dev/null && q=${f#/proc/} && kill -KILL "${q%/environ}" 2>/dev/null
+        done
         echo "$n$m: exit $e, $(( $(date +%s) - s )) s, $(grep -E '^(Total tests|Result|== Tests result)' "$D/$n$m.log" | tr '\n' ' ')"
         {
             # the tests that failed, crashed or ran out of time, from regrtest's summary ("2 tests failed:" and the
