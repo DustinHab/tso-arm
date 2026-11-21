@@ -2222,4 +2222,5 @@ The same run afterwards, views throughout: the distribution's programs and `comp
 `rootfs_check` 28 of 28, CPython's whole suite 39,988 cases (101 more than before, which the crashed `test_import`
 had taken with it), 75 failing in both modes, and under tso-arm only `test_get` of the two multiprocessing variants.
 Efficiency afterwards (README): pigz 91, xz 88, zstd 69 %, mean 82 % (zstd a point down, within what it varies
-between sessions); the constants made anew at each exact start cost nothing measurable.
+between sessions); the constants made anew at each exact start cost nothing measurable. HotSpot's occasional crash
+(sections 47 and 50) was not this: 5 of 100 runs with the views throughout afterwards (SIGILL and SIGSEGV), as before.
