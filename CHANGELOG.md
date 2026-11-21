@@ -1,5 +1,15 @@
 # Changes
 
+## 0.3.10 (not released yet)
+
+- Fixed in FEX: a thread could stay in the translation of code that another thread had overwritten. FEX's block
+  linker looked up a branch's target, let go of its lock, and linked the branch after it took the lock again; when
+  another thread's store threw the target away in between, the link pointed to the old translation and nothing
+  undid it. A `jmp .` (which HotSpot writes over a method's entry for a moment while it patches five bytes) then
+  waited there for good. The linker links to the translation the block list holds now (none: through the
+  dispatcher), and a jump to itself leaves its block through a linked exit (notes section 52).
+- `tests/xmc.c` patches through a `jmp .` as well (`xmc N loop`, in `tests/ci.sh`).
+
 ## 0.3.9 (2026-11-21)
 
 Java no longer crashes now and then. Update from 0.3.8. The FEX patch changed, so this release brings FEX prebuilt

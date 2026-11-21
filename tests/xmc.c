@@ -4,8 +4,12 @@
 // two bytes or the new ones; a decoder that reads them one at a time may see b8 04 (`mov $4, %eax`) or eb 01 (a
 // jump into the middle). FEX protected a page against writes only after it had translated code from it, so a store
 // while it decoded went unseen and such a translation stayed valid (notes section 52).
-//   xmc [PATCHES]   calls the function until PATCHES patches are done (default 2000); exit status 1 if a call
-//                   returned anything but 1 or 2, 2 if the calls did not end within a minute
+// With `loop` the patch goes as HotSpot patches five bytes: `jmp .` (eb fe) over the start first, then the new
+// `mov $N, %eax` (b8 0N), so a thread that comes in between waits on the spot until the patch is done. FEX's block
+// linker could link the loop to its own translation after the patch had thrown that away, and the thread stayed in
+// it for good.
+//   xmc [PATCHES [loop]]   calls the function until PATCHES patches are done (default 2000); exit status 1 if a
+//                          call returned anything but 1 or 2, 2 if the calls did not end within a minute
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -19,12 +23,19 @@
 static volatile uint8_t* Code;
 static atomic_int Stop;
 static atomic_long Patches;
+static int Loop;
 
 static void* Writer(void* Arg) {
   (void)Arg;
   for (long i = 0; !atomic_load_explicit(&Stop, memory_order_relaxed); ++i) {
-    const uint16_t Start = (i & 1) ? 0x04eb : 0x01b8; // eb 04: jmp +4; b8 01: mov $1, %eax
-    __atomic_store_n((volatile uint16_t*)Code, Start, __ATOMIC_RELEASE);
+    if (Loop) {
+      __atomic_store_n((volatile uint16_t*)Code, 0xfeeb, __ATOMIC_RELEASE); // eb fe: jmp .
+      for (volatile int k = 0; k < 100; ++k) {
+      }
+      __atomic_store_n((volatile uint16_t*)Code, (i & 1) ? 0x02b8 : 0x01b8, __ATOMIC_RELEASE); // b8 0N: mov $N, %eax
+    } else {
+      __atomic_store_n((volatile uint16_t*)Code, (i & 1) ? 0x04eb : 0x01b8, __ATOMIC_RELEASE); // eb 04: jmp +4
+    }
     atomic_fetch_add_explicit(&Patches, 1, memory_order_relaxed);
     for (volatile int k = 0; k < 300; ++k) {
     }
@@ -43,6 +54,7 @@ static void Late(int Signal) {
 
 int main(int argc, char** argv) {
   const long Wanted = argc > 1 ? atol(argv[1]) : 2000;
+  Loop = argc > 2 && !strcmp(argv[2], "loop");
   void* Page = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (Page == MAP_FAILED) {
     perror("mmap");

@@ -1,4 +1,4 @@
-From e9932631efdf822257a8c225f2d5dca17a411fc5 Mon Sep 17 00:00:00 2001
+From fcf7fd94f914c46ec19ffd6aca330848278250b4 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -10,8 +10,10 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Interface/Core/Frontend.cpp    |  20 +-
  FEXCore/Source/Interface/Core/Frontend.h      |   6 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
+ FEXCore/Source/Interface/Core/JIT/JIT.cpp     |  15 +-
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   2 +-
  FEXCore/Source/Interface/Core/LookupCache.h   |   7 +
+ .../Interface/Core/OpcodeDispatcher.cpp       |   6 +-
  .../Source/Interface/Core/OpcodeDispatcher.h  |  30 +
  FEXCore/Source/Interface/IR/IREmitter.h       |  15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  46 +-
@@ -38,7 +40,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.cpp           |  19 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 787 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 34 files changed, 2540 insertions(+), 182 deletions(-)
+ 36 files changed, 2559 insertions(+), 184 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -376,6 +378,39 @@ index ae3ed51..238f494 100644
    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GetReg(Op->ArgPtr));
  
    InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index 435afed..2e3db82 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -567,7 +567,6 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
+   // See ExitFunction in BranchOps.cpp for an assembly level view of the handled cases.
+   uintptr_t JumpThunkStartAddress = reinterpret_cast<uintptr_t>(Record) - 0x10;
+   uintptr_t CallerAddress = JumpThunkStartAddress + Record->CallerOffset;
+-  auto BranchOffset = HostCode / 4 - CallerAddress / 4;
+ 
+   uint32_t ExpectedKnownCallMarkerInst = 0;
+   ARMEmitter::Emitter ExpectedKnownCallMarkerEmit(reinterpret_cast<uint8_t*>(&ExpectedKnownCallMarkerInst), 4);
+@@ -579,6 +578,20 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
+   // Lock here is necessary to prevent simultaneous linking and delinking
+   auto lk = Thread->LookupCache->AcquireWriteLock();
+ 
++  // tso-arm: the link goes to the translation the block list holds now, under these locks. The block may have been
++  // thrown away since it was looked up or compiled above, outside them (a store of another thread into its code): a
++  // link to it made now would never be undone, the block's links were severed already, and the thread would run the
++  // old translation for good (a `jmp .` linked to itself, waiting for a patch it never saw); the thread goes on
++  // through the dispatcher then. And two threads that compiled the same block at once each hold their own copy, of
++  // which the list keeps one: the other thread's lookup still finds its own in its first-level cache.
++  if (auto It = Thread->LookupCache->Shared->BlockList.find(GuestRip); It != Thread->LookupCache->Shared->BlockList.end()) {
++    HostCode = It->second.HostCode;
++  } else {
++    Frame->State.rip = GuestRip;
++    return Frame->Pointers.DispatcherLoopTop;
++  }
++  const auto BranchOffset = HostCode / 4 - CallerAddress / 4;
++
+   // For non-calls, this would extend into the block's code, however that's fine as an out-of-range adr would never
+   // be generated avoiding any false positives.
+   uintptr_t KnownCallMarkerAddr = CallerAddress - 0x8;
 diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 index 7c12607..892afe8 100644
 --- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
@@ -407,6 +442,23 @@ index 391d485..1ba432d 100644
    // Adds to Guest -> Host code mapping
    void AddBlockMapping(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode) {
      std::optional<FEXCore::SHMStats::AccumulationBlock<uint64_t>> LockTime(
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 3eb2fbb..0f2f82a 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -862,7 +862,11 @@ void OpDispatchBuilder::JUMPOp(OpcodeArgs) {
+   // This is just an unconditional relative literal jump
+   if (Multiblock) {
+     auto JumpBlock = JumpTargets.find(TargetRIP);
+-    if (JumpBlock != JumpTargets.end()) {
++    // tso-arm: a jump to itself (`jmp .`, which HotSpot writes over a method's entry for the moment between the
++    // stores of a patch) leaves the block through an exit, which the block linker links back to it: throwing the
++    // translation away unlinks the exit, and a thread waiting in the loop goes on with the patched code. As a branch
++    // inside the block it stayed in the old translation for good.
++    if (JumpBlock != JumpTargets.end() && TargetRIP != Op->PC) {
+       Jump(GetNewJumpBlock(TargetRIP));
+     } else {
+       // If the block isn't a jump target then we need to create an exit block
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 index 360d605..c9cc558 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h

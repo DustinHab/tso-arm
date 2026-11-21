@@ -2257,6 +2257,19 @@ throughout 100 of 100 right (5 of 100 crashed before), as `tso-arm run` runs it 
 pigz 90, xz 88, zstd 69 %, mean 82 %, as before.
 
 A loop on the spot (`jmp .`, which HotSpot writes over an entry for the moment between the stores of a five-byte
-patch) is another matter: xmc in its first form, which patched through such a loop, did not end in any run with the
-protection in place (a thread that runs into the loop stays in its translation, a branch to itself, after the
-translation was thrown away). HotSpot's window is a few nanoseconds; it was not seen in any of its runs.
+patch) was another matter: xmc in its first form, which patched through such a loop (`xmc N loop` now), did not end
+in any run with the protection in place, block by block as well. During the hang both threads ran in user space
+without a fault; gdb showed the caller in the loop's translation, linked to itself by a direct branch, and the writer
+in its own loop, patching a page that was no longer protected. FEX's block linker (`Arm64JITCore::ExitFunctionLink`)
+looks up or compiles the target block under `CodeInvalidationMutex`, lets go of it, and takes it again to patch the
+branch and record the link. A store of another thread in between threw the block away and severed its links; the
+linker then linked the branch to the thrown-away translation, and its record pointed to a block that no longer
+existed, so nothing would ever undo it (and the page, its translations gone, stayed unprotected). The linker now
+links to the translation the block list holds for the target under its locks, and sends the thread through the
+dispatcher if the list holds none. (A first version refused the link whenever the list held another translation
+than the one looked up: two threads that compile the same block at once each make their own, the list keeps one,
+and the other thread's first-level cache goes on returning its own, so that thread passed through the dispatcher at
+every such exit; xz with FEX's 5000-instruction units took 1.74 to 2.16 s instead of 1.35.) And a jump to itself is
+no longer a branch inside its block (FEX's multiblock), which throwing the translation away cannot reach, but an exit
+to its own address, which the linker links back. `xmc 2000 loop`: right in every mode and block by block
+(`tests/ci.sh`). Efficiency afterwards (README): pigz 91, xz 88, zstd 70 %, mean 82 %.

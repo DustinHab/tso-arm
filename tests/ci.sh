@@ -97,6 +97,11 @@ for m in tso full unordered; do
     out=$(last $T run --mode $m $B/xmc 2000) || fail "xmc, $m: $out"
     ok "$m: $out"
 done
+# ...and five bytes at a time through a `jmp .`, which FEX's block linker could link to its old translation for good
+for m in tso full unordered; do
+    out=$(last $T run --mode $m $B/xmc 2000 loop) || fail "xmc loop, $m: $out"
+    ok "$m, loop: $out"
+done
 
 # a thread sent back to the dispatcher at an instruction start finds the guest registers as they are there (CPython's
 # GC list unlink, whose rcx FEX had set to 0 ahead of time; notes section 51)
