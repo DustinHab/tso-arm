@@ -1,6 +1,10 @@
 # Changes
 
-## 0.3.7 (not released yet)
+## 0.3.7 (2026-11-21)
+
+Self-modifying code under the views: a multithreaded program that wrote over code it had run could keep running
+the old code. Update from 0.3.6. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install`
+replaces the one of 0.3.6 or older.
 
 - Fixed: code that a multithreaded program wrote over while it ran under the views kept running in its old
   translation (FEX protects the pages it translated from against writes only where FEX itself addresses guest
