@@ -28,6 +28,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/fork tests/fork.c
     $CC -O2 -static -o $B/signals tests/signals.c
     $CC -O2 -static -pthread -o $B/sigrace tests/sigrace.c
+    $CC -O2 -static -pthread -o $B/smc tests/smc.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -70,6 +71,13 @@ done
 # thread changes its action; FEX without the patches crashes in both (notes section 47)
 for m in tso full unordered; do
     out=$($T run --mode $m $B/sigrace 5000 | tail -n 1) || fail "sigrace, $m: $out"
+    ok "$m: $out"
+done
+
+# code rewritten while a second thread runs (the views awake): every call runs the bytes just written, also when
+# another thread wrote them (notes section 50)
+for m in tso full unordered; do
+    out=$($T run --mode $m $B/smc 2000 | tail -n 1) || fail "smc, $m: $out"
     ok "$m: $out"
 done
 

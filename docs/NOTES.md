@@ -2122,3 +2122,43 @@ only (87 and 86 before). Five processes were left behind after it, multiprocessi
 workers of a test: regrtest starts its workers in sessions of their own, out of reach of the suite's session, and
 they kept FEX's server alive. The suite marks its processes in their environment now and ends every one that carries
 the mark, wherever it went.
+
+## 50. Self-modifying code through the views (2026-11-21)
+
+FEX finds out that code it translated changes by protecting the pages it translated from against writes
+(`MarkGuestExecutableRange`, FEX's default `mtrack`): a store faults, the handler throws the translations of the
+page away and lifts the protection. It protects the identity mapping of guest memory, the addresses FEX itself
+uses. Under the views translated code stores through a thread's plain or ordered view, other mappings of the same
+memory that this protection does not reach: a store there went through, and the old translation kept running.
+`tests/smc.c`: with a second thread running (the views awake) the main thread writes `mov $N, %eax; ret` over the
+same bytes and calls them, and then a second thread writes code the main thread runs; under tso-arm the second call
+already returned the first N, in every run (full ordering and no ordering: right). Every JIT that writes over code it
+ran before is concerned while it runs under the views and not in the fallback (a code cache that is reused, inline
+caches patched in place).
+
+It also made FEX crash: HotSpot without the fallback (`TSO_VIEWS_BUDGET=0`) died at once, in `java -version`
+already, in the fault handler: a store to its code cache met a page another thread uses, the handler completed it on
+the identity mapping (`EmulateAccess`), which was protected for code, and the write faulted inside the handler (a core
+file and FEX's symbols showed it: `strb w8, [x0]`, x0 a guest address in the code cache). With the fallback, after a
+fraction of a second, nobody saw either.
+
+The views now keep a byte per page, protected for code (`TSOViewMemory::ProtectCode`, called by
+`MarkGuestExecutableRange`): no view gives such a page the right to write, whatever its state. A store faults on its
+view, and the handler (`Fault::Code`) goes on with FEX's own handling of self-modifying code at the guest address:
+the translations go, the identity mapping and the views get their rights back (FEX's callback calls `UnprotectCode`;
+the page's state decides again), and the store runs again; a store into the block it runs in repeats as a single
+instruction, as in FEX. An access the handler completes itself does so only if no page within 32 bytes of it is
+protected for code, under the views' lock, which `ProtectCode` takes as well; otherwise the instruction is repeated
+as a single instruction, faults on its view again and takes the path above. A new mapping clears the bytes (FEX
+throws away what it translated from the range before).
+
+`smc.c` (now in `tests/ci.sh`, every mode): 5,000 rewrites and 5,000 hand-overs right in every mode. HotSpot with the
+views throughout: right.
+
+The protection costs a view's rights only where the guest may write: most code pages are a program's read-only text
+and only get their byte (re-applying every view's protection for each new code page cost the protocol a point or
+two). Efficiency afterwards (README): pigz 91, xz 88, zstd 70 %, mean 83 %; the full check correct, `tests/soak.sh`
+75 of 75, `rootfs_check` 28 of 28.
+
+HotSpot's occasional crash (section 47) stays: 2 of 60 runs with the views throughout (exact starts at every access
+to memory), SIGSEGV and SIGILL, about as often as with the fallback.
