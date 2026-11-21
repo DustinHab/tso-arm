@@ -23,7 +23,7 @@ xz and zstd; the full table is below):
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
 
 Programs as Ubuntu ships them (xz with liblzma, gzip, bzip2 with libbz2, openssl's sha512), with their shared
-libraries translated ahead of time: 83 % of the host's own Arm builds, against 61 % under FEX's full TSO.
+libraries translated ahead of time: 82 % of the host's own Arm builds, against 61 % under FEX's full TSO.
 
 ## Quick start
 
@@ -159,15 +159,15 @@ of the same programs (Raspberry Pi OS: other versions, so the native column is a
 program learned once with `tso-arm learn`.
 
 <!-- distro:begin -->
-Measured 2026-11-20T22:27, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
+Measured 2026-11-21T18:59, Raspberry Pi 5 at 1.8 GHz, best of the rounds, wall time; the Ubuntu 24.04 x86-64 builds against the host's Arm builds.
 
 | Program (its library) | native Arm | FEX full TSO | tso-arm, page protocol | tso-arm, learned |
 |---|---|---|---|---|
-| xz (liblzma) | 1.06 s, 100 % | 1.67 s, 63 % | 1.55 s, 68 % | 1.25 s, 85 % |
-| gzip (-) | 3.59 s, 100 % | 5.40 s, 66 % | 4.28 s, 84 % | 3.80 s, 94 % |
-| bzip2 (libbz2) | 1.02 s, 100 % | 1.87 s, 55 % | 1.36 s, 75 % | 1.21 s, 84 % |
-| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.65 s, 60 % | 0.57 s, 68 % | 0.56 s, 70 % |
-| geometric mean | 100 % | 61 % | 74 % | 83 % |
+| xz (liblzma) | 1.06 s, 100 % | 1.67 s, 63 % | 1.59 s, 67 % | 1.24 s, 85 % |
+| gzip (-) | 3.59 s, 100 % | 5.42 s, 66 % | 4.29 s, 84 % | 3.80 s, 94 % |
+| bzip2 (libbz2) | 1.02 s, 100 % | 1.88 s, 54 % | 1.36 s, 75 % | 1.21 s, 84 % |
+| openssl (libcrypto, sha512) | 0.39 s, 100 % | 0.66 s, 59 % | 0.57 s, 68 % | 0.58 s, 67 % |
+| geometric mean | 100 % | 61 % | 73 % | 82 % |
 
 Efficiency = native time / time. Throttling flags after the run: 0xe0000. Every output checked.
 <!-- distro:end -->
