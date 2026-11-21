@@ -1,6 +1,9 @@
 # Changes
 
-## 0.3.9 (not released yet)
+## 0.3.9 (2026-11-21)
+
+Java no longer crashes now and then. Update from 0.3.8. The FEX patch changed, so this release brings FEX prebuilt
+anew; `tso-arm install` replaces the one of 0.3.8 or older.
 
 - Fixed in FEX: code another thread wrote while FEX translated it could stay translated as it was before the write,
   or as a mix of old and new bytes. FEX protected a page of guest code against writes only after it had translated
