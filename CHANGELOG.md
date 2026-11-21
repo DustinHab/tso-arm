@@ -1,6 +1,8 @@
 # Changes
 
-## 0.3.5 (not released yet)
+## 0.3.5 (2026-11-21)
+
+Go programs run. Nothing changed in the FEX patch: update from 0.3.4 by fetching this tso-arm; FEX stays.
 
 - Go programs run: Go's runtime preempts goroutines with a signal and resumes them with the state its handler saw,
   which FEX does not give exactly in the middle of translated code (Go programs crashed within a second, under FEX
