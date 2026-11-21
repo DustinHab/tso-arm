@@ -41,11 +41,20 @@ trap 'rm -rf "$W"' EXIT
 for m in full tso; do
     s=$(date +%s)
     # the tests of the interpreter's own release come first on the path; one test at a time, each in a process of
-    # its own (-j1), with a time limit per test
+    # its own (-j1), with a time limit per test. PYTHONHOME (the interpreter's own prefix) keeps the tests' child
+    # interpreters from starting isolated (-I), which would drop the path and have them import the distribution's
+    # small test package instead (test_threading's daemon threads then wait forever for a module it lacks)
+    # In a session of its own: a test's time limit ends its worker, not the worker's children, and one left behind
+    # keeps FEX's server alive, with this root file system for every later FEX program whatever FEX_ROOTFS says.
+    # Whatever is left of the session goes afterwards.
     rm -f "$D/$m.xml"
-    (cd "$W" && PYTHONPATH="$D" timeout 7200 $T run --mode $m "$PY" -m test -j1 --timeout 900 \
-        --junit-xml "$D/$m.xml" $tests) >"$D/$m.log" 2>&1
-    echo "$m: exit $?, $(( $(date +%s) - s )) s, $(grep -E '^(Result|== Tests result)' "$D/$m.log" | tail -n 1)"
+    (cd "$W" && PYTHONHOME=/usr PYTHONPATH="$D" exec setsid timeout 7200 $T run --mode $m "$PY" -m test -j1 \
+        --timeout 900 --junit-xml "$D/$m.xml" $tests) >"$D/$m.log" 2>&1 &
+    p=$!
+    wait $p
+    e=$?
+    pkill -KILL -s $p 2>/dev/null
+    echo "$m: exit $e, $(( $(date +%s) - s )) s, $(grep -E '^(Result|== Tests result)' "$D/$m.log" | tail -n 1)"
     {
         # the tests that failed, crashed or ran out of time, from regrtest's summary ("2 tests failed:" and the
         # names indented below) ...

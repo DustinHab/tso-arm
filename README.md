@@ -186,34 +186,46 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   without ordering.
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
-  cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, x87
-  arithmetic, a dynamically linked program, a shared library translated ahead of time that the program loads and
+  cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, signals
+  that meet (two at once, one raised while another thread changes its action), x87 arithmetic, a dynamically linked
+  program, a shared library translated ahead of time that the program loads and
   unloads three times, and the ring buffer there, also after a start with one thread (the views asleep); then it
   measures the efficiency of pigz, xz and zstd on that machine
   (`tests/ci_bench.sh`, in the run's summary). Every week the same tests run with the patches on FEX's newest commit
   (`.github/workflows/upstream.yml`); on demand, `.github/workflows/profile.yml` profiles a workload there
   (`tests/ci_profile.sh`: per guest function, translated against FEX's own code).
-- **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes section 35): sort,
-  7-Zip, Python with threads, ffmpeg with x264 and Node with worker threads from x86-64 Ubuntu, packed with their
-  libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock, the profiles from nothing):
+- **Programs of a distribution** (`tests/compat.sh`, `.github/workflows/compat.yml`, notes sections 35 and 47):
+  sort, 7-Zip, Python with threads, ffmpeg with x264, Node with worker threads and Java from x86-64 Ubuntu, packed
+  with their libraries (`tools/compat_rootfs.sh`); on the Pi 5 (best of 3, default clock, the profiles from
+  nothing):
 
   | | tso-arm | FEX, full TSO | FEX, no ordering | output |
   |---|---|---|---|---|
-  | sort, 4 threads | 2319 ms | 2464 ms | 2356 ms | the same |
-  | 7-Zip, xz with 4 threads | 3379 ms | 3399 ms | 3339 ms | the same |
-  | Python, threads | 2945 ms | 2956 ms | 2204 ms | the same |
-  | ffmpeg, x264 with 4 threads | 1725 ms | 2926 ms | 2242 ms | the same |
-  | Node, worker threads | 4968 ms | 8375 ms | 6711 ms | the same |
-  | Node, messages seen before their data | 0 | 0 | 88,665 | |
+  | sort, 4 threads | 2281 ms | 2865 ms | 2597 ms | the same |
+  | 7-Zip, xz with 4 threads | 3467 ms | 3513 ms | 3495 ms | the same |
+  | Python, threads | 2962 ms | 2955 ms | 2173 ms | the same |
+  | ffmpeg, x264 with 4 threads | 1753 ms | 2951 ms | 2270 ms | the same |
+  | Node, worker threads | 4988 ms | 7859 ms | 6918 ms | the same |
+  | Node, messages seen before their data | 0 | 0 | 105,922 | |
+  | Java, parallel sort and streams | 4042 ms | 4272 ms | 2854 ms | the same |
+  | Java, messages seen before their data | 0 | 0 | 3,131,256 | |
 
-  ffmpeg and Node faster than FEX without any ordering: tso-arm has FEX compile smaller units (notes section 43).
+  sort, ffmpeg and Node faster than FEX without any ordering: tso-arm has FEX compile smaller units (notes section
+  43).
 
-  The last row is message passing in JavaScript through a SharedArrayBuffer with plain stores: V8 compiles it to
-  x86 code at run time, and only x86 order keeps the reader from seeing the flag before the data.
+  The message rows: JavaScript through a SharedArrayBuffer with plain stores, Java with a release store and an
+  acquire load (a correct Java program). V8 and HotSpot compile them to plain x86 moves at run time, and only x86
+  order keeps the reader from seeing the flag before the data. HotSpot crashes in 1 to 3 of 30 runs under FEX,
+  with the patches and without (in code it has just compiled); `tests/compat.sh` repeats such a run and says so.
 - **Everyday programs** (`tests/rootfs_check.sh`, notes sections 39 and 44): 28 commands of the root file system
   `tso-arm rootfs` fetches (shell pipelines, command substitution, traps and job control, coreutils, gzip, xz, tar,
   perl, Python with subprocess, a fork pool, fork beside running threads and signal handlers, git packing a
   repository with 4 threads, make with 4 jobs, rsync) give the same output as under FEX's full ordering.
+- **CPython's own tests** (`tests/cpython_suite.sh`, notes section 47): the tests of threads, locks, queues,
+  signals, fork, memory maps, selectors and `concurrent.futures` from the interpreter's own release (Python 3.12.3,
+  750 cases), run by the root file system's python3: no case fails under tso-arm that passes under FEX's full
+  ordering, and none fails under either. They found three faults in signal delivery, two of them FEX's own
+  (`test_signal` crashed under FEX without the patches in every run), fixed in the patches.
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.

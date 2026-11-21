@@ -8,6 +8,24 @@
   host's builds with the page protocol (were 79, 70 and 59 %); the distribution table's mean with learned functions
   83 instead of 80 %. `TSO_VIEWS_ASLEEP=0` starts with the views awake.
 - `tests/wake.c` (in `tests/ci.sh`): code translated while the views slept does not run on with two threads.
+- Fixed: a thread that got a signal during a system call could go on in its handler with registers of the
+  interrupted code (its stack pointer among them) and crash, under the views whenever the handler met memory that
+  another thread uses (notes section 47). FEX left the handler its "in a system call" state, and the page
+  protocol's exits from a block then spilled none of the handler's registers.
+- Fixed in FEX's signal delivery (FEX without the patches crashes in both, CPython's `test_signal` too): a signal
+  that came in while another thread changed its action could take the handler of one action and the checks of
+  the other (a guest jumping to address 1); a second signal during FEX's handler for the first ran FEX's handler
+  inside it and lost the first one's frame. The action is now read as a whole, and FEX's handler runs with every
+  signal blocked that it does not need itself.
+- Fixed: the layer for translated libraries wrote its notes to the program's standard error, which belongs to the
+  program (a test that wants it empty failed); now only on a terminal or with `TSO_AOT_LOG`. It also finds room for
+  its stubs next to more libraries (every 2 MiB within branch range instead of four places).
+- `tso-arm run` says so when FEX's server, which a program still running started, serves another root file system
+  than `FEX_ROOTFS` names: FEX takes the root file system from its server.
+- `tests/sigrace.c` (in `tests/ci.sh`): two signals at once, and one raised while another thread changes its
+  action. `tests/cpython_suite.sh`: CPython's own tests of threads, signals, fork, queues and memory maps (750
+  cases) against FEX's full ordering, case by case. `tests/compat.sh` runs Java as well (a parallel sort, a
+  concurrent map, and message passing that only x86 order keeps right).
 
 ## 0.3.3 (2026-11-20)
 

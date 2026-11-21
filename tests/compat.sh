@@ -176,7 +176,7 @@ case_cmd() { # name -> command (program from the root file system, arguments)
     python) echo "${root}/usr/bin/python3 $W/threads.py" ;;
     ffmpeg) echo "${root}/usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=25:duration=4 -c:v libx264 -preset fast -threads 4 -f md5 -" ;;
     node) echo "${root}/usr/bin/node $W/workers.js" ;;
-    java) echo "$jdk/bin/java -Xmx1g -cp $W/java-${jdk##*/} Workers" ;;
+    java) echo "$jdk/bin/java -Xmx1g -XX:ErrorFile=$W/hs_err_%p.log -cp $W/java-${jdk##*/} Workers" ;;
     esac
 }
 cases=${CASES:-sort 7zip python ffmpeg node java}
@@ -197,15 +197,27 @@ esac
     for c in $cases; do
         row="| $c |"
         sums=""
+        crashes=""
         for m in $modes; do
             best=""
+            n=0
             for i in $(seq $rounds); do
-                s=$(date +%s%N)
-                sh -c "$(prefix $m) $(case_cmd $c)" >$W/out-$c-$m 2>$W/err-$c-$m </dev/null || true
-                e=$(date +%s%N)
+                # HotSpot crashes now and then (SIGILL or SIGSEGV in code it has just compiled) under FEX, with the
+                # patches and without (notes section 47): such a run is repeated, twice at most, and counted
+                for try in 1 2 3; do
+                    s=$(date +%s%N)
+                    sh -c "$(prefix $m) $(case_cmd $c)" >$W/out-$c-$m 2>$W/err-$c-$m </dev/null || true
+                    e=$(date +%s%N)
+                    if [ $c = java ] && ! grep -q '^sum ' $W/out-$c-$m && [ $try -lt 3 ]; then
+                        n=$((n + 1))
+                        continue
+                    fi
+                    break
+                done
                 t=$(( (e - s) / 1000000 ))
                 [ -z "$best" ] || [ $t -lt $best ] && best=$t
             done
+            [ $n = 0 ] || crashes="$crashes, $m $n"
             case $c in
             node | java) sum=$(cat $W/out-$c-$m | tr ' ' '_') ;;
             *) sum=$(md5sum <$W/out-$c-$m | cut -c1-8) ;;
@@ -222,7 +234,7 @@ esac
             *) [ "$s" = "$first" ] || same=no ;;
             esac
         done
-        echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums") |"
+        echo "$row $( [ $same = yes ] && echo same || echo "DIFFERENT:$sums")${crashes:+ (runs repeated after a JVM crash:${crashes#,})} |"
         case $c in
         node | java)
             echo "| $c message passing, wrong |$(for s in $sums; do printf ' %s |' "${s##*mp-wrong_}"; done) |" ;;

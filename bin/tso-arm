@@ -242,6 +242,14 @@ cmd_run() {
         die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
     fi
     F=$(fex)
+    # FEX takes the root file system from its server, which lives as long as programs it started run (and a second
+    # after): one started with another root file system serves this program too, whatever FEX_ROOTFS says
+    if [ -n "$FEX_ROOTFS" ] && [ "$k" = dynamic ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
+        r=$("$(dirname "$F")/FEXGetConfig" --current-rootfs 2>/dev/null)
+        if [ -n "$r" ] && [ "$(readlink -f "$r")" != "$(readlink -f "$FEX_ROOTFS")" ]; then
+            echo "tso-arm: FEX's server serves the root file system $r until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
+        fi
+    fi
     lib=${aot:-"$CACHE/aot/$(key "$prog").so"}
     export FEX_DISABLETELEMETRY=${FEX_DISABLETELEMETRY:-1}
     case $mode in

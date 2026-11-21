@@ -27,6 +27,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/fields study/work/fields.c
     $CC -O2 -static -pthread -o $B/fork tests/fork.c
     $CC -O2 -static -o $B/signals tests/signals.c
+    $CC -O2 -static -pthread -o $B/sigrace tests/sigrace.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -65,6 +66,13 @@ for m in tso full unordered; do
     ok "$m: $out"
 done
 
+# signals that meet: two at once (the second while FEX still handles the first), and one raised while another
+# thread changes its action; FEX without the patches crashes in both (notes section 47)
+for m in tso full unordered; do
+    out=$($T run --mode $m $B/sigrace 5000 | tail -n 1) || fail "sigrace, $m: $out"
+    ok "$m: $out"
+done
+
 # x87 registers, which FEX addresses in the thread's context: the same results as FEX's full ordering
 want=$($T run --mode full $B/x87 | tail -n 1)
 got=$($T run $B/x87 | tail -n 1)
@@ -98,6 +106,13 @@ if [ -z "$SKIP_BUILD" ] && [ -f $X/lib/libc.so.6 ]; then
     $CC -O2 -Wl,--build-id -o $B/dl tests/sharedlib/dl.c
 fi
 if [ -f $R/lib/libc.so.6 ]; then
+    # FEX's server keeps the root file system of the client that started it until about a second after its last
+    # client: one the tests above started with a machine's default root file system would serve these too (at most
+    # 10 s)
+    for i in $(seq 50); do
+        pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1 || break
+        sleep 0.2
+    done
     out=$(FEX_ROOTFS=$R $T run $B/threads-dyn 20 | tail -n 1)
     echo "$out" | grep -q 'wrong 0' || fail "threads, dynamically linked: $out"
     ok "threads, dynamically linked: $out"
@@ -111,10 +126,11 @@ if [ -f $R/lib/libc.so.6 ]; then
     python3 aot/lift.py $R/lib/libhot.so out/aot/libhot.c hot_sum mix hot_apply >/dev/null
     sh aot/build.sh out/aot/libhot.c $C/tso-arm/aot/libhot.so-$id.so >/dev/null 2>&1 || fail "shared library: build"
     want=$(FEX_ROOTFS=$R $T run --no-aot $B/dl | tail -n 1)
+    case $want in dl:*) ;; *) fail "shared library: $want" ;; esac
     got=$(FEX_ROOTFS=$R XDG_CACHE_HOME=$C TSO_AOT_LOG=1 $T run $B/dl 2>$B/dl.log | tail -n 1)
     [ "$got" = "$want" ] || fail "shared library, translated: '$got' against '$want'"
-    loads=$(grep -c 'functions from .*shared library' $B/dl.log)
-    gone=$(grep -c 'is unmapped' $B/dl.log)
+    loads=$(grep -c 'functions from .*shared library' $B/dl.log || true)
+    gone=$(grep -c 'is unmapped' $B/dl.log || true)
     [ "$loads" = 3 ] && [ "$gone" = 3 ] || fail "shared library, translated: $loads loads and $gone unloads, not 3 each"
     ok "$got (the library's translations taken and given up 3 times)"
 fi

@@ -1952,3 +1952,82 @@ the main thread alone (translated asleep), then by two threads: 20 million messa
 Node wakes the views at once (V8 starts its threads), and the efficiency table's programs all run four threads:
 pigz 91, xz 88, zstd 70 %, mean 83 %. Full check all correct, `tests/ci.sh` passed, `rootfs_check` 28 of 28,
 `tests/soak.sh` with 100 rounds 1,500 of 1,500 (each run wakes the views once: every case starts with one thread).
+
+## 47. CPython's own tests, Java, and three faults in signal delivery (2026-11-21)
+
+**CPython's tests.** `tests/cpython_suite.sh` runs the tests of the interpreter's own release (Lib/test of
+Python 3.12.3 from python.org, the root file system's python3) for threads, thread-local data, signals in threads,
+queues, `sched`, signals, fork, `wait4`, `mmap`, selectors and `concurrent.futures` (19 test files, 750 cases),
+under tso-arm and under FEX's full ordering, one test at a time, each in a process of its own, and compares the
+failed cases of regrtest's JUnit file: none may fail under tso-arm that passes under full ordering.
+
+The first runs looked like FEX hanging at exit: `test_threading`'s 40 daemon threads never let their interpreter
+end, in both modes, until the time limit. It was the set-up: the tests' child interpreters start isolated (`-I`),
+which drops `PYTHONPATH`, so they imported Ubuntu's small `test` package, whose threads died on a module it lacks
+while the main thread waited for them. `PYTHONHOME` (the interpreter's own prefix) keeps the children's environment.
+Then one test failed, in both modes alike: `test_signal`, crashing in its stress tests, in 10 of 10 runs. FEX without
+the patches (be66e03, built beside it) crashed the same way in 5 of 5, `test_stress_modifying_handlers` alone in 10
+of 10. Three faults, two of them FEX's own:
+
+1. **An action read in pieces.** FEX's delivery read the guest's action for the signal field by field, without the
+   lock that `rt_sigaction` takes, and another thread may change it meanwhile (Python's `signal.signal` against a
+   thread raising the signal). It checked for `SIG_IGN` and then took the handler address: `SIG_IGN` (1) by then,
+   and the guest jumped to address 1. The kernel delivers under the lock sigaction takes; FEX's handler cannot wait
+   for a lock the thread it interrupted may hold. The action now has two copies and a count of writes, odd while
+   one goes on: a write fills the copy not in use, a delivery reads the current one whole and tries again if a
+   write overtook it. A delivery on the writing thread itself reads the other copy and never waits.
+2. **FEX's handler inside FEX's handler.** FEX installed its host handler with the guest's signal mask, and
+   Python's is empty: a timer signal coming in while FEX built the guest's frame for `kill`'s SIGUSR1 (the test sends
+   both at once) ran FEX's handler inside FEX's handler, and the inner one sent the outer one's return to the
+   dispatcher before the frame was done. The host handler now blocks every signal FEX does not need there (left
+   open: SIGILL, SIGBUS, SIGSEGV, its pause signal and the other synchronous ones). The guest's mask for its handler
+   is what FEX's handler returns with, so a signal the guest allows comes in right after, before the handler's first
+   instruction, as after the kernel's own delivery.
+3. **A system call's state left to the handler** (in tso-arm's way above all). The dispatcher's system call path
+   sets `InSyscallInfo` to 0xFFFF ("everything spilled") until the call returns. A signal that came in during the
+   call left that value to the guest's handler, which runs JIT code of its own; the page protocol's exits from a
+   block (a boundary exit, an escalation) and FEX's own SMC path spill the registers not marked spilled, so they
+   spilled none of the handler's and went on with the interrupted code's. A thread raising a signal to itself while
+   its handler met memory another thread uses crashed after two or three signals: its stack pointer and `rdx` came
+   from `raise`. The handler now starts outside any system call, and `sigreturn` gives the interrupted code its value
+   back. Found with a log of the deliveries and the exits (`injit 0 insyscall 0xffff`, then a boundary exit that
+   kept `rsp` from before).
+
+`tests/sigrace.c` (in `tests/ci.sh`, every mode): 20,000 rounds of a timer of 1 to 11 microseconds and `kill` at
+once, one handler for both (optionally on an alternate signal stack, as Python's run), every signal counted, then a
+thread raising SIGUSR1 in a loop while the main thread switches its action between a handler and `SIG_IGN`. A count
+for both signals together lost increments now and then, here and natively alike: one handler's increment came in
+between the other's load and store. It counts per signal.
+
+**Java.** `tests/compat.sh` packs the distribution's JDK (its directory without the modules for jlink, headers and
+manual pages: `tools/compat_rootfs.sh`) and runs a parallel sort of 4 million numbers, a `ConcurrentHashMap` filled
+from a parallel stream, and message passing: one thread writes the data plainly and the flag with a release store,
+the other reads the flag with an acquire load and then the data. A correct Java program; HotSpot's JIT makes all
+four plain moves on x86-64, and only x86 order keeps the reader from seeing the flag before the data. The class is
+compiled once by the distribution's javac under tso-arm.
+
+**Results.** `test_signal` passed in 6 of 6 runs in both modes (was 0 of 10). CPython's suite: all 750 cases pass
+under full ordering; under tso-arm one failed, `test_threading`'s daemon threads, whose test wants the child's
+standard error empty: tso-arm's layer for translated libraries had written "no room for stubs" there. Its messages
+go to the program's standard error now only on a terminal or with `TSO_AOT_LOG` (that note only with the log), and
+it looks for room for its stubs every 2 MiB out to 96 MiB on both sides of a library (four places had all been taken
+next to Python's libraries). Then `test_threading` and `test_signal` pass in both modes. `tests/sigrace.c` without a
+profile under the views: 10 of 10 (was 1 of 5), FEX without the patches 3 of 3 crashed. `rootfs_check` 28 of 28,
+`tests/ci.sh` passed, `tests/soak.sh` 75 of 75, the full check correct, efficiency unchanged (pigz 90, xz 89, zstd
+72 %, mean 83 %).
+
+Java on the Pi (best of 3, cooled to 60 °C): tso-arm 4042 ms, FEX's full TSO 4272 ms, no ordering 2854 ms; messages
+seen before their data 0, 0 and 3,131,256 of 20 million. In the CI (a Neoverse N2, Ubuntu 24.04's OpenJDK 21): 2664,
+2630 and 1761 ms, 0, 0 and 6,925. HotSpot crashes now and then, in 30 runs each: FEX without the patches with the
+settings of full TSO 1, full ordering with the patches 2, tso-arm 3, SIGILL or SIGSEGV at the start of code it has
+just compiled (HotSpot patches code that other threads run, which x86 allows, and FEX's translation can meet it half
+written). Not to be told apart at these numbers; `tests/compat.sh` repeats such a run, twice at most, and names it.
+
+**Two faults of the test set-up on the way.** The orphaned children of the hanging daemon-thread test (five, from
+the first runs on) kept FEX's server alive for four hours, and it served Ubuntu's root file system to every FEX
+program, whatever `FEX_ROOTFS` said: FEX takes the root file system from its server. `tests/ci.sh`'s dynamically
+linked library was not found there, and the test ended silently (`grep -c` with no match under `set -e`; both runs it
+compares had failed alike); the first Java numbers ran on the wrong libraries and were measured again. `tests/ci.sh`
+now waits for a server the tests before it started and fails aloud; `tests/cpython_suite.sh` runs each mode in a
+session of its own and ends what is left of it; `tso-arm run` says so when FEX's server serves another root file
+system than `FEX_ROOTFS` names.
