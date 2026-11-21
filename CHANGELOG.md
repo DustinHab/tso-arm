@@ -1,6 +1,11 @@
 # Changes
 
-## 0.3.4 (not released yet)
+## 0.3.4 (2026-11-21)
+
+Single-threaded programs run without the views, and signal delivery fixed: a thread that got a signal during a
+system call could crash in its handler, and two faults of FEX's own crashed CPython's `test_signal`. Update from
+0.3.3. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.3
+or older.
 
 - A process with a single thread runs without views and without ordering until a second thread starts or it maps
   memory shared with another process (notes section 46). Most commands never get there: a program start costs what
