@@ -2064,8 +2064,12 @@ ordering.
 there already or `TSO_ARM_GO_PREEMPT=1`: only Go programs read the variable, and they stop goroutines at their own
 safe points then (calls, the loops of the runtime), as all Go versions before 1.14 did; a goroutine in a long loop
 without calls is not preempted. What would make preemption work: delivering an asynchronous signal that comes in
-during translated code at the thread's next exact instruction start (the views' boundary traps lead a thread there)
-instead of at once.
+during translated code at the thread's next exact instruction start (the views' boundary traps lead a thread there,
+and a signal raised again from the trap's handler comes in at the dispatcher's top, where the state in memory is
+exact) instead of at once. Exact starts exist only with the views awake, though, not in full ordering and not in the
+fallback, where many programs run after their first run; and a signal that comes in during the dispatcher's lookup
+has the guest's registers live in the host's (spilling them there would be exact, the lookup does not change them).
+Left for later.
 
 On the Pi (best of 3, cooled): tso-arm 2496 ms, full TSO 2440 ms, no ordering 2425 ms; messages seen before their
 data 0, 0, 84 of 20 million; the three times within 3 %. In the CI the Arm runner builds it with Ubuntu 24.04's
