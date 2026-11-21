@@ -1,4 +1,4 @@
-From fcf7fd94f914c46ec19ffd6aca330848278250b4 Mon Sep 17 00:00:00 2001
+From 8c1f9b065d58b5b250c0a7714e38c3b530dafea7 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -14,14 +14,14 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   2 +-
  FEXCore/Source/Interface/Core/LookupCache.h   |   7 +
  .../Interface/Core/OpcodeDispatcher.cpp       |   6 +-
- .../Source/Interface/Core/OpcodeDispatcher.h  |  30 +
+ .../Source/Interface/Core/OpcodeDispatcher.h  |  29 +
  FEXCore/Source/Interface/IR/IREmitter.h       |  15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  46 +-
  .../IR/Passes/RegisterAllocationPass.cpp      |   2 +-
  FEXCore/Source/Utils/AllocatorHooks.cpp       |  41 +
  FEXCore/include/FEXCore/Core/Context.h        |  10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |  45 +-
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  46 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |   2 +
  Source/Common/FDUtils.h                       |  32 +
  Source/Common/FEXServerClient.cpp             |   6 +-
@@ -460,18 +460,10 @@ index 3eb2fbb..0f2f82a 100644
      } else {
        // If the block isn't a jump target then we need to create an exit block
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 360d605..c9cc558 100644
+index 360d605..2dae1cb 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-@@ -24,6 +24,7 @@
- #include <cstdint>
- #include <fmt/format.h>
- #include <stddef.h>
-+#include <string_view>
- #include <utility>
- #include <xxhash.h>
- 
-@@ -284,6 +285,35 @@ public:
+@@ -284,6 +284,35 @@ public:
      return CanHaveSideEffects;
    }
  
@@ -719,18 +711,21 @@ index 19ae82f..4e6a385 100644
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
-index a7ac53a..e4d226a 100644
+index a7ac53a..4e2ec39 100644
 --- a/FEXCore/include/FEXCore/Core/TSOViews.h
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
-@@ -9,6 +9,7 @@
+@@ -9,8 +9,10 @@
  #pragma once
  #include <atomic>
  #include <cstdint>
 +#include <cstdio>
  #include <cstdlib>
  #include <ctime>
++#include <string_view> // for OpcodeDispatcher.h's exit points: an include there broke the patch on every change around it
  
-@@ -41,6 +42,26 @@ inline bool Knob(const char* Name) {
+ namespace FEXCore::TSOViews {
+ constexpr uint64_t WindowBits = 34;
+@@ -41,6 +43,26 @@ inline bool Knob(const char* Name) {
    const char* E = getenv(Name);
    return E && E[0] == '1';
  }
@@ -757,7 +752,7 @@ index a7ac53a..e4d226a 100644
  inline bool IdentityBase() {
    static const bool On = Knob("TSO_VIEWS_IDENTITY");
    return On;
-@@ -60,15 +81,25 @@ inline bool Stage1() {
+@@ -60,15 +82,25 @@ inline bool Stage1() {
  // addressing guest memory directly, as without views. Old translations still running keep working through the
  // views until they are left.
  inline std::atomic<bool> FallbackActive {false};
@@ -785,7 +780,7 @@ index a7ac53a..e4d226a 100644
  // TSO_VIEWS_FALLBACK_STACK=plain: in the fallback, stack accesses through RSP stay unordered as in FEX's own full
  // TSO (it treats the stack as private to its thread). Not sound; for measuring what ordering them costs.
  inline bool PlainStackInFallback() {
-@@ -83,7 +114,7 @@ inline bool PlainStackInFallback() {
+@@ -83,7 +115,7 @@ inline bool PlainStackInFallback() {
  // leaving stale code at any instruction start. TSO_VIEWS_NOEXACT=1 turns them off, for measuring their cost only.
  inline bool ExactStarts() {
    static const bool On = Enabled() && !Knob("TSO_VIEWS_NOEXACT");
@@ -794,7 +789,7 @@ index a7ac53a..e4d226a 100644
  }
  
  // Time spent on the protocol, for TSO_VIEWS_STATS (nanoseconds, all threads together)
-@@ -91,6 +122,14 @@ struct TimeSpent {
+@@ -91,6 +123,14 @@ struct TimeSpent {
    uint64_t Compiles, CompileNs, Faults, FaultNs;
  };
  inline TimeSpent Spent;
