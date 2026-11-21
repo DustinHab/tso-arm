@@ -242,6 +242,11 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   notes section 51) it found three faults more: a register FEX set ahead of time, which a thread sent back to the
   dispatcher then saw too early (one `test_import` in ten crashed), a vfork closing one of the program's
   descriptors when nearly all were in use, and room for only about a hundred threads on a 39-bit address space.
+- **Go's own tests** (notes section 53): the official x86-64 toolchain (go1.27.4) compiling and running `go test
+  -short` of 20 packages (sync, sync/atomic, context, time, os, os/exec, os/signal, net, net/http, encoding/json and
+  more): the same results under tso-arm and under FEX's full ordering. They found a program started under nohup
+  dying of SIGHUP (FEX dropped signals the process was started with ignored), fixed in the patches; what fails in
+  both modes is FEX's (paths through its root file system, a child of os's test binary crashing at its start).
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.

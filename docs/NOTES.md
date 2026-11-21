@@ -2291,3 +2291,14 @@ takes, after setting up its own handlers, every signal whose host disposition is
 too (not the ones FEX needs itself). `tests/sigign.c` ignores SIGHUP and SIGUSR1, executes itself, and the new image
 must see both ignored and live through a SIGHUP: under FEX before, in every mode, "not ignored"; now right, and in
 `tests/ci.sh`. Go's os/signal then passed in both modes.
+
+The wider set (`go test -short` of os, os/exec, io, bufio, bytes, strings, strconv, sort, math, encoding/json,
+encoding/binary, compress/gzip, crypto/sha256, net, net/http, runtime/debug, with sync, sync/atomic, context, time
+and os/signal before): the same under tso-arm and under full ordering, nothing that fails under tso-arm only. What
+fails in both modes is FEX's: os's `TestChdirAndGetwd` and `TestFileReaddir*` (paths through FEX's root file system),
+net's `TestSplice` (out of time on the Pi), and os's `TestStatStdin`, whose child, started through `/bin/sh` with a
+pipe, crashes in about half the runs while it initialises (garbage pointers in time's, net/netip's or godebug's
+package initialisation), under FEX without the patches as well (4 of 5 runs). It needs os's own test binary as the
+parent: the same chain started from a shell (96 runs, the environment's size swept), a copy of the test in a package
+of its own (120 children) and a Go program that starts itself through a shell four at a time (200) never crashed.
+Not followed further here.
