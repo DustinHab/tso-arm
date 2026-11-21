@@ -2032,6 +2032,15 @@ child that lists its descriptors sees them; FEX tracks them only in builds with 
 `test_multiprocessing_forkserver`'s `test_flags`, whose child exits with 1. None fails under tso-arm only
 (`SUITE_TIME` gives the run more than the default two hours per mode).
 
+**The whole suite** (`JOBS=3 tests/cpython_suite.sh all`, with the released 0.3.5): 39,988 cases, 21 minutes per
+mode. 87 fail under full ordering, 86 under tso-arm, and the 86 are among the 87 (the one more under full ordering,
+`test_threaded_import`'s circular import through a multiprocessing pool, is timing). Most are the set-up's: Ubuntu's
+Python 3.12.3 carries backported changes (`test_htmlparser`, `test_http_cookies`, `test_email`, `test_tarfile`'s
+extraction filters) and a layout (`test_sysconfig`, `test_site`, no ensurepip, venv) the release's own tests do not
+expect; the rest are FEX's: the descriptors in children (`test_subprocess`, `test_posix`'s `posix_spawn` and
+`fexecve`, `test_tempfile`'s `noinherit`), the multiprocessing flags, and `test_platform`'s architecture of a
+program through a symbolic link.
+
 **Two faults of the test set-up on the way.** The orphaned children of the hanging daemon-thread test (five, from
 the first runs on) kept FEX's server alive for four hours, and it served Ubuntu's root file system to every FEX
 program, whatever `FEX_ROOTFS` said: FEX takes the root file system from its server. `tests/ci.sh`'s dynamically
