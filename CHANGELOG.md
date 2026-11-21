@@ -1,12 +1,18 @@
 # Changes
 
-## 0.3.11 (not released yet)
+## 0.3.11 (2026-11-21)
+
+Programs started under nohup keep SIGHUP ignored. Update from 0.3.10. The FEX patch changed, so this release brings
+FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.10 or older.
 
 - Fixed in FEX: a program started with a signal ignored (nohup's SIGHUP; execve keeps it ignored) saw that signal
   at its default instead. A Go program under nohup installed its handler for SIGHUP and died of the hangup nohup was
   there to keep away. FEX takes such signals as ignored for the program now (notes section 53).
 - `tests/sigign.c` (in `tests/ci.sh`): signals ignored across execve.
 - The patches apply to FEX's newest commit again (an include next to one FEX added).
+- Go's own tests (go1.27.4, 20 packages): the same results under tso-arm and under FEX's full ordering.
+- `tests/rootfs_check.sh` and `tests/soak.sh` start their programs with SIGPIPE at its default (GitHub's runner
+  ignores it), and `tests/compat.sh` takes a crash without x86 order for what that mode shows.
 
 ## 0.3.10 (2026-11-21)
 
