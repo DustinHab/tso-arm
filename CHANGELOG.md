@@ -1,6 +1,9 @@
 # Changes
 
-## 0.3.6 (not released yet)
+## 0.3.6 (2026-11-21)
+
+FEX's own file descriptors stay out of a program's way, and `fexecve` works. Update from 0.3.5. The FEX patch
+changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.5 or older.
 
 - Fixed in FEX: its own descriptors (its server's socket, the root file system's directory and others) took the
   lowest free numbers, so a program started with its standard input closed read FEX's socket as stdin, a program
