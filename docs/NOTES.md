@@ -2162,3 +2162,64 @@ two). Efficiency afterwards (README): pigz 91, xz 88, zstd 70 %, mean 83 %; the 
 
 HotSpot's occasional crash (section 47) stays: 2 of 60 runs with the views throughout (exact starts at every access
 to memory), SIGSEGV and SIGILL, about as often as with the fallback.
+
+## 51. CPython's whole suite with the views throughout (2026-11-21)
+
+With the fallback by fault rate, a program that keeps the protocol busy runs fully ordered after a fraction of a
+second, and a program whose profile says it fell back runs without views at all: CPython's suite under tso-arm
+mostly tested FEX's full ordering. Run again with `TSO_VIEWS_BUDGET=0 TSO_VIEWS_PROFILE=none` (every program under
+the protocol from its start to its end), with three tests at once: the distribution's programs and `compat.sh` the
+same as under full ordering, `rootfs_check` 28 of 28, and in CPython 75 cases failing in both modes and, run again
+alone, four groups under tso-arm only. Each was found and three were faults of their own.
+
+**Descriptors.** `test_subprocess`'s `test_no_leaking` opens files until EMFILE, closes ten and starts subprocesses:
+`EBADF` when the parent closed its ends of the child's pipes. Under the views a fork took two descriptors for a pipe
+on which the parent waits for the child's copy of guest memory (section 39). With the guest's eight pipe ends and
+these two the ten were gone, and FEX's own pipe for vfork (Python's `subprocess` uses vfork) failed: FEX did not
+check `pipe2`, and closed and polled whatever numbers the uninitialised pair held, which were the guest's. The views
+now wait on a word in a page of shared memory mapped for each fork (a futex, with `waitid(..., WNOWAIT)` for a child
+that dies on the way, which leaves it to be reaped by the guest), and FEX's vfork takes no pipe under the views
+(the kernel's vfork waits there, section 39) nor when none is left. `tests/fdfull.c`: fork, vfork and posix_spawn's
+`clone(CLONE_VM | CLONE_VFORK)` with 0 to 10 descriptors left, none of the program's lost, every mode.
+
+**Threads.** `test_queue`'s `test_many_threads` starts 100 threads: "can't start new thread" under tso-arm, also
+with the fallback (97 threads, against any number under full ordering). The Raspberry Pi 5's kernel gives a process
+39 bits, 512 GB; the views had reserved 13 slots of two 16 GB views each, 416 GB, and the host kept about 90 GB. FEX
+takes some 700 MB of address space per thread (`vamap.py`, a size histogram of `/proc/PID/maps`, and `strace` of the
+mappings each new thread makes): 512 MB from its allocator, rpmalloc, whose 256 MB spans are mapped with 256 MB more
+for their alignment and kept whole (for a 64-bit guest FEX installs none of its allocator hooks, so rpmalloc's own
+mapping runs), 272 MB of lookup cache (8 bytes per page of a 64 GB guest address space and the block table), and the
+thread's stack. Now the window and the views take at most three quarters of the address space (11 slots on 39 bits;
+all 15 on 48 bits, `TSO_VIEWS_SLOTS` lowers it), rpmalloc's mapping gives back what lies before and after the aligned
+span (`TrimAlignedMappings`), and the lookup cache covers the views' window (a guest address above it still works,
+the lookup compares the address). That is some 460 MB per thread and 158 GB for the host: 304 threads under the
+views. Beyond that a thread's setup failed halfway in FEX and the program died; FEX now maps 512 and 256 MB of address
+space for a moment before it creates a thread, and the guest gets EAGAIN if it cannot.
+
+**A register set too early.** `test_import` died with SIGSEGV in about one run of ten (not alone, and not at all
+without `--timeout`, whose watchdog thread wakes the views). With the views' log in a file (`TSO_VIEWS_LOG=/path`; a
+vfork child that logged to stderr filled a pipe its parent read only after the child's exec, and both stopped) the
+faulting store was in CPython's `_PyObject_GC_UNTRACK`, `mov %rax, 0x8(%rcx)` with rcx 0, right after a boundary
+exit to that instruction. The store before it (`mov %rcx, (%rdx)`) had met a page the watchdog thread had touched and
+escalated a second time: its block was translated anew and the thread left the old one at its next instruction start.
+The registers the exit spilled (logged with the code around the trap) had rcx 0 already: the old block had
+`mov w7, #0` (w7 is rcx) before that start, for the `xor %ecx, %ecx` after the store. FEX's IR emitter pools
+constants within a block; the 0 had been made for an earlier instruction, the register allocator gave it rcx's
+static register because it was written to rcx, and it was set where it was made. Nothing in the old block read rcx
+again (the store used the address computed for the load before it), so the block itself ran right. Constants are no
+longer pooled across an instruction start that has a RIP entry (`ForgetConstants`, where exact starts flush the
+register cache). `tests/exactstart.c` runs that function with the previous node on a page another thread writes: a
+segmentation fault in every run before, right now (`tests/ci.sh`, every mode). `test_import` as the suite runs it,
+ten times: no crash.
+
+**Timing.** `test_multiprocessing_*`'s `test_get` waits 0.1 s for a child process's queue thread to have written four
+items. Under the protocol from the start, a fresh Python's second thread takes 91 ms to start (the views wake and
+everything translated so far goes) against 6 ms under full ordering, and the first round trip through a queue 31 ms
+against 0.3: the item is not there in time. With the fallback the test passes; nothing to fix but speed.
+
+The same run afterwards, views throughout: the distribution's programs and `compat.sh` the same (Node 38 s against
+8.5 under full ordering, Java 7.2 against 4.3: programs whose threads share much are why the fallback exists),
+`rootfs_check` 28 of 28, CPython's whole suite 39,988 cases (101 more than before, which the crashed `test_import`
+had taken with it), 75 failing in both modes, and under tso-arm only `test_get` of the two multiprocessing variants.
+Efficiency afterwards (README): pigz 91, xz 88, zstd 69 %, mean 82 % (zstd a point down, within what it varies
+between sessions); the constants made anew at each exact start cost nothing measurable.

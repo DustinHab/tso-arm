@@ -29,6 +29,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -o $B/signals tests/signals.c
     $CC -O2 -static -pthread -o $B/sigrace tests/sigrace.c
     $CC -O2 -static -pthread -o $B/smc tests/smc.c
+    $CC -O2 -static -o $B/fdfull tests/fdfull.c
+    $CC -O2 -static -pthread -o $B/exactstart tests/exactstart.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -78,6 +80,20 @@ done
 # another thread wrote them (notes section 50)
 for m in tso full unordered; do
     out=$($T run --mode $m $B/smc 2000 | tail -n 1) || fail "smc, $m: $out"
+    ok "$m: $out"
+done
+
+# a thread sent back to the dispatcher at an instruction start finds the guest registers as they are there (CPython's
+# GC list unlink, whose rcx FEX had set to 0 ahead of time; notes section 51)
+for m in tso full unordered; do
+    out=$(TSO_VIEWS_BUDGET=0 TSO_VIEWS_PROFILE=none $T run --mode $m $B/exactstart 1000 | tail -n 1) || fail "exactstart, $m: $out"
+    ok "$m: $out"
+done
+
+# fork, vfork and posix_spawn's clone with the program's descriptors nearly or all used up: none of them lost
+# (notes section 51)
+for m in tso full unordered; do
+    out=$($T run --mode $m $B/fdfull 5 | tail -n 1) || fail "fdfull, $m: $out"
     ok "$m: $out"
 done
 

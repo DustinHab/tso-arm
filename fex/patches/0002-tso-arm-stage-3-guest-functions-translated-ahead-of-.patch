@@ -1,38 +1,41 @@
-From 484da5f5322a05362bae9a410c3c9a95c09c39f2 Mon Sep 17 00:00:00 2001
+From 8413a8ad36e79be9ad41e3b067c9b681c47b1f18 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
  FEXCore/Source/Interface/Context/Context.h    |   4 +
- FEXCore/Source/Interface/Core/Core.cpp        |  91 +-
+ FEXCore/Source/Interface/Core/Core.cpp        | 101 +-
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |  21 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  15 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   2 +-
  .../Source/Interface/Core/OpcodeDispatcher.h  |  30 +
- FEXCore/Source/Interface/IR/IREmitter.h       |   7 +
+ FEXCore/Source/Interface/IR/IREmitter.h       |  15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |  46 +-
  .../IR/Passes/RegisterAllocationPass.cpp      |   2 +-
+ FEXCore/Source/Utils/AllocatorHooks.cpp       |  41 +
  FEXCore/include/FEXCore/Core/Context.h        |  10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |   5 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |  24 +-
+ FEXCore/include/FEXCore/Core/TSOViews.h       |  45 +-
+ .../include/FEXCore/Utils/AllocatorHooks.h    |   2 +
  Source/Common/FDUtils.h                       |  32 +
  Source/Common/FEXServerClient.cpp             |   6 +-
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  15 +
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  17 +
  .../LinuxEmulation/ArchHelpers/MContext.h     |   8 +
  .../LinuxSyscalls/FileManagement.cpp          |  16 +-
  .../LinuxSyscalls/FileManagement.h            |   1 +
  .../LinuxSyscalls/SignalDelegator.cpp         |  90 +-
  .../LinuxSyscalls/SignalDelegator.h           |  11 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  25 +-
- .../LinuxSyscalls/Syscalls/Thread.cpp         |  32 +-
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 139 ++-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 896 ++++++++++++++++--
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 117 ++-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  43 +-
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |  49 +-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     | 179 +++-
+ .../LinuxSyscalls/TSOAccess.cpp               |  10 +-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 934 ++++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   | 120 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |  19 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 787 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 28 files changed, 2324 insertions(+), 155 deletions(-)
+ 31 files changed, 2509 insertions(+), 180 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -50,10 +53,22 @@ index dc85492..53dce36 100644
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd..c3a1845 100644
+index a1cddcd..27201cb 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
-@@ -519,6 +519,38 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
+@@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
+   if (!Config.Is64BitMode()) {
+     // When operating in 32-bit mode, the virtual memory we care about is only the lower 32-bits.
+     Config.VirtualMemSize = 1ULL << 32;
++  } else if (FEXCore::TSOViews::Enabled()) {
++    // tso-arm: guest memory lies in the views' window. Every thread's lookup cache reserves 8 bytes per page of this
++    // size (128 MB for the default 64 GB, 32 MB for the window): with the views taking most of a 39-bit address
++    // space, the host had room for 97 threads (an address beyond it still works, the lookup compares the address)
++    Config.VirtualMemSize = FEXCore::TSOViews::Window;
+   }
+ 
+   if (Config.BlockJITNaming() || Config.GlobalJITNaming() || Config.LibraryJITNaming()) {
+@@ -519,6 +524,38 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
    return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
  }
  
@@ -92,7 +107,7 @@ index a1cddcd..c3a1845 100644
  ContextImpl::GenerateIRResult
  ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
    FEXCORE_PROFILE_SCOPED("GenerateIR");
-@@ -529,6 +561,8 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -529,6 +566,8 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
    uint64_t TotalInstructionsLength {0};
  
    bool HasCustomIR {};
@@ -101,7 +116,7 @@ index a1cddcd..c3a1845 100644
  
    bool WantsDiskCachePatching = DiskCache.IsReadingDiskCache() || DiskCache.IsWritingDiskCache();
  
-@@ -637,11 +671,17 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -637,13 +676,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
          // side effect here and (if that behaviour is required) we should handle
          // that more explicitly later.
          // tso-arm: with the page protocol a thread may be sent back to the dispatcher at any instruction start
@@ -121,8 +136,11 @@ index a1cddcd..c3a1845 100644
 +        if (HasEntry) {
            if (ExactStarts) {
              Thread->OpDispatcher->RectifyCarryABI();
++            Thread->OpDispatcher->ForgetConstants();
            }
-@@ -696,12 +736,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
+         }
+@@ -696,12 +742,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
            }
            // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
            // thread writes; the page protections make that sound
@@ -141,15 +159,15 @@ index a1cddcd..c3a1845 100644
 +          if (ViewCheck && Thread->OpDispatcher->AccessesGuestMemorySince(ViewCheckFrom)) {
 +            LearnViewExit(TableInfo);
 +            ViewRetranslate = true;
-+            if (TSOViews::Knob("TSO_VIEWS_LOG")) {
-+              fprintf(stderr, "tso-arm: %s at rip %#lx accesses memory, an exit point from now on\n", TableInfo->Name ?: "?",
++            if (TSOViews::LogWanted()) {
++              fprintf(TSOViews::LogFile(), "tso-arm: %s at rip %#lx accesses memory, an exit point from now on\n", TableInfo->Name ?: "?",
 +                      (unsigned long)InstAddress);
 +            }
 +          }
            if (Thread->OpDispatcher->HadDecodeFailure()) {
              HadDispatchError = true;
            } else {
-@@ -781,6 +834,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -781,6 +840,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
  
    Thread->FrontendDecoder->DelayedDisownBuffer();
  
@@ -161,7 +179,7 @@ index a1cddcd..c3a1845 100644
    IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
  
    auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
-@@ -938,10 +996,13 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -938,10 +1002,13 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
@@ -178,7 +196,19 @@ index a1cddcd..c3a1845 100644
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -1143,6 +1204,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -959,9 +1026,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+         fclose(F);
+       }
+     }
+-    static const bool Log = TSOViews::Knob("TSO_VIEWS_LOG");
++    static const bool Log = TSOViews::LogWanted();
+     if (Log) {
+-      fprintf(stderr, "tso-arm: compiled rip %#lx at %p (block %p, guest %#lx+%#lx) slot %d\n", (unsigned long)GuestRIP,
++      fprintf(TSOViews::LogFile(), "tso-arm: compiled rip %#lx at %p (block %p, guest %#lx+%#lx) slot %d\n", (unsigned long)GuestRIP,
+               static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
+               (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
+     }
+@@ -1143,6 +1210,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -339,7 +369,7 @@ index 360d605..c9cc558 100644
    void ForeachDirection(F&& Routine) {
      // Otherwise, prepare to branch.
 diff --git a/FEXCore/Source/Interface/IR/IREmitter.h b/FEXCore/Source/Interface/IR/IREmitter.h
-index 711ab54..a47d514 100644
+index 711ab54..020614b 100644
 --- a/FEXCore/Source/Interface/IR/IREmitter.h
 +++ b/FEXCore/Source/Interface/IR/IREmitter.h
 @@ -44,6 +44,13 @@ public:
@@ -356,6 +386,21 @@ index 711ab54..a47d514 100644
    /**
     * @name IR allocation routines
     *
+@@ -273,6 +280,14 @@ public:
+     return R;
+   }
+ 
++  // tso-arm: constants pooled before an instruction start where a thread may be sent back to the dispatcher are not
++  // used after it. The register allocator gives a constant that is written to a guest register the guest register's
++  // static register, from where the constant is made: a 0 first made for an earlier instruction set rcx for an
++  // `xor %ecx, %ecx` before the store ahead of it, which a thread sent back to that store then ran with rcx 0
++  void ForgetConstants() {
++    NrConstants = 0;
++  }
++
+   Ref Invalid() {
+     return InvalidNode;
+   }
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 index dd0ddac..e114cf1 100644
 --- a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
@@ -438,6 +483,65 @@ index 26f579f..d286793 100644
            LastNode = nullptr;
          }
          continue;
+diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
+index 63f84a8..55ac344 100644
+--- a/FEXCore/Source/Utils/AllocatorHooks.cpp
++++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
+@@ -199,6 +199,45 @@ static rpmalloc_interface_t global_interface {
+   .error_callback = nullptr,
+ };
+ 
++// tso-arm: rpmalloc's own mapping, which a 64-bit guest's FEX keeps (it installs none of the hooks here), maps size
++// plus alignment and keeps all of it: a span of 256 MB aligned to 256 MB held 512 MB of address space, and every
++// thread's heap maps one or two. Under the views, which leave the host less than a third of a 39-bit address space,
++// a program ran out of it after a hundred threads. The same mapping, with what lies before and after the aligned
++// block given back.
++static void* FEX_rp_mmap_trimmed(size_t size, size_t alignment, size_t* offset, size_t* mapped_size) {
++  const size_t map_size = size + alignment;
++  void* ptr = ::mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (ptr == MAP_FAILED) {
++    return nullptr;
++  }
++  const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++  if (!alignment || (alignment & (page - 1)) || (size & (page - 1))) {
++    size_t padding = alignment ? ((uintptr_t)ptr & (uintptr_t)(alignment - 1)) : 0;
++    if (padding) {
++      padding = alignment - padding;
++    }
++    *offset = padding;
++    *mapped_size = map_size;
++    return static_cast<char*>(ptr) + padding;
++  }
++  size_t padding = (uintptr_t)ptr & (uintptr_t)(alignment - 1);
++  if (padding) {
++    padding = alignment - padding;
++    ::munmap(ptr, padding);
++  }
++  char* block = static_cast<char*>(ptr) + padding;
++  if (map_size > padding + size) {
++    ::munmap(block + size, map_size - padding - size);
++  }
++  *offset = 0;
++  *mapped_size = size;
++  return block;
++}
++
++void TrimAlignedMappings() {
++  rp_mmap_hook = FEX_rp_mmap_trimmed;
++}
++
+ void InitializeAllocator(size_t PageSize) {
+   global_config.page_size = PageSize;
+   rpmalloc_initialize_config(&global_interface, &global_config);
+@@ -253,6 +292,8 @@ void aligned_free(void* ptr) {
+ 
+ void SetupAllocatorHooks(mmap_hook_type MMapHook, munmap_hook_type MunmapHook) {}
+ 
++void TrimAlignedMappings() {}
++
+ void InitializeAllocator(size_t PageSize) {}
+ 
+ #endif
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
 index ddec229..c47887a 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
@@ -476,10 +580,45 @@ index 19ae82f..4e6a385 100644
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
-index a7ac53a..be3cf49 100644
+index a7ac53a..e4d226a 100644
 --- a/FEXCore/include/FEXCore/Core/TSOViews.h
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
-@@ -60,15 +60,25 @@ inline bool Stage1() {
+@@ -9,6 +9,7 @@
+ #pragma once
+ #include <atomic>
+ #include <cstdint>
++#include <cstdio>
+ #include <cstdlib>
+ #include <ctime>
+ 
+@@ -41,6 +42,26 @@ inline bool Knob(const char* Name) {
+   const char* E = getenv(Name);
+   return E && E[0] == '1';
+ }
++// The views' log: TSO_VIEWS_LOG=1 writes it to stderr, an absolute path appends it to that file instead (a vfork
++// child that logs into a pipe its waiting parent reads would stop both)
++inline bool LogWanted() {
++  static const bool On = [] {
++    const char* E = getenv("TSO_VIEWS_LOG");
++    return E && (E[0] == '1' || E[0] == '/');
++  }();
++  return On;
++}
++inline FILE* LogFile() {
++  static FILE* F = [] {
++    const char* E = getenv("TSO_VIEWS_LOG");
++    FILE* O = E && E[0] == '/' ? fopen(E, "ae") : nullptr;
++    if (O) {
++      setvbuf(O, nullptr, _IOLBF, 0);
++    }
++    return O ? O : stderr;
++  }();
++  return F;
++}
+ inline bool IdentityBase() {
+   static const bool On = Knob("TSO_VIEWS_IDENTITY");
+   return On;
+@@ -60,15 +81,25 @@ inline bool Stage1() {
  // addressing guest memory directly, as without views. Old translations still running keep working through the
  // views until they are left.
  inline std::atomic<bool> FallbackActive {false};
@@ -507,7 +646,7 @@ index a7ac53a..be3cf49 100644
  // TSO_VIEWS_FALLBACK_STACK=plain: in the fallback, stack accesses through RSP stay unordered as in FEX's own full
  // TSO (it treats the stack as private to its thread). Not sound; for measuring what ordering them costs.
  inline bool PlainStackInFallback() {
-@@ -83,7 +93,7 @@ inline bool PlainStackInFallback() {
+@@ -83,7 +114,7 @@ inline bool PlainStackInFallback() {
  // leaving stale code at any instruction start. TSO_VIEWS_NOEXACT=1 turns them off, for measuring their cost only.
  inline bool ExactStarts() {
    static const bool On = Enabled() && !Knob("TSO_VIEWS_NOEXACT");
@@ -516,7 +655,7 @@ index a7ac53a..be3cf49 100644
  }
  
  // Time spent on the protocol, for TSO_VIEWS_STATS (nanoseconds, all threads together)
-@@ -91,6 +101,14 @@ struct TimeSpent {
+@@ -91,6 +122,14 @@ struct TimeSpent {
    uint64_t Compiles, CompileNs, Faults, FaultNs;
  };
  inline TimeSpent Spent;
@@ -531,6 +670,19 @@ index a7ac53a..be3cf49 100644
  inline uint64_t Nanos() {
    timespec T;
    clock_gettime(CLOCK_MONOTONIC, &T);
+diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+index c4cadf4..54c679d 100644
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -166,6 +166,8 @@ FEX_DEFAULT_VISIBILITY extern void InitializeThread();
+ 
+ #ifndef _WIN32
+ void SetupAllocatorHooks(void* (*)(void* addr, size_t length, int prot, int flags, int fd, off_t offset), int (*)(void* addr, size_t length));
++// tso-arm: for a 64-bit guest, which keeps the allocator's own mappings: they give back what their alignment needed
++FEX_DEFAULT_VISIBILITY void TrimAlignedMappings();
+ #else
+ void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
+ #endif
 diff --git a/Source/Common/FDUtils.h b/Source/Common/FDUtils.h
 index f4e1d6b..943374f 100644
 --- a/Source/Common/FDUtils.h
@@ -613,7 +765,7 @@ index 0680323..92cce19 100644
  
  /**  @} */
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b9..04b559a 100644
+index bed03b9..9369635 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -22,6 +22,7 @@ $end_info$
@@ -632,7 +784,16 @@ index bed03b9..04b559a 100644
  #include <FEXCore/Utils/Allocator.h>
  #include <FEXCore/Utils/FileLoading.h>
  #include <FEXCore/Utils/LogManager.h>
-@@ -535,6 +537,16 @@ int main(int argc, char** argv, char** const envp) {
+@@ -162,6 +164,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
+ 
+ fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
+   if (Is64Bit) {
++    // tso-arm: every thread's heap took 512 MB of address space for 256 MB
++    FEXCore::Allocator::TrimAlignedMappings();
+     return {};
+   }
+ 
+@@ -535,6 +539,16 @@ int main(int argc, char** argv, char** const envp) {
      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
    }
  
@@ -649,7 +810,7 @@ index bed03b9..04b559a 100644
    // Setup Thread handlers, so FEXCore can create threads.
    auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
  
-@@ -617,6 +629,9 @@ int main(int argc, char** argv, char** const envp) {
+@@ -617,6 +631,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  
@@ -968,7 +1129,7 @@ index c37d82c..8a4b9e7 100644
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432b..c99d2ee 100644
+index a7a432b..37aee00 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -1020,12 +1181,37 @@ index a7a432b..c99d2ee 100644
          // Parent
 +        // tso-arm: what a child with an address space of its own still shares with this process
 +        if (auto* Views = TSOViewMemory::Get(); Views && int64_t(Result) > 0 && !(flags & (CLONE_VM | CLONE_VFORK))) {
-+          Views->AfterForkParent();
++          Views->AfterForkParent(pid_t(Result));
 +        }
          // Unlock the mutexes on both sides of the fork
          FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, false);
  
-@@ -962,6 +973,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
+@@ -711,6 +722,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+     // CLONE_PARENT is ignored (Implied by CLONE_THREAD)
+     return FEX::HLE::ForkGuest(Thread, Frame, args);
+   } else {
++    // tso-arm: a thread needs some 450 MB of the host's address space (its allocator heap, a 256 MB span mapped with
++    // as much again for its alignment, its lookup cache, its stack). Where it had run out, which the views make
++    // happen on a 39-bit address space after a few hundred threads, FEX failed halfway through setting the thread
++    // up and the whole program died; now the guest gets EAGAIN, as from a kernel that cannot create the thread.
++    {
++      constexpr size_t Span = 512ULL << 20, Rest = 256ULL << 20;
++      void* A = ::mmap(nullptr, Span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++      void* B = A == MAP_FAILED ? MAP_FAILED : ::mmap(nullptr, Rest, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++      if (B != MAP_FAILED) {
++        ::munmap(B, Rest);
++      }
++      if (A != MAP_FAILED) {
++        ::munmap(A, Span);
++      }
++      if (B == MAP_FAILED) {
++        return -EAGAIN;
++      }
++    }
+     auto NewThread = FEX::HLE::CreateNewThread(Thread->CTX, Frame, args);
+ 
+     // Return the new threads TID
+@@ -962,6 +991,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -1037,7 +1223,7 @@ index a7a432b..c99d2ee 100644
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +990,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +1008,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();
@@ -1048,7 +1234,7 @@ index a7a432b..c99d2ee 100644
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index 76c7e6b..84e5738 100644
+index 76c7e6b..12e8f36 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -1088,20 +1274,42 @@ index 76c7e6b..84e5738 100644
  }
  
  uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
-@@ -299,7 +311,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -290,18 +302,29 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+ 
+   const bool IsVFork = flags & CLONE_VFORK;
+   pid_t Result {};
+-  int VForkFDs[2];
++  int VForkFDs[2] {-1, -1};
+   if (IsVFork) {
+     // Use pipes as a mechanism for knowing when the child process is exiting.
+     // FEX can't use `waitpid` for this since the child process may want to use it.
+     // If we use `waitpid` then the kernel won't return the same data if asked again.
+-    pipe2(VForkFDs, O_CLOEXEC);
++    // tso-arm: not under the views, where the kernel waits (below), nor without a descriptor left for it (a guest that
++    // used them all): the kernel waits then as well. The pair was left undefined when pipe2 failed, and the parent
++    // closed whatever numbers it held, descriptors of the guest.
++    const bool Views = FEX::HLE::TSOViewMemory::Get() != nullptr;
++    if (Views || pipe2(VForkFDs, O_CLOEXEC) != 0) {
++      VForkFDs[0] = VForkFDs[1] = -1;
++    }
  
      // XXX: We don't currently support a real `vfork` as it causes problems.
      // Currently behaves like a fork (with wait after the fact), which isn't correct. Need to find where the problem is
 -    Result = CloneFork(flags, exit_signal);
+-
+-    if (Result == 0) {
 +    // tso-arm: under the views the child runs on its parent's guest memory (shared memory), so the parent must not go
 +    // on before the child has called execve or exited, whatever the child does with its descriptors meanwhile: a guest
 +    // that closes all of them before execve (Python's subprocess) closed the pipe above and let the parent run on the
 +    // same stack. The kernel's vfork waits for exactly that, here without CLONE_VM (each side keeps FEX's own memory).
-+    Result = CloneFork(flags, exit_signal, FEX::HLE::TSOViewMemory::Get() != nullptr);
- 
-     if (Result == 0) {
++    Result = CloneFork(flags, exit_signal, VForkFDs[0] < 0);
++
++    if (VForkFDs[0] < 0) {
++    } else if (Result == 0) {
        // Close the read end of the pipe.
-@@ -319,6 +335,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+       // Keep the write end open so the parent can poll it.
+       close(VForkFDs[0]);
+@@ -319,6 +342,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // Unlock the mutexes on both sides of the fork
      FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, IsChild);
  
@@ -1113,20 +1321,29 @@ index 76c7e6b..84e5738 100644
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
      // Child
-@@ -366,6 +387,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -366,6 +394,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // the rest of the context remains as is, this thread will keep executing
      return 0;
    } else {
 +    // tso-arm: the child copies guest memory as it was at the fork: nothing may change it before the copy is done
 +    if (auto* Views = FEX::HLE::TSOViewMemory::Get(); Views && Result > 0 && !IsVFork) {
-+      Views->AfterForkParent();
++      Views->AfterForkParent(Result);
 +    }
 +
      if (Result != -1) {
        if (flags & CLONE_PARENT_SETTID) {
          *parent_tid = Result;
+@@ -378,7 +411,7 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+     ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
+ 
+     // VFork needs the parent to wait for the child to exit.
+-    if (IsVFork) {
++    if (IsVFork && VForkFDs[0] >= 0) {
+       // Wait for the read end of the pipe to close.
+       pollfd PollFD {};
+       PollFD.fd = VForkFDs[0];
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d..cd9909f 100644
+index 41aba2d..b884edb 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -1153,18 +1370,39 @@ index 41aba2d..cd9909f 100644
      return false;
    }
    const uint64_t PC = ArchHelpers::Context::GetPc(ucontext);
-@@ -59,8 +65,8 @@ bool TSOTryBoundaryExit(FEXCore::Core::InternalThreadState* Thread, void* uconte
+@@ -58,11 +64,27 @@ bool TSOTryBoundaryExit(FEXCore::Core::InternalThreadState* Thread, void* uconte
+   if (!RIP) {
      return false;
    }
-   if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
+-  if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
 -    fprintf(stderr, "tso-arm: boundary exit at rip %#lx (host pc %#lx) slot %d\n", (unsigned long)RIP, (unsigned long)PC,
 -            TSOSlotOf(Thread));
-+    fprintf(stderr, "tso-arm: boundary exit at rip %#lx (host pc %#lx) slot %d%s\n", (unsigned long)RIP, (unsigned long)PC,
-+            TSOSlotOf(Thread), Relinked ? ", the trap linked over since" : "");
-   }
+-  }
    auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
++  if (FEXCore::TSOViews::LogWanted()) {
++    // With the guest's registers as the spill finds them, the system call state that masks some of them, and the
++    // code around the trap
++    auto* Out = FEXCore::TSOViews::LogFile();
++    const auto& Cfg = ThreadObject->SignalInfo.Delegator->GetConfig();
++    fprintf(Out, "tso-arm: boundary exit at rip %#lx (host pc %#lx) slot %d%s, in syscall %#lx, gprs", (unsigned long)RIP,
++            (unsigned long)PC, TSOSlotOf(Thread), Relinked ? ", the trap linked over since" : "",
++            (unsigned long)Thread->CurrentFrame->InSyscallInfo);
++    for (size_t i = 0; i < Cfg.SRAGPRCount; ++i) {
++      fprintf(Out, " %lx", (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, Cfg.SRAGPRMapping[i]));
++    }
++    fprintf(Out, ", code");
++    for (int K = -16; K < 8; ++K) {
++      const uint64_t A = PC + int64_t(K) * 4;
++      if (Thread->CTX->IsAddressInCodeBuffer(Thread, A) && Thread->CTX->IsAddressInCodeBuffer(Thread, A + 3)) {
++        fprintf(Out, K == 0 ? " [%08x]" : " %08x", *reinterpret_cast<const uint32_t*>(A));
++      }
++    }
++    fprintf(Out, "\n");
++  }
    ThreadObject->SignalInfo.Delegator->SpillSRA(Thread, ucontext, Thread->CurrentFrame->InSyscallInfo & 0xFFFF);
-@@ -72,12 +78,30 @@ bool TSOTryBoundaryExit(FEXCore::Core::InternalThreadState* Thread, void* uconte
+   Thread->CurrentFrame->State.rip = RIP;
+   const auto& Config = ThreadObject->SignalInfo.Delegator->GetConfig();
+@@ -72,12 +94,30 @@ bool TSOTryBoundaryExit(FEXCore::Core::InternalThreadState* Thread, void* uconte
    return true;
  }
  
@@ -1177,8 +1415,8 @@ index 41aba2d..cd9909f 100644
 +  // translated while they slept addresses guest memory directly, unordered, and goes. The thread that wakes them is
 +  // in a system call, at the end of its block (a system call ends a block), and the new thread has not run yet.
 +  FEXCore::TSOViews::AsleepActive.store(false, std::memory_order_release);
-+  if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
-+    fprintf(stderr, "tso-arm: the views wake (slot %d)\n", TSOSlotOf(Thread));
++  if (FEXCore::TSOViews::LogWanted()) {
++    fprintf(FEXCore::TSOViews::LogFile(), "tso-arm: the views wake (slot %d)\n", TSOSlotOf(Thread));
 +  }
 +  if (Thread) {
 +    _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, 0, FEXCore::TSOViews::Window);
@@ -1196,7 +1434,7 @@ index 41aba2d..cd9909f 100644
  
    auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
    auto CallRetStackInfo = ThreadObject->GetCallRetStackInfo();
-@@ -89,9 +113,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -89,9 +129,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
  
    // tso-arm: page protocol faults on the views of guest memory
    if (auto* Views = TSOViewMemory::Get()) {
@@ -1210,7 +1448,7 @@ index 41aba2d..cd9909f 100644
        return true;
      };
      // The faulting instruction, read once: another thread may write a boundary trap over it at any time
-@@ -102,7 +128,7 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -102,7 +144,7 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      // A thread at an instruction start of a block that was left behind: back to the dispatcher, which translates
      // the code again (with the escalated instructions ordered). The trap may also have replaced an instruction
      // that faulted just before; that one has not done anything yet, so leaving here is exact as well.
@@ -1219,7 +1457,7 @@ index 41aba2d..cd9909f 100644
        return Handled();
      }
  
-@@ -112,16 +138,50 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -112,16 +154,50 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        // Full ordering from now on: all translated code goes, every thread leaves its block at the next
        // instruction start or at its next plain access to guest memory
        _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, 0, FEXCore::TSOViews::Window);
@@ -1270,7 +1508,21 @@ index 41aba2d..cd9909f 100644
          LogMan::Msg::EFmt("tso-arm: plain access to shared memory outside translated code, pc {:#x}, address {:#x}", HostPC, FaultAddress);
          return false;
        }
-@@ -162,7 +222,15 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -129,11 +205,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+       // thread goes on in the old translation; only an access the handler cannot perform repeats the instruction
+       // as a single-instruction block, the way the SMC path below does.
+       const uint64_t RIP = CTX->RestoreRIPFromHostPC(Thread, HostPC);
+-      static const bool Log = FEXCore::TSOViews::Knob("TSO_VIEWS_LOG");
++      static const bool Log = FEXCore::TSOViews::LogWanted();
+       if (Log) {
+         uint64_t BS = 0, BE = 0;
+         CTX->GetCurrentBlockGuestRange(Thread, HostPC, &BS, &BE);
+-        fprintf(stderr, "tso-arm: escalate rip %#lx (host pc %#lx, address %#lx) slot %d block %#lx-%#lx header %#lx\n", (unsigned long)RIP,
++        fprintf(FEXCore::TSOViews::LogFile(), "tso-arm: escalate rip %#lx (host pc %#lx, address %#lx) slot %d block %#lx-%#lx header %#lx\n", (unsigned long)RIP,
+                 (unsigned long)HostPC, (unsigned long)FaultAddress, TSOSlotOf(Thread), (unsigned long)BS, (unsigned long)BE,
+                 (unsigned long)Thread->CurrentFrame->State.InlineJITBlockHeader);
+       }
+@@ -162,7 +238,15 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        if (Refresh) {
          _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart);
        }
@@ -1287,17 +1539,31 @@ index 41aba2d..cd9909f 100644
        TSOViewMemory::NoteAccess(Emulated);
        if (Emulated) {
          if (Refresh) {
-@@ -181,7 +249,8 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -181,18 +265,38 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        return Handled();
      }
      case TSOViewMemory::Fault::NotOurs:
 -      if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG")) {
 +      (void)CodeStore;
-+      if (FEXCore::TSOViews::Knob("TSO_VIEWS_LOG") || FEXCore::TSOViews::Knob("TSO_AOT_LOG")) {
++      if (FEXCore::TSOViews::LogWanted() || FEXCore::TSOViews::Knob("TSO_AOT_LOG")) {
          if (Thread->CTX->IsAddressInCodeBuffer(Thread, PC)) {
-           fprintf(stderr, "tso-arm: not ours at host pc %#lx, instruction %#010x, rip %#lx, x24 %#lx\n", (unsigned long)PC,
+-          fprintf(stderr, "tso-arm: not ours at host pc %#lx, instruction %#010x, rip %#lx, x24 %#lx\n", (unsigned long)PC,
++          auto* Out = FEXCore::TSOViews::LogFile();
++          fprintf(Out, "tso-arm: not ours at host pc %#lx, instruction %#010x, rip %#lx, x24 %#lx, in syscall %#lx, x0-x30", (unsigned long)PC,
                    *reinterpret_cast<const uint32_t*>(PC), (unsigned long)Thread->CTX->RestoreRIPFromHostPC(Thread, PC),
-@@ -189,10 +258,17 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+-                  (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 24));
++                  (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 24), (unsigned long)Thread->CurrentFrame->InSyscallInfo);
++          for (int K = 0; K < 31; ++K) {
++            fprintf(Out, " %lx", (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, K));
++          }
++          fprintf(Out, ", code");
++          for (int K = -16; K < 8; ++K) {
++            const uint64_t A = PC + int64_t(K) * 4;
++            if (Thread->CTX->IsAddressInCodeBuffer(Thread, A) && Thread->CTX->IsAddressInCodeBuffer(Thread, A + 3)) {
++              fprintf(Out, K == 0 ? " [%08x]" : " %08x", *reinterpret_cast<const uint32_t*>(A));
++            }
++          }
++          fprintf(Out, "\n");
          } else {
            Dl_info Info {};
            dladdr(reinterpret_cast<void*>(PC), &Info);
@@ -1305,21 +1571,21 @@ index 41aba2d..cd9909f 100644
 -                  Info.dli_fname ? Info.dli_fname : "?", (unsigned long)(PC - reinterpret_cast<uint64_t>(Info.dli_fbase)),
 -                  Info.dli_sname ? Info.dli_sname : "?", (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 30),
 -                  (unsigned long)Thread->CurrentFrame->State.rip);
-+          fprintf(stderr, "tso-arm: not ours outside translated code, pc %#lx (%s+%#lx, %s), instruction %#010x, address %#lx, lr %#lx, rip %#lx\n",
++          fprintf(FEXCore::TSOViews::LogFile(), "tso-arm: not ours outside translated code, pc %#lx (%s+%#lx, %s), instruction %#010x, address %#lx, lr %#lx, rip %#lx\n",
 +                  (unsigned long)PC, Info.dli_fname ? Info.dli_fname : "?", (unsigned long)(PC - reinterpret_cast<uint64_t>(Info.dli_fbase)),
 +                  Info.dli_sname ? Info.dli_sname : "?", *reinterpret_cast<const uint32_t*>(PC), (unsigned long)FaultAddress,
 +                  (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, 30), (unsigned long)Thread->CurrentFrame->State.rip);
 +          for (int R = 0; R < 31; R += 6) {
-+            fprintf(stderr, "    ");
++            fprintf(FEXCore::TSOViews::LogFile(), "    ");
 +            for (int K = R; K < R + 6 && K < 31; ++K) {
-+              fprintf(stderr, " x%d %#lx", K, (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, K));
++              fprintf(FEXCore::TSOViews::LogFile(), " x%d %#lx", K, (unsigned long)ArchHelpers::Context::GetArmReg(ucontext, K));
 +            }
-+            fprintf(stderr, "\n");
++            fprintf(FEXCore::TSOViews::LogFile(), "\n");
 +          }
          }
        }
        break;
-@@ -230,6 +306,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -230,6 +334,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      auto UnprotectRegionCallback = [](uintptr_t Start, uintptr_t Length) {
        auto rv = mprotect((void*)Start, Length, PROT_READ | PROT_WRITE);
        LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Start, Length);
@@ -1330,7 +1596,7 @@ index 41aba2d..cd9909f 100644
      };
  
      if (Entry->second.Flags.Shared) {
-@@ -284,6 +364,12 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
+@@ -284,6 +392,12 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
      if (SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK) {
        return;
      }
@@ -1343,7 +1609,7 @@ index 41aba2d..cd9909f 100644
  
      auto lk = FEXCore::GuardSignalDeferringSection<std::shared_lock>(VMATracking.Mutex, Thread);
  
-@@ -485,6 +571,19 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -485,6 +599,19 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Size, PendingResourceDeletion);
@@ -1363,7 +1629,7 @@ index 41aba2d..cd9909f 100644
  
    if (LateMetadata) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
-@@ -534,6 +633,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -534,6 +661,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
    }
    InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), Size, PendingResourceDeletion);
  
@@ -1375,7 +1641,7 @@ index 41aba2d..cd9909f 100644
    if (length) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
      CTX->RemoveForceTSOInformation(reinterpret_cast<uint64_t>(addr), length);
-@@ -569,6 +673,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -569,6 +701,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
    }
  
    InvalidateCodeRangeIfNecessaryOnRemap(Thread, reinterpret_cast<uint64_t>(old_address), Result, old_size, new_size);
@@ -1384,7 +1650,7 @@ index 41aba2d..cd9909f 100644
    return Result;
  }
  
-@@ -713,6 +819,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
+@@ -713,6 +847,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Length, PendingResourceDeletion);
@@ -1396,21 +1662,60 @@ index 41aba2d..cd9909f 100644
    return Result;
  }
  
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
+index 277cd3f..671a08e 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
+@@ -391,7 +391,7 @@ bool TSOViewMemory::EmulateAccess(void* ucontext, uint32_t Insn) {
+   auto* MC = ArchHelpers::Context::GetMContext(ucontext);
+   const uint64_t PC = MC->pc;
+   const Machine M {reinterpret_cast<uint64_t*>(MC->regs), reinterpret_cast<uint64_t*>(&MC->sp), ArchHelpers::Context::GetArmFPRs(ucontext)};
+-  static const bool Log = FEXCore::TSOViews::Knob("TSO_VIEWS_LOG");
++  static const bool Log = FEXCore::TSOViews::LogWanted();
+   uint64_t Before[32];
+   if (Log) {
+     memcpy(Before, MC->regs, sizeof(uint64_t) * 31);
+@@ -401,16 +401,16 @@ bool TSOViewMemory::EmulateAccess(void* ucontext, uint32_t Insn) {
+   const bool Done = Perform(M, Insn);
+   Fence();
+   if (Log) {
+-    fprintf(stderr, "tso-arm:   completed %#010x at pc %#lx:", Insn, (unsigned long)PC);
++    fprintf(FEXCore::TSOViews::LogFile(), "tso-arm:   completed %#010x at pc %#lx:", Insn, (unsigned long)PC);
+     for (int i = 0; i < 31; ++i) {
+       if (MC->regs[i] != Before[i]) {
+-        fprintf(stderr, " x%d %#lx -> %#lx", i, (unsigned long)Before[i], (unsigned long)MC->regs[i]);
++        fprintf(FEXCore::TSOViews::LogFile(), " x%d %#lx -> %#lx", i, (unsigned long)Before[i], (unsigned long)MC->regs[i]);
+       }
+     }
+     if (MC->sp != Before[31]) {
+-      fprintf(stderr, " sp changed");
++      fprintf(FEXCore::TSOViews::LogFile(), " sp changed");
+     }
+-    fprintf(stderr, "\n");
++    fprintf(FEXCore::TSOViews::LogFile(), "\n");
+   }
+   if (!Done) {
+     fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d..edbab57 100644
+index 76be33d..e3a30e9 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-@@ -30,7 +30,9 @@ $end_info$
+@@ -30,8 +30,14 @@ $end_info$
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
++#include <ctime>
 +#include <fcntl.h>
  #include <iterator>
++#include <linux/futex.h>
 +#include <new>
  #include <sys/mman.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
  #include <unistd.h>
  #include <vector>
-@@ -51,8 +53,20 @@ namespace {
+ 
+@@ -51,8 +57,20 @@ namespace {
    uint64_t OrderedViewBase(int Slot) {
      return SlotBase(Slot) | OrderedBit;
    }
@@ -1432,7 +1737,20 @@ index 76be33d..edbab57 100644
        // A view keeping rights it must lose would break the protocol silently
        LogMan::Msg::EFmt("tso-arm: mprotect({:#x}, {:#x}, {}) failed: {}", Addr, Length, Prot, strerror(errno));
        abort();
-@@ -90,24 +104,44 @@ namespace {
+@@ -79,35 +97,55 @@ namespace {
+   thread_local int LastFaultCount;
+ 
+   bool LogOn() {
+-    static const bool On = Knob("TSO_VIEWS_LOG");
++    static const bool On = LogWanted();
+     return On;
+   }
+ #define VLOG(...)                     \
+   do {                                \
+     if (LogOn()) {                    \
+-      fprintf(stderr, __VA_ARGS__);   \
++      fprintf(LogFile(), __VA_ARGS__);   \
+     }                                 \
    } while (0)
  
    struct Counters {
@@ -1484,7 +1802,7 @@ index 76be33d..edbab57 100644
    }
  } // namespace
  
-@@ -128,6 +162,12 @@ TSOViewMemory* TSOViewMemory::Get() {
+@@ -128,6 +166,15 @@ TSOViewMemory* TSOViewMemory::Get() {
  }
  
  bool TSOViewMemory::Init() {
@@ -1494,10 +1812,13 @@ index 76be33d..edbab57 100644
 +    LogMan::Msg::EFmt("tso-arm: the views need 4 KB pages, this host has {} KB pages", sysconf(_SC_PAGESIZE) / 1024);
 +    return false;
 +  }
++  if (LogWanted()) {
++    LogFile(); // opened here, not first in a fault handler
++  }
    auto T = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    if (T == MAP_FAILED) {
      return false;
-@@ -138,6 +178,11 @@ bool TSOViewMemory::Init() {
+@@ -138,6 +185,11 @@ bool TSOViewMemory::Init() {
      return false;
    }
    ROMask = static_cast<uint16_t*>(M);
@@ -1509,7 +1830,28 @@ index 76be33d..edbab57 100644
    auto L = ::mmap(nullptr, Pages * sizeof(uint32_t), PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    auto Q = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    if (L == MAP_FAILED || Q == MAP_FAILED) {
-@@ -182,7 +227,7 @@ bool TSOViewMemory::Init() {
+@@ -162,9 +214,18 @@ bool TSOViewMemory::Init() {
+     ChunkShares = static_cast<uint8_t*>(C);
+   }
+ 
+-  // A slot needs both its views; the host's own mappings take some of the address space
++  // A slot needs both its views; the host's own mappings take some of the address space. On a small address space
++  // (39 bits, 512 GB) the views took all they could, 13 slots, and the host's own memory per thread (FEX's
++  // allocator, its lookup cache, its stack) ran out after about a hundred threads: the window and the views take
++  // three quarters at most (11 slots on 39 bits, every slot on 48). TSO_VIEWS_SLOTS: fewer.
++  int Top;
++  const uint64_t Space = 1ULL << (64 - __builtin_clzll(reinterpret_cast<uint64_t>(&Top)));
++  int MaxSlots = int(std::min<uint64_t>(Slots - 1, (Space / 4 * 3 - Window) / (2 * Window)));
++  if (const char* E = getenv("TSO_VIEWS_SLOTS")) {
++    MaxSlots = std::max(1, std::min(MaxSlots, atoi(E)));
++  }
+   int Usable = 0;
+-  for (int S = 1; S < Slots; ++S) {
++  for (int S = 1; S < Slots && Usable < MaxSlots; ++S) {
+     if (!ReserveAt(SlotBase(S))) {
+       continue;
+     }
+@@ -182,7 +243,7 @@ bool TSOViewMemory::Init() {
      }
      SlotUsed[0] = true;
    }
@@ -1518,7 +1860,7 @@ index 76be33d..edbab57 100644
      PrintStats = true;
      atexit(DumpStats);
    }
-@@ -198,12 +243,32 @@ bool TSOViewMemory::Init() {
+@@ -198,12 +259,32 @@ bool TSOViewMemory::Init() {
    if (const char* W = getenv("TSO_VIEWS_WINDOW")) {
      WindowSize = std::max<uint64_t>(strtoull(W, nullptr, 10), 1);
    }
@@ -1551,7 +1893,7 @@ index 76be33d..edbab57 100644
  void TSOViewMemory::NoteAccess(bool Emulated) {
    __atomic_fetch_add(Emulated ? &Count.Emulated : &Count.Repeated, 1, __ATOMIC_RELAXED);
  }
-@@ -242,32 +307,20 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
+@@ -242,32 +323,20 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
    if (Env && !strcmp(Env, "none")) {
      return;
    }
@@ -1595,7 +1937,7 @@ index 76be33d..edbab57 100644
    }
  
    FILE* F = fopen(ProfilePath.c_str(), "r");
-@@ -278,15 +331,23 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
+@@ -278,15 +347,23 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
    bool Fall = false;
    while (fgets(Line, sizeof(Line), F)) {
      unsigned long S, E;
@@ -1620,7 +1962,7 @@ index 76be33d..edbab57 100644
    if (Fall && Budget) {
      // Nothing is translated yet: no code to throw away
      EnterFallback(0, false);
-@@ -309,17 +370,83 @@ void TSOViewMemory::SaveProfile() {
+@@ -309,17 +386,83 @@ void TSOViewMemory::SaveProfile() {
    if (!F) {
      return;
    }
@@ -1706,7 +2048,7 @@ index 76be33d..edbab57 100644
  uint64_t TSOViewMemory::ViewBase(int Slot, bool Ordered) {
    return Ordered ? OrderedViewBase(Slot) : SlotBase(Slot);
  }
-@@ -347,6 +474,24 @@ const TSOViewMemory::Range* TSOViewMemory::Find(uint64_t Addr, uint64_t* Start)
+@@ -347,6 +490,24 @@ const TSOViewMemory::Range* TSOViewMemory::Find(uint64_t Addr, uint64_t* Start)
    return &It->second;
  }
  
@@ -1731,7 +2073,7 @@ index 76be33d..edbab57 100644
  uint64_t TSOViewMemory::ChooseAddress(uint64_t Hint, uint64_t Length) const {
    if (Hint >= 0x10000 && Hint + Length <= Window && IsFree(Hint, Length)) {
      return Hint;
-@@ -379,17 +524,19 @@ void TSOViewMemory::Erase(uint64_t Addr, uint64_t End) {
+@@ -379,17 +540,19 @@ void TSOViewMemory::Erase(uint64_t Addr, uint64_t End) {
      const Range R = It->second;
      It = Ranges.erase(It);
      if (Start < Addr) {
@@ -1755,7 +2097,7 @@ index 76be33d..edbab57 100644
  }
  
  // ---------------------------------------------------------------------------------------------------------------
-@@ -408,24 +555,38 @@ void TSOViewMemory::AliasNone(uint64_t Addr, uint64_t Length, uint64_t Base) {
+@@ -408,24 +571,38 @@ void TSOViewMemory::AliasNone(uint64_t Addr, uint64_t Length, uint64_t Base) {
    ::mprotect(R, Length, PROT_NONE);
  }
  
@@ -1802,7 +2144,7 @@ index 76be33d..edbab57 100644
        if (S != 0) {
          Reserve(SlotBase(S) + Addr, Length);
        }
-@@ -441,6 +602,63 @@ void TSOViewMemory::SetState(uint64_t Addr, uint64_t End, uint8_t State) {
+@@ -441,6 +618,63 @@ void TSOViewMemory::SetState(uint64_t Addr, uint64_t End, uint8_t State) {
    End = std::min(End, Window);
    memset(Owner + (Addr >> PageShift), State, (End - Addr) >> PageShift);
    memset(ROMask + (Addr >> PageShift), 0, ((End - Addr) >> PageShift) * sizeof(uint16_t));
@@ -1866,7 +2208,7 @@ index 76be33d..edbab57 100644
  }
  
  int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered, int GuestProt) const {
-@@ -461,7 +679,7 @@ int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered
+@@ -461,7 +695,7 @@ int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered
    return State == Slot ? RW : PROT_NONE;
  }
  
@@ -1875,7 +2217,7 @@ index 76be33d..edbab57 100644
    End = std::min(End, Window);
    if (Addr >= End) {
      return;
-@@ -478,15 +696,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+@@ -478,15 +712,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
      }
      const int GP = It->second.Prot;
      for (int Sl = 0; Sl < Slots; ++Sl) {
@@ -1895,7 +2237,7 @@ index 76be33d..edbab57 100644
            if (Prot != RunProt) {
              Protect(Base + RunStart, P - RunStart, RunProt);
              RunStart = P;
-@@ -499,16 +718,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+@@ -499,16 +734,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
    }
  }
  
@@ -1916,7 +2258,7 @@ index 76be33d..edbab57 100644
        // A view may hold less than O (a right given lazily and not used yet), never more
        if (O != N && ((O & ~N) != 0 || Sl == FaultSlot)) {
          Protect(ViewBase(Sl, Ord) + (Page << PageShift), 1ULL << PageShift, N);
-@@ -521,6 +740,17 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
+@@ -521,6 +756,17 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
  // ---------------------------------------------------------------------------------------------------------------
  // Guest memory management
  
@@ -1934,7 +2276,7 @@ index 76be33d..edbab57 100644
  int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags, int Fd, off_t Offset, int Slot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mmap %#lx+%#lx prot %d flags %#x fd %d slot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot, Flags, Fd, Slot);
-@@ -556,15 +786,25 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -556,15 +802,25 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
  
      void* R = MAP_FAILED;
      Kind K = Kind::Private;
@@ -1963,7 +2305,7 @@ index 76be33d..edbab57 100644
          uint64_t Done = 0;
          while (Done < Length) {
            const auto N = ::pread(Fd, static_cast<char*>(R) + Done, Length - Done, Offset + Done);
-@@ -583,17 +823,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -583,17 +839,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
      if (R == MAP_FAILED) {
        if (errno == EEXIST && !Fixed && !NoReplace) {
          // Something unknown to us lives there: remember it as taken and try the next gap
@@ -1998,7 +2340,7 @@ index 76be33d..edbab57 100644
      return A;
    }
    return -ENOMEM;
-@@ -606,7 +860,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
+@@ -606,7 +876,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
    if (::munmap(reinterpret_cast<void*>(Addr), L) == -1) {
      return -errno;
    }
@@ -2007,7 +2349,7 @@ index 76be33d..edbab57 100644
    Erase(Addr, Addr + L);
    SetState(Addr, Addr + L, 0);
    return 0;
-@@ -616,6 +870,10 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -616,6 +886,10 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mprotect %#lx+%#lx prot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot);
    const uint64_t L = PageUp(Length);
@@ -2018,7 +2360,7 @@ index 76be33d..edbab57 100644
    if (::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
      return -errno;
    }
-@@ -628,11 +886,14 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -628,11 +902,14 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    }
    for (; It != Ranges.end() && It->first < Addr + L; ++It) {
      const uint64_t S = std::max(It->first, Addr);
@@ -2036,7 +2378,7 @@ index 76be33d..edbab57 100644
    }
    Apply(Addr, Addr + L);
    return 0;
-@@ -652,13 +913,12 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -652,13 +929,12 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
    const Range Src = *SrcP;
  
    auto Place = [&](uint64_t T, uint64_t Len, Kind K) {
@@ -2052,7 +2394,7 @@ index 76be33d..edbab57 100644
      Erase(A, A + Len);
      SetState(A, A + Len, 0);
    };
-@@ -674,6 +934,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -674,6 +950,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
        return -errno;
      }
      Place(T, NewL, Kind::SharedAnon);
@@ -2062,7 +2404,7 @@ index 76be33d..edbab57 100644
      return T;
    }
  
-@@ -693,8 +956,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -693,8 +972,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
      if (!(Flags & MREMAP_FIXED) && IsFree(Old + OldL, NewL - OldL)) {
        auto R = ::mmap(reinterpret_cast<void*>(Old + OldL), NewL - OldL, Src.Prot, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
        if (R != MAP_FAILED) {
@@ -2072,7 +2414,7 @@ index 76be33d..edbab57 100644
          SetState(Old + OldL, Old + NewL, Mine);
          Apply(Old + OldL, Old + NewL);
          return Old;
-@@ -747,6 +1009,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -747,6 +1025,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      return ::madvise(reinterpret_cast<void*>(Addr), Length, Advice) == -1 ? -errno : 0;
    }
    const uint64_t End = Addr + PageUp(Length);
@@ -2082,7 +2424,7 @@ index 76be33d..edbab57 100644
    auto It = Ranges.upper_bound(Addr);
    if (It != Ranges.begin()) {
      --It;
-@@ -757,7 +1022,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -757,7 +1038,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      if (S >= E) {
        continue;
      }
@@ -2091,7 +2433,7 @@ index 76be33d..edbab57 100644
      if (::madvise(reinterpret_cast<void*>(S), E - S, A) == -1) {
        return -errno;
      }
-@@ -773,6 +1038,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -773,6 +1054,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    std::lock_guard lk(Mutex);
@@ -2102,7 +2444,7 @@ index 76be33d..edbab57 100644
    int S = 1;
    for (; S < Slots; ++S) {
      if (SlotUsable[S] && !SlotUsed[S]) {
-@@ -783,10 +1052,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -783,10 +1068,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    SlotUsed[S] = true;
@@ -2124,7 +2466,7 @@ index 76be33d..edbab57 100644
      }
    }
  
-@@ -844,17 +1120,382 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -844,17 +1136,389 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
    const int S = Base / Window;
    const uint16_t Bit = uint16_t(1U << S);
    VLOG("tso-arm: detach slot %d\n", S);
@@ -2392,40 +2734,48 @@ index 76be33d..edbab57 100644
 +  }
 +}
 +
-+void TSOViewMemory::CloseForkPipe(int End) {
-+  if (ForkPipe[End] >= 0) {
-+    ::close(ForkPipe[End]);
-+    ForkPipe[End] = -1;
++void TSOViewMemory::DropForkDone() {
++  if (ForkDone) {
++    ::munmap(ForkDone, 1ULL << PageShift);
++    ForkDone = nullptr;
 +  }
 +}
 +
 +void TSOViewMemory::LockForFork() {
 +  Mutex.lock();
-+  if (::pipe2(ForkPipe, O_CLOEXEC) != 0) {
-+    ForkPipe[0] = ForkPipe[1] = -1;
-+  }
++  // A pipe did this before, two descriptors at every fork: with the guest's descriptors nearly all in use (CPython's
++  // test_no_leaking) they were the last ones, and FEX's own pipe for vfork found none
++  auto* P = ::mmap(nullptr, 1ULL << PageShift, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++  ForkDone = P == MAP_FAILED ? nullptr : static_cast<uint32_t*>(P);
 +}
 +
 +void TSOViewMemory::UnlockForFork() {
-+  CloseForkPipe(0);
-+  CloseForkPipe(1);
++  DropForkDone();
 +  Mutex.unlock();
 +}
 +
-+void TSOViewMemory::AfterForkParent() {
++void TSOViewMemory::AfterForkParent(pid_t Child) {
 +  std::lock_guard lk(Mutex);
 +  // The child copies after the fork, from memory this process still shares with it: until it is done, nothing here
 +  // may write guest memory (the thread that forked waits here with the guest's fork locks held; the views' lock keeps
-+  // the other threads' faults waiting). A child that dies on the way closes the pipe as well.
-+  CloseForkPipe(1);
-+  if (ForkPipe[0] >= 0) {
-+    char Byte;
-+    while (::read(ForkPipe[0], &Byte, 1) < 0 && errno == EINTR) {
-+    }
-+  } else {
-+    LogMan::Msg::EFmt("tso-arm: fork without a pipe to wait for the child's copy");
++  // the other threads' faults waiting). A child that dies on the way is seen by waitid without reaping it (WNOWAIT):
++  // the guest waits for it as it would.
++  if (!ForkDone) {
++    LogMan::Msg::EFmt("tso-arm: fork without a word to wait for the child's copy");
 +  }
-+  CloseForkPipe(0);
++  while (ForkDone && !__atomic_load_n(ForkDone, __ATOMIC_ACQUIRE)) {
++    const timespec Wait {0, 20'000'000};
++    ::syscall(SYS_futex, ForkDone, FUTEX_WAIT, 0, &Wait, nullptr, 0);
++    if (__atomic_load_n(ForkDone, __ATOMIC_ACQUIRE)) {
++      break;
++    }
++    siginfo_t Info {};
++    const int R = ::waitid(P_PID, Child, &Info, WEXITED | WNOHANG | WNOWAIT | __WALL);
++    if ((R == -1 && errno == ECHILD) || (R == 0 && Info.si_pid == Child)) {
++      break;
++    }
++  }
++  DropForkDone();
 +  for (auto& [Start, R] : Ranges) {
 +    if (R.K == Kind::Private && Start < Window && !(R.Prot & PROT_WRITE)) {
 +      R.ForkShared = true;
@@ -2436,9 +2786,8 @@ index 76be33d..edbab57 100644
 +void TSOViewMemory::AfterForkChild(uint64_t Base, bool Copy, void (*Copied)(void* Ctx, uint64_t Start, uint64_t Length), void* Ctx) {
 +  // The forking thread held the lock across the fork; here it is the only thread, and the lock starts over
 +  new (&Mutex) std::recursive_mutex;
-+  CloseForkPipe(0);
 +  if (!Copy) {
-+    CloseForkPipe(1);
++    DropForkDone();
 +    return;
 +  }
 +  std::lock_guard lk(Mutex);
@@ -2498,11 +2847,11 @@ index 76be33d..edbab57 100644
 +    }
 +  }
 +  // The parent may go on
-+  if (ForkPipe[1] >= 0) {
-+    while (::write(ForkPipe[1], "c", 1) < 0 && errno == EINTR) {
-+    }
++  if (ForkDone) {
++    __atomic_store_n(ForkDone, 1, __ATOMIC_RELEASE);
++    ::syscall(SYS_futex, ForkDone, FUTEX_WAKE, INT32_MAX, nullptr, nullptr, 0);
 +  }
-+  CloseForkPipe(1);
++  DropForkDone();
 +  VLOG("tso-arm: fork: %lu ranges copied (%lu KB) in %.3f ms, %lu read-only ranges shared, swap %s\n", (unsigned long)Copies,
 +       (unsigned long)(Bytes >> 10), (Nanos() - T0) / 1e6, (unsigned long)Shared,
 +       !Swap.Loaded ? "not looked at" : Swap.All ? "unknown" : Swap.N ? "in use" : "not used");
@@ -2511,7 +2860,7 @@ index 76be33d..edbab57 100644
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1503,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1526,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -2520,7 +2869,7 @@ index 76be33d..edbab57 100644
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -878,6 +1519,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -878,6 +1542,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    ProfileChanged = true;
  }
  
@@ -2553,7 +2902,7 @@ index 76be33d..edbab57 100644
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +1567,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +1590,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -2569,7 +2918,7 @@ index 76be33d..edbab57 100644
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,6 +1584,16 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,6 +1607,16 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -2586,7 +2935,21 @@ index 76be33d..edbab57 100644
        LastChange[P] = Now; // a page that is really shared comes back quickly and is caught by MayMigrate
        ++Moved;
      }
-@@ -933,9 +1619,22 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -920,10 +1629,11 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+ }
+ 
+ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
+-  static const bool Log = Knob("TSO_VIEWS_LOG");
++  static const bool Log = LogWanted();
+   auto NotOurs = [&](const char* Why) {
+     if (Log) {
+-      fprintf(stderr, "tso-arm: fault %s at %#lx slot %d not ours: %s\n", Write ? "W" : "R", (unsigned long)FaultAddress, Slot, Why);
++      fprintf(LogFile(), "tso-arm: fault %s at %#lx slot %d not ours (pid %d): %s\n", Write ? "W" : "R", (unsigned long)FaultAddress, Slot,
++              int(::getpid()), Why);
+     }
+     return Fault::NotOurs;
+   };
+@@ -933,9 +1643,22 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const int View = FaultAddress / Window;
    const bool Ordered = View >= Slots;
    if (View >= 2 * Slots || Slot == 0 || (Ordered ? View - Slots : View) != Slot) {
@@ -2595,7 +2958,7 @@ index 76be33d..edbab57 100644
 +      const uint64_t G = FaultAddress & (Window - 1);
 +      uint64_t RS {};
 +      const Range* R = FindMutable(G, &RS);
-+      fprintf(stderr, "tso-arm: (view %d, guest %#lx: %s %#lx-%#lx prot %d aliased %#x state %#x)\n", View, (unsigned long)G,
++      fprintf(LogFile(), "tso-arm: (view %d, guest %#lx: %s %#lx-%#lx prot %d aliased %#x state %#x)\n", View, (unsigned long)G,
 +              R ? "range" : "no range", (unsigned long)(R ? RS : 0), (unsigned long)(R ? R->End : 0), R ? R->Prot : -1,
 +              R ? R->Aliased : 0, G < Window ? Owner[G >> PageShift] : 0);
 +    }
@@ -2609,7 +2972,7 @@ index 76be33d..edbab57 100644
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,6 +1645,24 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,6 +1669,24 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -2625,7 +2988,7 @@ index 76be33d..edbab57 100644
 +    Apply(RStart, REnd, Slot);
 +    ++Count.Aliases;
 +    if (Log) {
-+      fprintf(stderr, "tso-arm: range %#lx-%#lx into the views of slot %d\n", (unsigned long)RStart, (unsigned long)REnd, Slot);
++      fprintf(LogFile(), "tso-arm: range %#lx-%#lx into the views of slot %d\n", (unsigned long)RStart, (unsigned long)REnd, Slot);
 +    }
 +    LastFault = 0;
 +    return Fault::Retry;
@@ -2634,7 +2997,7 @@ index 76be33d..edbab57 100644
    // The same address faulting over and over means the protocol is stuck: hand it to the normal fault path
    // (an atomic reported as a read first becomes shared read-only, then faults again as a write and is upgraded)
    if (LastFault == FaultAddress) {
-@@ -963,6 +1680,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -963,6 +1704,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -2642,7 +3005,7 @@ index 76be33d..edbab57 100644
 +  // away and lifts the protection (UnprotectCode), then the store runs again and meets the page's state
 +  if (Write && CodeRO[Page]) {
 +    if (Log) {
-+      fprintf(stderr, "tso-arm: fault W view %d slot %d guest %#lx: code\n", View, Slot, (unsigned long)G);
++      fprintf(LogFile(), "tso-arm: fault W view %d slot %d guest %#lx: code\n", View, Slot, (unsigned long)G);
 +    }
 +    LastFault = 0;
 +    return Fault::Code;
@@ -2651,7 +3014,16 @@ index 76be33d..edbab57 100644
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -1069,6 +1796,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1050,7 +1801,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+   }
+ 
+   if (Log) {
+-    fprintf(stderr, "tso-arm: fault %s view %d slot %d guest %#lx: %#x/%#x -> %#x/%#x %s\n", Write ? "W" : "R", View, Slot,
++    fprintf(LogFile(), "tso-arm: fault %s view %d slot %d guest %#lx: %#x/%#x -> %#x/%#x %s\n", Write ? "W" : "R", View, Slot,
+             (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
+             Result == Fault::Escalate ? "escalate" : "retry");
+   }
+@@ -1069,6 +1820,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        EnterFallback(Now - StartNs);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -2659,7 +3031,7 @@ index 76be33d..edbab57 100644
        }
        return Result;
      }
-@@ -1088,6 +1816,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +1840,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -2667,7 +3039,7 @@ index 76be33d..edbab57 100644
        }
        return Result;
      }
-@@ -1096,12 +1825,15 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +1849,15 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;
@@ -2686,7 +3058,7 @@ index 76be33d..edbab57 100644
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-index cf5fc2b..35cc54c 100644
+index cf5fc2b..34fc7aa 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 @@ -9,6 +9,7 @@
@@ -2712,7 +3084,7 @@ index cf5fc2b..35cc54c 100644
  
  class TSOViewMemory {
  public:
-@@ -43,15 +48,58 @@ public:
+@@ -43,15 +48,59 @@ public:
  
    // A new thread's plain view; 0 if no slot is free. The pages of the mapping that holds StackPointer move to it.
    uint64_t AttachThread(uint64_t StackPointer);
@@ -2734,15 +3106,16 @@ index cf5fc2b..35cc54c 100644
 +  void RequestWake();
 +
 +  // fork: memory that is private for the guest lives in shared memory here, which a forked child would go on
-+  // sharing with its parent. The lock is held across the fork, so the child finds consistent tables, and a pipe
-+  // tells the parent when the child has its copy.
++  // sharing with its parent. The lock is held across the fork, so the child finds consistent tables, and a word in
++  // memory both processes map tells the parent when the child has its copy (no descriptor: the guest may have used
++  // them all).
 +  void LockForFork();
 +  void UnlockForFork();
-+  // In the parent of a child with an address space of its own (not vfork), right after the fork and before anything
-+  // in guest memory changes: waits until the child has copied the memory, as it was at the fork, that it does not
-+  // keep sharing. The private ranges the guest cannot write stay shared with the child, until one side makes them
-+  // writable or throws pages away (Unshare).
-+  void AfterForkParent();
++  // In the parent of a child (pid Child) with an address space of its own (not vfork), right after the fork and
++  // before anything in guest memory changes: waits until the child has copied the memory, as it was at the fork,
++  // that it does not keep sharing. The private ranges the guest cannot write stay shared with the child, until one
++  // side makes them writable or throws pages away (Unshare).
++  void AfterForkParent(pid_t Child);
 +  // In the child, the only thread left (Base: its plain view base). Copy is false for vfork, where the child runs
 +  // on its parent's memory until it calls execve or exits, as the guest asked. Otherwise the writable private memory
 +  // is copied into shared memory of the child's own, the slots of the threads that did not come along are given
@@ -2773,7 +3146,7 @@ index cf5fc2b..35cc54c 100644
    uint64_t Transitions() const {
      return Stats.Transitions;
    }
-@@ -60,9 +108,15 @@ public:
+@@ -60,9 +109,15 @@ public:
    static void ExitStats();
  
    // Profile of the program: the escalated code ranges and whether it fell back, kept between runs
@@ -2790,7 +3163,7 @@ index cf5fc2b..35cc54c 100644
    void NoteEscalation(uint64_t Start, uint64_t End);
    // Logs a failed memory call (TSO_VIEWS_LOG) and passes the result through
    static int64_t Result(const char* What, int64_t R);
-@@ -80,27 +134,53 @@ private:
+@@ -80,27 +135,55 @@ private:
      uint64_t End;
      int Prot;
      Kind K;
@@ -2815,8 +3188,10 @@ index cf5fc2b..35cc54c 100644
 +  // Unshare for the ranges in [Addr, Addr + Length) still shared with a forked process (Files: the file-backed ones
 +  // as well)
 +  void UnshareForkShared(uint64_t Addr, uint64_t Length, bool Files = true);
-+  int ForkPipe[2] {-1, -1}; // the child of a fork writes a byte (or exits) once it has its copy
-+  void CloseForkPipe(int End);
++  // Set by the child of a fork once it has its copy (a futex): a page of shared memory of its own for each fork, so
++  // that the child's own forks later cannot wake this parent
++  uint32_t* ForkDone {};
++  void DropForkDone();
    uint64_t ChooseAddress(uint64_t Hint, uint64_t Length) const;
    bool IsFree(uint64_t Addr, uint64_t Length) const;
    const Range* Find(uint64_t Addr, uint64_t* Start = nullptr) const;
@@ -2851,7 +3226,7 @@ index cf5fc2b..35cc54c 100644
    static void Reserve(uint64_t Base, uint64_t Length);
    static uint64_t ViewBase(int Slot, bool Ordered);
  
-@@ -108,6 +188,7 @@ private:
+@@ -108,6 +191,7 @@ private:
    std::map<uint64_t, Range> Ranges; // guest mappings by start address, split where the protection differs
    bool SlotUsed[FEXCore::TSOViews::Slots] {};
    bool SlotUsable[FEXCore::TSOViews::Slots] {};
@@ -2859,7 +3234,7 @@ index cf5fc2b..35cc54c 100644
    bool AnyAttached {};
    // Migratory ownership: false if the page changed hands quickly three times in a row (it is really shared)
    bool MayMigrate(uint64_t Page);
-@@ -124,6 +205,12 @@ private:
+@@ -124,6 +208,12 @@ private:
    void SaveProfile();
    std::string ProfilePath;
    std::vector<std::pair<uint64_t, uint64_t>> Escalations; // recorded and loaded, for the profile
@@ -2872,7 +3247,7 @@ index cf5fc2b..35cc54c 100644
    bool ProfileLoaded {};
    bool ProfileChanged {};
    uint64_t FaultsSeen {};
-@@ -134,6 +221,7 @@ private:
+@@ -134,6 +224,7 @@ private:
    uint64_t WindowSize {1000};         // TSO_VIEWS_WINDOW: faults per rate measurement
    uint64_t Budget {};
    std::atomic<bool> FallbackRequest {false};
@@ -2880,7 +3255,7 @@ index cf5fc2b..35cc54c 100644
  
  public:
    // True once after the fallback started: the caller then throws away all translated code
-@@ -146,6 +234,11 @@ private:
+@@ -146,6 +237,11 @@ private:
    uint8_t* Owner {};    // page states, one byte per guest page
    uint8_t* ChunkShares {}; // per chunk: private pages shared since the last collapse (nullptr: no chunks)
    uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page

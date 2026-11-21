@@ -1,10 +1,10 @@
 #!/bin/sh
-# Test machine: more threads at once than the page protocol has view slots for (15 on a 39-bit address space). The
+# Test machine: more threads at once than the page protocol has view slots for (11 on a 39-bit address space). The
 # threads test with 12, 15, 16, 32 and 64 threads, and the three workloads with 32 threads (outputs checked), under
 # the protocol with their translated functions; each run's last protocol message.
 #   tests/many_threads.sh
 cd "$(dirname "$0")/.."
-F=$HOME/opt/fex-views/bin/FEX
+F=${FEXV:-$HOME/opt/fex-views/bin/FEX} # FEXV: another tso-arm FEX (the installed one: ~/.local/opt/tso-arm/bin/FEX)
 C=$PWD/build
 P="TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_MULTIBLOCK=0 FEX_DISABLETELEMETRY=1 TSO_VIEWS_PROFILE=none"
 for n in 12 15 16 32 64; do

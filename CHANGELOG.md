@@ -1,5 +1,31 @@
 # Changes
 
+## 0.3.8 (2026-11-21)
+
+What CPython's whole test suite found with the views throughout (no fallback by fault rate). Update from 0.3.7.
+The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.7 or
+older.
+
+- Fixed: a thread sent back to the dispatcher at an instruction start could go on with a guest register already set
+  for a later instruction. FEX shares a constant within a block, and its register allocator put a 0 into rcx where
+  the 0 was first made, before the store ahead of the `xor %ecx, %ecx` that wanted it; repeated from its start, the
+  store wrote to address 8 (CPython's garbage collector unlinking an object, about one run of `test_import` in ten
+  crashed; notes section 51). Constants are not shared across such instruction starts now.
+- Fixed: with nearly all of a program's descriptors in use, a `vfork` (Python's `subprocess`) closed one of the
+  program's own. The views took two descriptors for a pipe at every fork, which left none for FEX's pipe for vfork,
+  and FEX then closed whatever numbers its pair held. A fork under the views needs no descriptor now (a word in
+  shared memory and a futex), nor does FEX's vfork under the views or without a descriptor left.
+- Fixed: a program could start only about a hundred threads under the views on a 39-bit address space (the
+  Raspberry Pi 5's kernel): the views reserved 13 slots, 416 of its 512 GB, and FEX took some 700 MB of address
+  space per thread. Now 300: the views leave a quarter to the host (11 slots there, all 15 on 48 bits), FEX's
+  allocator gives back the half of each 256 MB span it only mapped for the alignment, and each thread's lookup
+  cache covers the views' 16 GB window instead of 64 GB. Beyond that the program gets EAGAIN for a new thread
+  instead of FEX dying.
+- `TSO_VIEWS_LOG=/path` writes the views' log to a file (a vfork child logging into a pipe its waiting parent reads
+  stopped both); `TSO_VIEWS_SLOTS` lowers the number of view slots.
+- `tests/exactstart.c` and `tests/fdfull.c` (in `tests/ci.sh`): the unlink from CPython at a thread's exit to the
+  dispatcher, and fork, vfork and posix_spawn's clone with 0 to 10 descriptors left.
+
 ## 0.3.7 (2026-11-21)
 
 Self-modifying code under the views: a multithreaded program that wrote over code it had run could keep running

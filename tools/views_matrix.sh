@@ -1,7 +1,7 @@
 #!/bin/sh
 # Quick correctness matrix for the views build: output and exit status per configuration.
 cd "$(dirname "$0")/.."
-F=$HOME/opt/fex-views/bin/FEX
+F=${FEXV:-$HOME/opt/fex-views/bin/FEX} # FEXV: another tso-arm FEX (the installed one: ~/.local/opt/tso-arm/bin/FEX)
 run() {
     label=$1
     shift

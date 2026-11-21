@@ -17,7 +17,7 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **83 %** (pigz 91 %, xz 88 %, zstd 70 %) |
+| **tso-arm**, with functions translated ahead of time | **82 %** (pigz 91 %, xz 88 %, zstd 69 %) |
 | tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
@@ -119,7 +119,8 @@ faster than with full ordering.
   library and gives it up when it unmaps it. A plain access that meets shared memory is patched at run time into an
   ordered one.
 - **Fallback:** a program whose threads hand data back and forth constantly (zstd) or uses more threads at once than
-  the address space has views for (15 on a 39-bit kernel) goes on with full ordering, as fast as FEX's own.
+  the address space has views for (11 on a 39-bit kernel, 15 on 48 bits) goes on with full ordering, as fast as
+  FEX's own.
 - **Compile units** (notes section 43): FEX compiles from each place a function is entered everything reachable
   from there; tso-arm limits that to 150 instructions (`FEX_MAXINST`), so programs with large functions entered at
   many points (ffmpeg, Node) no longer compile the same code again and again.
@@ -133,20 +134,20 @@ time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with
 every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-21T08:54, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-21T14:41, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.01 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.14 s, 89 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
-| tso-arm build, TSO off | no | 1.13 s, 89 % | 1.33 s, 80 % | 0.58 s, 84 % | 85 % |
-| FEX default | no | 1.57 s, 64 % | 1.51 s, 71 % | 0.67 s, 73 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.67 s, 60 % | 1.53 s, 70 % | 0.71 s, 69 % | 66 % |
-| tso-arm, first run | yes | 1.32 s, 77 % | 1.54 s, 69 % | 0.84 s, 58 % | 68 % |
-| tso-arm, with profile | yes | 1.27 s, 80 % | 1.52 s, 70 % | 0.70 s, 70 % | 73 % |
-| ahead of time, TSO off | no | 1.06 s, 95 % | 1.17 s, 91 % | 0.55 s, 89 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.76 s, 57 % | 1.55 s, 69 % | 0.70 s, 70 % | 65 % |
-| ahead of time + tso-arm, with profile | yes | 1.11 s, 91 % | 1.21 s, 88 % | 0.70 s, 70 % | 83 % |
+| native Arm | - | 0.99 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 84 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.33 s, 80 % | 0.57 s, 86 % | 85 % |
+| FEX default | no | 1.56 s, 63 % | 1.54 s, 69 % | 0.67 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 60 % | 1.53 s, 70 % | 0.72 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.33 s, 74 % | 1.53 s, 70 % | 0.86 s, 57 % | 67 % |
+| tso-arm, with profile | yes | 1.26 s, 79 % | 1.49 s, 72 % | 0.71 s, 69 % | 73 % |
+| ahead of time, TSO off | no | 1.06 s, 93 % | 1.17 s, 91 % | 0.55 s, 89 % | 91 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.56 s, 69 % | 0.70 s, 70 % | 65 % |
+| ahead of time + tso-arm, with profile | yes | 1.09 s, 91 % | 1.22 s, 88 % | 0.71 s, 69 % | 82 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -188,7 +189,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
   cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, signals
   that meet (two at once, one raised while another thread changes its action), code rewritten while another thread
-  runs, x87 arithmetic, a dynamically linked
+  runs, a thread sent back to the dispatcher in the middle of a block, fork and vfork with no descriptor left, x87
+  arithmetic, a dynamically linked
   program, a shared library translated ahead of time that the program loads and
   unloads three times, and the ring buffer there, also after a start with one thread (the views asleep); then it
   measures the efficiency of pigz, xz and zstd on that machine
@@ -233,7 +235,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   (`tests/cpython_suite.sh all`, 39,988 cases): none fails under tso-arm only; 75 fail in both modes, most because
   Ubuntu's Python 3.12.3 carries changes the release's own tests do not expect, a few FEX's. It found FEX's own file
   descriptors on the numbers a program uses (a closed standard input became FEX's socket) and `fexecve` losing
-  `argv[0]`, fixed in the patches (notes section 49): 87 failed before.
+  `argv[0]`, fixed in the patches (notes section 49): 87 failed before. Run with the views throughout (no fallback,
+  notes section 51) it found three faults more: a register FEX set ahead of time, which a thread sent back to the
+  dispatcher then saw too early (one `test_import` in ten crashed), a vfork closing one of the program's
+  descriptors when nearly all were in use, and room for only about a hundred threads on a 39-bit address space.
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.
@@ -248,9 +253,11 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   16 or 64 KB pages the views stay off and FEX orders everything itself.
 - **FEAT_LRCPC** (`ldapr`, Cortex-A55/A75/A76 and later) makes ordered loads as cheap as plain ones. Older cores
   (Cortex-A53, A72) get `ldar` instead, which orders at least as strongly and costs more; both paths are tested.
-- **Threads:** a thread with views of its own needs two 16 GB windows of address space, so 15 threads fit into a
-  39-bit address space at once. With more, the program goes on with full ordering and the further threads share the
-  views of others (correct, as fast as FEX's own full TSO).
+- **Threads:** a thread with views of its own needs two 16 GB windows of address space. On a 39-bit address space
+  (512 GB, the Raspberry Pi 5's kernel) the views take 11 slots and leave the rest to FEX, which needs some 460 MB per
+  thread: about 300 threads in all there; on 48 bits 15 slots and no such limit. With more threads than slots the
+  program goes on with full ordering and the further threads share the views of others (correct, as fast as FEX's
+  own full TSO).
 - **fork:** the views need guest memory to be shared memory, which the kernel's copy-on-write does not cover, so a
   forked child copies the program's writable memory while its parent waits (notes section 39): about 1 ms more per
   fork on the Pi, plus the copy of a large heap. Read-only memory stays shared until it is made writable; vfork and
