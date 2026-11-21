@@ -1,6 +1,9 @@
 # Changes
 
-## 0.3.10 (not released yet)
+## 0.3.10 (2026-11-21)
+
+A thread no longer waits for good in code another thread patched. Update from 0.3.9. The FEX patch changed, so this
+release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.9 or older.
 
 - Fixed in FEX: a thread could stay in the translation of code that another thread had overwritten. FEX's block
   linker looked up a branch's target, let go of its lock, and linked the branch after it took the lock again; when
