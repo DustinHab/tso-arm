@@ -1,5 +1,30 @@
 # Changes
 
+## 0.4.0 (not released yet)
+
+Asynchronous signals reach a program at an instruction start, and Go's preemption works.
+
+- Fixed in FEX: a signal sent to a program (not a fault of its own) that came in while translated code, FEX's
+  dispatcher or FEX's own helpers ran was delivered at once, with the state of the middle of an instruction's
+  translation, or the state in memory while the registers were live elsewhere. A handler that resumes the thread
+  elsewhere took that state for the truth: Go programs crashed or computed wrong results with Go's asynchronous
+  preemption, under FEX without the patches as well. Such a signal now goes back into the kernel's queue, blocked
+  until the thread's next block entry, branch back or system call, where the kernel delivers it with the state of
+  an instruction start (notes section 54);
+  `TSO_EXACT_SIGNALS=0` turns it off. The checks cost about 4 % in pigz's loops as FEX translates them, nothing
+  measurable with the hot functions translated ahead of time (which deliver a signal at once, as before).
+- Fixed in FEX: a signal FEX deferred in a handler and delivered after the handler had returned put the handler's
+  signal mask back for good, and a signal the handler blocked was never delivered again.
+- `tso-arm run` no longer turns Go's preemption off (`GODEBUG=asyncpreemptoff=1`, still so with
+  `TSO_EXACT_SIGNALS=0`); goroutines in long loops without calls are preempted again.
+- `tests/preempt.c` (in `tests/ci.sh`): a handler that makes the interrupted thread call a routine at the
+  interrupted address, as Go's preemption does, many times a second.
+- `tests/sigspin.c` (in `tests/ci.sh`): a loop that waits for its signal handler, also with the loop translated
+  ahead of time, where a signal is still delivered at once; and a loop of register arithmetic in Go's layout, during
+  which a timer's signal must come in.
+- `tests/sigsync.c` (in `tests/ci.sh`): SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE sent by another thread to a
+  running loop.
+
 ## 0.3.11 (2026-11-21)
 
 Programs started under nohup keep SIGHUP ignored. Update from 0.3.10. The FEX patch changed, so this release brings

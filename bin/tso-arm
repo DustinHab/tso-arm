@@ -267,14 +267,15 @@ cmd_run() {
     *) die "unknown mode $mode (tso, full, unordered)" ;;
     esac
     # Go's runtime preempts a goroutine with SIGURG and resumes it at the interrupted instruction with the registers
-    # its handler saw; FEX delivers a signal in the middle of translated code with a state that is not exact there
-    # (FEX without the patches as well: Go programs crash within a second). Without asynchronous preemption Go stops
-    # goroutines at its own safe points only, as before Go 1.14. Only Go programs read GODEBUG; TSO_ARM_GO_PREEMPT=1
-    # keeps the preemption.
-    case ",${GODEBUG:-}," in
-    *,asyncpreemptoff=*) ;;
-    *) [ -n "${TSO_ARM_GO_PREEMPT:-}" ] || export GODEBUG="${GODEBUG:+$GODEBUG,}asyncpreemptoff=1" ;;
-    esac
+    # its handler saw. The patched FEX delivers such a signal at an instruction start (notes section 54); only with
+    # that turned off (TSO_EXACT_SIGNALS=0) is Go's asynchronous preemption turned off too, as before: goroutines stop
+    # at Go's own safe points then. Only Go programs read GODEBUG.
+    if [ "${TSO_EXACT_SIGNALS:-1}" = 0 ]; then
+        case ",${GODEBUG:-}," in
+        *,asyncpreemptoff=*) ;;
+        *) export GODEBUG="${GODEBUG:+$GODEBUG,}asyncpreemptoff=1" ;;
+        esac
+    fi
     exec "$F" "$prog" "$@"
 }
 

@@ -40,6 +40,9 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/exactstart tests/exactstart.c
     $CC -O2 -static -pthread -o $B/xmc tests/xmc.c
     $CC -O2 -static -o $B/sigign tests/sigign.c
+    $CC -O2 -static -pthread -o $B/preempt tests/preempt.c
+    $CC -O2 -static -o $B/sigspin tests/sigspin.c
+    $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
 fi
@@ -82,6 +85,22 @@ done
 # notes section 53)
 for m in tso full unordered; do
     out=$(last $T run --mode $m $B/sigign) || fail "sigign, $m: $out"
+    ok "$m: $out"
+done
+
+# asynchronous signals at an instruction start: a handler that makes the interrupted thread call a routine at the
+# interrupted address, as Go's preemption does, many times a second into a loop whose carry runs through it (FEX
+# delivered them in the middle of an instruction's translation: wrong results or a crash in every run; notes
+# section 54)
+for m in tso full unordered; do
+    out=$(last env TSO_VIEWS_PROFILE=none $T run --mode $m $B/preempt 5000000 3) || fail "preempt, $m: $out"
+    ok "$m: $out"
+done
+
+# the numbers of synchronous signals sent by another thread to a running loop: handled, never blocked while they wait
+# for an exact point (blocked, the fault that delivers them ended the process; notes section 54)
+for m in tso full unordered; do
+    out=$(last timeout 120 $T run --mode $m $B/sigsync) || fail "sigsync, $m: $out"
     ok "$m: $out"
 done
 
@@ -144,6 +163,15 @@ for v in mp vec rep vecflag repflag vecwait lb; do
     out=$(last env TSO_VIEWS_PROFILE=none $T run --aot out/aot/ci-mp.so $B/mp $v $N) || fail "litmus $v, translated: $out"
     ok "litmus $v, translated: $out"
 done
+
+# a loop that waits for its signal handler, as FEX translates it (the signal comes in at the branch back) and
+# translated ahead of time (no such points there: the signal is delivered at once; notes section 54)
+python3 aot/lift.py $B/sigspin out/aot/ci-sigspin.c spin >/dev/null
+sh aot/build.sh out/aot/ci-sigspin.c out/aot/ci-sigspin.so
+out=$(last timeout 120 $T run $B/sigspin) || fail "sigspin: $out"
+ok "$out"
+out=$(last timeout 120 $T run --aot out/aot/ci-sigspin.so $B/sigspin) || fail "sigspin, translated: $out"
+ok "translated: $out"
 
 # dynamically linked: the cross compiler's x86-64 C library as the root file system (or one built elsewhere by
 # tests/build_ci_programs.sh)

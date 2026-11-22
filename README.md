@@ -188,7 +188,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **CI** (`tests/ci.sh`, `.github/workflows/ci.yml`): every push builds tso-arm on one of GitHub's Arm servers (a
   Neoverse N2, at times a V3: 48-bit addresses, FEAT_LRCPC2 and LSE2) and runs the litmus tests, the views' corner
   cases, more threads than views, fork without exec, private file mappings, the program's signal handlers, signals
-  that meet (two at once, one raised while another thread changes its action), code rewritten while another thread
+  that meet (two at once, one raised while another thread changes its action), a handler that resumes the thread
+  elsewhere as Go's preemption does, a loop that waits for its handler (also translated ahead of time), SIGSEGV and
+  the other synchronous signals sent by another thread, code rewritten while another thread
   runs, a thread sent back to the dispatcher in the middle of a block, fork and vfork with no descriptor left,
   signals ignored across execve, x87
   arithmetic, a dynamically linked
@@ -245,8 +247,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Go's own tests** (notes section 53): the official x86-64 toolchain (go1.27.4) compiling and running `go test
   -short` of 20 packages (sync, sync/atomic, context, time, os, os/exec, os/signal, net, net/http, encoding/json and
   more): the same results under tso-arm and under FEX's full ordering. They found a program started under nohup
-  dying of SIGHUP (FEX dropped signals the process was started with ignored), fixed in the patches; what fails in
-  both modes is FEX's (paths through its root file system, a child of os's test binary crashing at its start).
+  dying of SIGHUP (FEX dropped signals the process was started with ignored) and a child of os's test binary
+  crashing at its start (Go's preemption, which the test's own child runs with: notes section 54), both fixed in the
+  patches; what fails in both modes is FEX's paths through its root file system.
 - **Rare failures** (`tests/soak.sh`, notes sections 44 and 46): git, xz, sort, Python and make with 4 threads or
   jobs, 100 runs each with the profile, without one and block by block, every output against full ordering: 1,500
   of 1,500 right (every run wakes the views once); in CI 5 runs each.
@@ -273,12 +276,11 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Ahead of time** takes a program's own functions, static or position-independent (PIE), linked statically or
   dynamically, and those of its shared libraries that have a build ID (distributions build them with one); what the
   translator cannot take stays with FEX.
-- **Go programs** (notes section 48): Go's runtime preempts goroutines with a signal and resumes them at the
-  interrupted instruction with the registers its handler saw, which FEX does not give exactly in the middle of
-  translated code (Go programs crash within a second, under FEX without the patches as well). `tso-arm run` turns
-  that preemption off (`GODEBUG=asyncpreemptoff=1`, which only Go programs read; `TSO_ARM_GO_PREEMPT=1` keeps it):
-  goroutines stop at Go's own safe points then, as before Go 1.14 (also for programs started through binfmt_misc,
-  which go through `tso-arm run`).
+- **Signals** (notes section 54): a signal sent to a program reaches its handler at an instruction start, with the
+  state of that instruction's start: the patched FEX holds it back until the thread's next block entry, branch back
+  or system call. FEX without the patches delivers it in the middle of an instruction's translation, which Go's
+  preemption (it resumes the interrupted goroutine elsewhere with the registers its handler saw) does not survive:
+  Go programs crashed within seconds there. With tso-arm Go programs run with Go's preemption on.
 - **Measured in detail on the Raspberry Pi 5**, and in every CI run on GitHub's Arm runner (notes sections 32 and
   33; the latest on a Neoverse N2: with x86 order kept pigz 78 % and xz 94 %, against 68 and 73 % under FEX's full
   TSO; zstd as fast as FEX's full TSO, since `learn` found its translated functions slower there and left them out;

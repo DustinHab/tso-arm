@@ -2302,3 +2302,111 @@ package initialisation), under FEX without the patches as well (4 of 5 runs). It
 parent: the same chain started from a shell (96 runs, the environment's size swept), a copy of the test in a package
 of its own (120 children) and a Go program that starts itself through a shell four at a time (200) never crashed.
 Not followed further here.
+
+## 54. Asynchronous signals at instruction starts (2026-11-22)
+
+`TestStatStdin` of Go's os tests crashed in about half the runs, under FEX without the patches as well (section 53):
+its child crashed while it initialised. A host `strace` of the chain showed the child sending itself SIGURG, though
+the parent ran with `GODEBUG=asyncpreemptoff=1`: Go's `internal/testenv` drops GODEBUG from the environment of the
+processes a test starts. It was the crash of section 48, Go's preemption under FEX.
+
+**What FEX did.** An asynchronous signal (one sent, not a fault of the thread's own) that comes in while translated
+code runs is delivered at once: the guest's registers spilled from the host's, and the address of the guest
+instruction whose translation the host's address lay in. That is the start of the instruction, with registers and
+flags as the translation had them by then, part of the instruction done, which no instruction start had; without
+exact starts (FEX's own mode, the fallback, a single thread) the address is the last instruction with a RIP entry,
+which may be several instructions back. In the dispatcher's lookup of the next block, and in FEX's own code called
+from translated code (the block linker, helpers of some instructions), the guest's state was taken from memory,
+while its registers were live in the host's or on its stack. A handler that only sets a flag does not notice. One
+that resumes the thread elsewhere does: Go's preemption pushes a call to `asyncPreempt` with the interrupted address
+as the return address, and `asyncPreempt` saves the registers, may switch goroutines, restores them and returns.
+`tests/preempt.c` does the same: a loop of arithmetic whose carry runs from instruction to instruction, SIGURG every
+5 µs from another thread, a handler on a signal stack of its own that makes the thread call a trampoline (flags and
+two registers saved, changed, restored, `ret $128` past the red zone). Natively right; under FEX without the patches
+and under tso-arm 0.3.11, in every mode, a crash in every run. With the handler only counting where it found the
+thread: offsets 0x1 and 0x3d of the function, neither of them in the loop's body.
+
+**Exact points.** FEX has the means for a check. In its own code it defers signals (a count of nested sections; the
+thread's interrupt page made PROT_NONE, and the store to that page at the end of the section faults there), and for
+its gdbserver it can make translated code store to that page at every block entry and before every unconditional
+branch back (`NeedsPendingInterruptFaultCheck`). Now the stores are always emitted (`TSOViews::ExactSignals`,
+`TSO_EXACT_SIGNALS=0` turns it off), also before a conditional branch back (a loop's `jnz` within one translation
+reached none) and before a system call. The store at a block entry gives the block's start, the one before a branch
+the branch instruction (branches have a RIP entry in every mode, `CanHaveSideEffects`), with the guest's state
+exactly that of the instruction's start (full write-back at block ends, carry in ABI form there); the one before a
+system call the `syscall` instruction, which runs again after the handler (RCX and R11, which it sets, hold their new
+values already). A branch back within one instruction is none: FEX's loop for REP CMPS and SCAS has, before its
+branch back, the counters of the element just compared and the flags in temporaries, and a handler that changed the
+context resumed the search behind a match. The JIT takes a branch back as an exact point when its target is a block
+the frontend made for a guest block (an entry, or a guest offset), not one an instruction's translation made for
+itself. (Marking the blocks that hold a GuestOpcode was too narrow: only instructions with a memory access, branches
+and block ends have one, and a loop in Go's layout, a jump to its condition at the bottom and a body of register
+arithmetic, had no point at all; `tests/sigspin.c` has such a loop.)
+
+**Held back in the kernel's queue.** An asynchronous signal for a handler of the guest's (SIG_DFL and SIG_IGN need no
+exact state) that comes in outside the guest's system calls and not at one of those stores goes back into the
+kernel's queue for the thread, with its siginfo (`rt_tgsigqueueinfo`), and is blocked on the host in the mask the
+interrupted code returns to; the interrupt page is made PROT_NONE. At the next store in translated code the fault
+takes the block away, and when FEX's handler returns the kernel delivers the signal there, at the store, which FEX
+recognises by its instruction word and delivers at once. Everything else the kernel does as for any pending signal:
+the handler's mask, a second signal within a handler, longjmp out of one, a fork's child (which starts with nothing
+pending), a system call restarted after a handler. A store outside translated code (the dispatcher after a
+translation, FEX's own code called from translated code) is stepped over: after a handler FEX went on there, and the
+dispatcher ran the block it had looked up for the address before the handler, though the handler changed it (Go:
+the new stack pointer taken, the new address not). The system call handler returns at once while a signal is held
+back, RIP stays at the instruction, and the next block entry delivers it first (held back across a blocking call the
+signal would not interrupt it: SIGINT and a waiting select). Of a real-time signal the instances that wait already go
+back behind it, in their order. The synchronous signals and the ones FEX needs are never held back or blocked: the
+kernel ends a process whose SIGSEGV comes in blocked, and a store to the interrupt page is one (`tests/sigsync.c`
+sends SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE from another thread). FEX's own deferral in its sections holds back
+the same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
+(whose si_addr is no address): it could take another thread's request for the fallback there, and the invalidation's
+section ended with a store to the page while SIGSEGV was blocked.
+
+What holding back changes, within what POSIX allows: a standard signal sent again while one is held merges with it,
+as it would with one pending (the first one's siginfo goes); a signal sent to the process that one thread holds back
+is that thread's until its next exact point, a few instructions as a rule (another thread's execve meanwhile drops
+it); of more than 32 instances of a real-time signal waiting at once, the ones beyond keep their place ahead of the
+held one; with RLIMIT_SIGPENDING used up, the kernel requeues a standard signal without its siginfo, and a real-time
+one is delivered at once.
+
+The first version kept the deferred signals in FEX's own queue of frames, each blocked on the host until its
+delivery, and found faults one after the other. `sigrace` (a timer and `kill(SIGUSR1)` at once, one handler that
+writes to a pipe) lost a signal in about every second run: a frame kept the whole host mask of its moment and put it
+back at the delivery, here the mask of SIGUSR1's handler, after whose sigreturn SIGUSR1 stayed blocked. Go's tests
+run by `go test` died in every round, one to four packages of eight, after 0.07 to 0.3 s, "signal: segmentation
+fault" without a word of Go's: a fault of the page protocol came before the next check (a fresh binary without a
+profile has many at its start; `go test` links each one anew), the kernel blocks SIGSEGV while FEX's handler for it
+runs (FEX takes SA_NODEFER from the guest's action, and Go's has none), and the store at the end of each
+signal-deferring section in that handler, to the page still PROT_NONE, faulted blocked. FEX's handler for a SIGSEGV
+other than the interrupt page's now makes the page writable while it runs (for both versions). A review of that
+version found more of the kind: a frame delivered inside the handler of a later signal, past that handler's mask and
+with its bit left blocked in the saved context; frames that waited for good after a handler left by longjmp; a
+SIGSEGV sent with `kill` deferred and blocked, the next fault fatal; the saved contexts of a fork's child still
+blocking a frame's signal. Each was a piece of the kernel's bookkeeping done again by hand; held back in the kernel's
+queue, none of them has a place to happen.
+
+Code translated ahead of time has no exact points: it is C compiled by clang, the guest's registers host variables
+in it, and it never stores to the interrupt page. A signal held back there waited for the function's return or its
+next call into the guest, and a loop that waits for its handler's effect never ended (`tests/sigspin.c`: a timer's
+SIGALRM sets the flag a loop without calls reads). While such code runs, signals are delivered at once, with the
+state in memory, as before (the bridge keeps the guest stack pointer in the context below anything in use for that,
+so a signal frame overwrites nothing); one held back just before the bridge enters it, or while a call from it into
+the guest returns, is released there. A handler that changes RIP while such code runs sends the thread to the
+dispatcher's loop top, past the bridge's end: signals are held back again from there.
+
+**Cost.** The stores at every block entry, branch back and system call, measured as `bench/efficiency.sh` measures
+(1.8 GHz, best of three rounds, two sessions each way, alternating): with the profile pigz 74 and 74 % with them,
+77 and 78 % without, xz 70 and 71 against 73 and 68 %, zstd 70 and 69 against 69 and 69 % (geometric mean 71 against
+72 to 73 %); with the hot functions translated ahead of time, which have none, 82 % either way (pigz 90 and 89 against
+90 and 90 %, xz 86 and 88 against 89 and 90 %). About 4 % for pigz's loops under FEX's translation, nothing that
+stands out of the noise elsewhere. Holding back costs nothing until a signal comes.
+
+**Results** (the build of this section's end, on the Pi): `preempt` right in every mode, 9 of 9 with some 1,500
+redirections each, the handler finding the thread at the loop's `jb` almost always; `sigrace` 48 of 48 (every mode,
+plain and on a signal stack); `sigsync` in every mode; `sigspin` with its loop as FEX translates it and translated
+ahead of time, the timer coming in during the register loop. The compat Go program with Go's preemption on: 30 of 30
+(1 to 4 of 10 before, wrong sums among the rest). `TestStatStdin`: 20 of 20 (about half before). `go test -short`
+of sync, sync/atomic, runtime/debug, time, context, os/signal, strings and bytes with Go's preemption on: 6 of 6
+rounds without a failure (every round had one to four before the SIGSEGV handler's fix). `tso-arm run` no longer
+turns Go's preemption off, unless `TSO_EXACT_SIGNALS=0`.
