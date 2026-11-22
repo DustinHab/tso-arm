@@ -2635,3 +2635,24 @@ blocks). Against zstd's 0.49 s natively that alone is some 9 points of its effic
 - The translated code itself: per access one view address addition (Arm's addressing has no base + index +
   offset) and volatile accesses (each access one instruction that a fault can patch, and none a loop could lose);
   pigz's `longest_match` runs 27 % more instructions than native for 10 % more cycles (section 24).
+
+## 57. Go's whole standard library with the views throughout; FEXServer's descriptors (2026-11-22)
+
+`go test -short std` (go1.27.4) with the views throughout, no fallback and no profile (`TSO_VIEWS_BUDGET=0
+TSO_VIEWS_PROFILE=none`): x86-64 test binaries built by the native arm64 Go (`GOARCH=amd64`, from go.dev, checked
+against its own SHA-256) and run with `go test -exec` under tso-arm; the Go toolchain run emulated built 7 packages in
+45 minutes. 253 packages pass, 7 fail, 121 have no tests; the 7 fail the same way under FEX's full ordering: helper
+programs a test builds for amd64 and starts itself (`exec format error`: internal/coverage/cfile, internal/godebug,
+internal/platform, testing, runtime's lock rank check), `os.Getwd` naming the root file system's directory, user
+namespaces, gdb and strace on the emulated program. None is the views'.
+
+Two of the first run's failures were not the tests': the test binaries filled the 2 GB tmpfs (`GOTMPDIR` on the
+card now), and a test passed and still failed, "Test I/O incomplete 2m0s after exiting". The FEXServer a program
+starts (FEX forks and executes it when none runs) kept every descriptor that program had open, stdin, stdout and
+stderr among them, and outlives it, serving the programs started after it until it has been alone for a second. A
+parent waiting for the end of such a pipe waited for the server: `go test -exec`, whose other tests kept the server
+alive, two minutes until its WaitDelay, and every shell command substitution with `tso-arm run` about a second,
+the server's idle time (`tests/ci.sh`: 86 s before, 17 s after). The server now starts with its standard descriptors
+on /dev/null and everything else closed but its pipe to the starting FEX and the watched descriptor. `tests/ci.sh`
+checks it with a server of its own (socket and lock in a new directory): the substitution ends in 61 to 73 ms, the
+server's stdout is /dev/null.

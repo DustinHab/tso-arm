@@ -89,6 +89,20 @@ for m in tso full unordered; do
     ok "$m: $out"
 done
 
+# a FEXServer started by a program does not keep that program's stdout: a command substitution ends with the
+# program, not with the server (FEX passed all its descriptors on, and go test -exec waited two minutes for its pipe
+# while other tests kept the server alive). A server of its own (socket and lock in a new directory).
+S=$(mktemp -d)
+s=$(date +%s%N)
+out=$(env XDG_DATA_HOME=$S FEX_SERVERSOCKETPATH=$S/server.socket $T run --mode full $B/sigign | tail -n 1)
+ms=$(( ($(date +%s%N) - s) / 1000000 ))
+srv=$(pgrep -n -u "$(id -u)" -x FEXServer)
+fd1=$( [ -n "$srv" ] && readlink /proc/$srv/fd/1)
+[ $ms -lt 1000 ] && { [ -z "$srv" ] || [ "$fd1" = /dev/null ]; } || fail "FEXServer kept the pipe: $ms ms, its stdout $fd1"
+ok "a fresh FEXServer leaves the pipe: $ms ms, its stdout ${fd1:-gone}"
+for i in $(seq 50); do [ -n "$srv" ] && kill -0 "$srv" 2>/dev/null || break; sleep 0.1; done
+rm -rf "$S"
+
 # the address a fault of the program's own reports, SIGSEGV and SIGBUS, with the views awake (FEX passed on the
 # address in the view; Go's runtime took its nil pointer panics for fatal faults; notes section 55)
 for m in tso full unordered; do

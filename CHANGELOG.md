@@ -2,6 +2,11 @@
 
 ## 0.4.3 (not released yet)
 
+- Fixed in FEX: the FEXServer a program starts kept that program's stdin, stdout and stderr and every other
+  descriptor it had open, and outlived it. A parent waiting for the end of such a pipe waited for the server: a
+  shell's command substitution with `tso-arm run` about a second each time (`tests/ci.sh` 86 s, now 17 s), `go test
+  -exec` two minutes and more while other tests kept the server alive. The server starts with them on /dev/null and
+  the rest closed (a test in `tests/ci.sh`).
 - `tso-arm status PROGRAM` names for each of its profiles what its runs do: the page protocol, full ordering (its
   threads share too much), or pages moving between its threads (`learn` found it faster), and how many code ranges
   run ordered.
