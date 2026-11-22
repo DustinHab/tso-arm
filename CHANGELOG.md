@@ -27,7 +27,9 @@ Asynchronous signals reach a program at an instruction start, and Go's preemptio
 - Fixed in FEX: such signals sent by another thread or process in quick succession (FEX leaves them open in its
   handlers, for faults of its own) were delivered to the program from inside FEX's handler, whose stack then ran
   the program's handler, and the next ones nested deeper until that stack ran out and the process crashed. They wait
-  for the thread's next check now.
+  for the thread's next check now. During a translation FEX queued every such signal, past the room it reserved,
+  and grew the queue inside the signal handler while handlers nested in it read it: a signal of a number that waits
+  already merges with it now, and the queue never grows.
 
 ## 0.3.11 (2026-11-21)
 

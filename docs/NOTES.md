@@ -2368,7 +2368,13 @@ until it ran out and the kernel ended the process. `sigsync` crashed so once in 
 well; a core dump held 81 frames on the 256 KiB stack, the same five over and over. A signal of such a number sent
 by another that interrupts code on the host signal stack now waits, not blocked, as a frame of FEX's deferral for the
 next check, merged with one of its number that waits already (as a standard signal pending is); a store to the
-interrupt page there is stepped over. FEX's own deferral in its sections holds back the same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
+interrupt page there is stepped over. On GitHub's N2 the run without pauses crashed after that still, in 29 of 30
+runs (on the Pi in none), and a core of a FEX linked with symbols showed where: FEX's own deferral, during a
+translation (`LookupExecutableFileSection` in `CompileBlock`), queued every one of the signals that came in, past
+the 64 frames reserved, and the vector grew inside the signal handler (rpmalloc freeing, `mprotect`), while the
+handlers nested in it read it. Every frame goes through one function now: a standard signal merges with a frame of
+its number that waits, and nothing goes beyond the room reserved. FEX's own deferral in its sections holds back the
+same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
 (whose si_addr is no address): it could take another thread's request for the fallback there, and the invalidation's
 section ended with a store to the page while SIGSEGV was blocked.
 
