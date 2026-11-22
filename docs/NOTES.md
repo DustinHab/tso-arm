@@ -2588,3 +2588,29 @@ to 30,000 a run, 14,000 to 21,000 come from chunks moving (45 a chunk: every vie
 moved, in the views whose protection for them changes) made 60 % fewer calls and 30 % fewer pages, and zstd slower
 (674 against 654 ms, median of 10; pigz the same, xz 1208 against 1266 ms): the whole chunk also gives the views
 rights they had not been given yet, which they would fault for. Left as it was; the counters stay.
+
+## 56. Start-up once more (2026-11-22)
+
+What a run costs before it does anything (`bench/startup.sh`-like, an empty input, median of 9, 1.8 GHz): zstd 1.5 ms
+natively, 53 ms under FEX without ordering, 45 ms as `tso-arm run` runs it with its translated functions (FEX
+compiles 3,329 blocks in 0.030 s over all threads); pigz 1.4 / 43 / 37 ms (2,650 blocks); xz 1.1 / 43 / 28 ms (2,335
+blocks). Against zstd's 0.49 s natively that alone is some 9 points of its efficiency, pigz's and xz's about 3.
+
+- **FEX's code cache** (`FEX_ENABLECODECACHINGWIP=1`, filled by FEXServer in the background): the second run with a
+  cache ends with SIGSEGV, every run after it as well, zstd without ordering; FEX without the patches (the same base)
+  just the same. FEX's newest commit has 21 more, none for the cache but a version bump of its format. Under gdb the
+  run with the cache (2,851 blocks loaded) jumps to an address in a 272 MB read-write region of zeros, not into the
+  cache's code (mapped beside it) nor FEX's code buffer: a guest-to-host entry that does not point at code. A
+  dynamically linked program does not crash with it, and gains nothing either (`python3 -c 0` from the x86-64 root
+  file system 474 to 490 ms with the cache, 470 to 498 ms without). Not usable as it stands, and a repair inside
+  FEX's cache is a project of its own.
+- **The start-up functions translated ahead of time**: of the 40 functions FEX compiles most blocks for at the start,
+  the translator takes 20 by now (zstd 591 of 1,402 blocks, pigz 386 of 869, xz 489 of 1,070; section 24: none);
+  the others have `cpuid` (`init_cpu_features`), indirect jumps that are not jump tables (`__printf_buffer`), the
+  stack pointer read as a value (`pthread_create`, `start_thread`). zstd's library with those 20 added (40 functions
+  with their callees): start-up 35.4 ms with them against 38.6 ms without, the whole run 694 ms either way. Not worth
+  a library's size.
+- **Where the start goes** (perf, user cycles, 20 runs of zstd on an empty input with FEX linked with symbols): 79 % in
+  FEX itself, nearly all of it translating: register allocation 10 %, emitting code 5 %, building the IR 4 %, the
+  views' pass 3 %, the decoder 4 %, the allocator and the lookup cache the rest. The start is FEX compiling its 3,300
+  blocks; a code cache that works is what would take it away.
