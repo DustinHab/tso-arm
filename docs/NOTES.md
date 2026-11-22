@@ -2618,3 +2618,20 @@ blocks). Against zstd's 0.49 s natively that alone is some 9 points of its effic
   throws away what was translated before: zstd on an empty input 48.9 against 51.0 ms (229 compiles fewer), pigz
   39.1 against 39.8 ms, xz 33.5 against 29.9 ms (it never wakes on an empty input); the whole runs the same (zstd
   650 against 648, pigz 1119 against 1099, xz 1209 against 1210 ms, best of 6). Left as it is.
+
+**Where 85 % stands.** What is left between the table and native speed, by what it would take:
+
+| | pigz | xz | zstd |
+|---|---|---|---|
+| learned, x86 order kept | 92 % | 88 % | 77 % |
+| the same translation without ordering | 94 % | 91 % | 89 % |
+| start-up (FEX compiling some 3,000 blocks), of native time | 3.7 % | 2.6 % | 9 % |
+
+- The page protocol costs pigz 2 to 4 % (its reader thread's buffers are really shared: 122 escalations, 57 patched
+  accesses in translated code), xz 2.4 % of wall time with 0.6 % more user cycles: the rest is the kernel, 0.05 s
+  more system time for shared memory's page faults than for anonymous memory's (`getrusage`, 4 runs each).
+- zstd keeps 12 points even with its pages moving: its faults' `mprotect` calls, under a lock all faults wait for.
+- Start-up is FEX's translation; its code cache, which would take it away, does not work (above).
+- The translated code itself: per access one view address addition (Arm's addressing has no base + index +
+  offset) and volatile accesses (each access one instruction that a fault can patch, and none a loop could lose);
+  pigz's `longest_match` runs 27 % more instructions than native for 10 % more cycles (section 24).
