@@ -1,6 +1,10 @@
 # Changes
 
-## 0.4.1 (not released yet)
+## 0.4.1 (2026-11-22)
+
+A crash with signals sent from outside fixed, and the check for held-back signals made cheaper. Update from 0.4.0.
+The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.4.0 or
+older.
 
 - The check at every block entry and branch back for a signal held back is a load instead of a store: no slot in the
   store buffer, pigz as FEX translates it 1.30 instead of 1.32 s (notes section 54).
