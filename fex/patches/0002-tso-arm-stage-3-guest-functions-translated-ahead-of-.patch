@@ -1,4 +1,4 @@
-From 6f36cd5c727d609db34797273752d6ca71c66cdd Mon Sep 17 00:00:00 2001
+From 770a3ee5542f9c41bffc38166483cc6ea81a0f3e Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -30,7 +30,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |  12 +
  .../LinuxSyscalls/FileManagement.cpp          |  16 +-
  .../LinuxSyscalls/FileManagement.h            |   1 +
- .../LinuxSyscalls/SignalDelegator.cpp         | 360 ++++++-
+ .../LinuxSyscalls/SignalDelegator.cpp         | 393 +++++++-
  .../LinuxSyscalls/SignalDelegator.h           |  22 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  56 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  54 +-
@@ -42,7 +42,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |  14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 807 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 38 files changed, 2938 insertions(+), 194 deletions(-)
+ 38 files changed, 2973 insertions(+), 192 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -1161,10 +1161,10 @@ index b11f096..af7434c 100644
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index da2b971..266ff23 100644
+index da2b971..5db5a75 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-@@ -65,12 +65,6 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
+@@ -65,10 +65,11 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
    ThreadObject->SignalInfo.Delegator->HandleSignal(ThreadObject, Signal, Info, UContext);
  }
  
@@ -1172,15 +1172,46 @@ index da2b971..266ff23 100644
 -  // Signal 0 isn't real, so everything is offset by one inside the set
 -  Signal -= 1;
 -  return (Set->Val >> Signal) & 1;
--}
--
++// tso-arm: the stack pointer lies on the thread's host signal stack: the code it belongs to is FEX's own handler
++// code (or the entry of a handler the kernel set up a frame for, not run yet)
++static bool OnHostSignalStack(const FEX::HLE::ThreadStateObject* ThreadObject, uint64_t SP) {
++  const auto Base = reinterpret_cast<uint64_t>(ThreadObject->SignalInfo.AltStackPtr);
++  return Base && SP >= Base && SP < Base + SIGSTKSZ * 16;
+ }
+ 
  /**
-  * @name Signal frame setup
-  * @{ */
-@@ -81,6 +75,29 @@ void SignalDelegator::HandleSignal(FEX::HLE::ThreadStateObject* Thread, int Sign
+@@ -81,6 +82,57 @@ void SignalDelegator::HandleSignal(FEX::HLE::ThreadStateObject* Thread, int Sign
      LogMan::Msg::AFmt("Thread {} has received a signal and hasn't registered itself with the delegate! Programming error!",
                        FHU::Syscalls::gettid());
    } else {
++    // tso-arm: a synchronous signal's number sent by another thread or process (kill, tgkill: si_code <= 0) that
++    // interrupts FEX's own handler code. FEX's handlers leave the synchronous signals open, for faults of FEX's own,
++    // and the kernel sets up the frames of all pending ones at once, each at the entry of the one before. Delivered
++    // there to the guest, the guest's handler ran, dispatcher and all, on the host signal stack, and the next ones
++    // came in deeper on it, until the stack ran out (`tests/sigsync.c` without pauses, FEX without the patches as
++    // well: 81 frames). It waits as a frame of FEX's deferral for the next check, not blocked (it may not be), and
++    // merges with one of its number that waits already, as a standard signal pending does.
++    if (FEXCore::TSOViews::ExactSignals() && static_cast<siginfo_t*>(Info)->si_code <= 0 && Signal != SIGNAL_FOR_PAUSE &&
++        (NeverBlockedMask() & (1ULL << (Signal - 1))) && OnHostSignalStack(Thread, ArchHelpers::Context::GetSp(UContext))) {
++      auto& Frames = Thread->SignalInfo.DeferredSignalFrames;
++      bool Waits = false;
++      for (const auto& Frame : Frames) {
++        Waits |= Frame.Signal == Signal;
++      }
++      if (!Waits && Frames.size() < Frames.capacity()) {
++        Frames.emplace_back(ThreadStateObject::DeferredSignalState {
++          .Info = *static_cast<siginfo_t*>(Info),
++          .Signal = Signal,
++          .AddedMask = 0,
++        });
++      }
++      if (!Thread->SignalInfo.InterruptArmed) {
++        mprotect(reinterpret_cast<void*>(&Thread->Thread->InterruptFaultPage), sizeof(Thread->Thread->InterruptFaultPage), PROT_NONE);
++        Thread->SignalInfo.InterruptArmed = true;
++      }
++      return;
++    }
++
 +    // tso-arm: a signal deferred to the next exact point (TSOViews::ExactSignals) leaves the interrupt page PROT_NONE
 +    // until then, and a SIGSEGV of the thread's own may come first (the page protocol, code written to). The kernel
 +    // blocks SIGSEGV during FEX's handler for it (FEX takes SA_NODEFER from the guest's action, which Go's lacks),
@@ -1207,7 +1238,7 @@ index da2b971..266ff23 100644
      SignalHandler& Handler = HostHandlers[Signal];
      for (auto& HandlerFunc : Handler.Handlers) {
        if (HandlerFunc(Thread->Thread, Signal, Info, UContext)) {
-@@ -173,6 +190,12 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+@@ -173,6 +225,12 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
    Context->SigInfoLocation = 0;
    Context->InSyscallInfo = 0;
  
@@ -1220,7 +1251,7 @@ index da2b971..266ff23 100644
    // Store fault to top status and then reset it
    Context->FaultToTopAndGeneratedException = Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
    Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
-@@ -257,12 +280,35 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+@@ -257,12 +315,35 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
  
    // Restore host state
    ArchHelpers::Context::RestoreContext(ucontext, Context);
@@ -1256,7 +1287,7 @@ index da2b971..266ff23 100644
  
      if (Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_INJIT) {
        // XXX: Unsupported since it needs state reconstruction
-@@ -286,6 +332,18 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -286,6 +367,18 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
                                                    GuestSigAction* GuestAction, stack_t* GuestStack) {
    auto ContextBackup = StoreThreadState(Thread, Signal, ucontext);
  
@@ -1275,7 +1306,7 @@ index da2b971..266ff23 100644
    auto Frame = Thread->CurrentFrame;
  
    // Ref count our faults
-@@ -322,6 +380,12 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -322,6 +415,12 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
      ContextBackup->InSyscallInfo = Thread->CurrentFrame->InSyscallInfo;
      Thread->CurrentFrame->InSyscallInfo = 0;
    } else {
@@ -1288,7 +1319,7 @@ index da2b971..266ff23 100644
      if (!IsAddressInDispatcher(OldPC)) {
        // This is likely to cause issues but in some cases it isn't fatal
        // This can also happen if we have put a signal on hold, then we just reenabled the signal
-@@ -406,7 +470,9 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -406,7 +505,9 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
      {
        // If SA_RESETHAND is set, then the signal handler is immediately reset to SIG_DFL.
        std::lock_guard lk(GuestDelegatorMutex);
@@ -1299,7 +1330,7 @@ index da2b971..266ff23 100644
      }
  
      // If this signal is not required by FEX then we can fully uninstall the host handler as well.
-@@ -435,6 +501,7 @@ bool SignalDelegator::HandleSIGILL(FEXCore::Core::InternalThreadState* Thread, i
+@@ -435,6 +536,7 @@ bool SignalDelegator::HandleSIGILL(FEXCore::Core::InternalThreadState* Thread, i
        // It will have been RW coming in to this sigreturn and now we need to remove permissions
        // to ensure FEX trampolines back to the SIGSEGV deferred handler.
        mprotect(reinterpret_cast<void*>(&Thread->InterruptFaultPage), sizeof(Thread->InterruptFaultPage), PROT_NONE);
@@ -1307,7 +1338,7 @@ index da2b971..266ff23 100644
      }
      return true;
    }
-@@ -562,13 +629,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
+@@ -562,13 +664,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
    return true;
  }
  
@@ -1324,7 +1355,7 @@ index da2b971..266ff23 100644
      NewMask |= (1ULL << (Signal - 1));
    }
  
-@@ -583,6 +649,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
+@@ -583,6 +684,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
    return NewMask;
  }
  
@@ -1359,7 +1390,7 @@ index da2b971..266ff23 100644
  bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext) {
    auto SigInfo = *static_cast<siginfo_t*>(Info);
  
-@@ -609,18 +703,158 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
+@@ -609,18 +738,160 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
    return false;
  }
  
@@ -1498,8 +1529,10 @@ index da2b971..266ff23 100644
 +      // next block entry releases what waits. There the held signals' block goes: the kernel delivers them as soon as
 +      // this handler returns, at this store, an exact point.
 +      if (FEXCore::TSOViews::ExactSignals()) {
-+        const bool Here = Thread->CurrentFrame->InSyscallInfo != 0 || ThreadObject->SignalInfo.NoHold ||
-+                          CTX->IsAddressInCodeBuffer(Thread, ArchHelpers::Context::GetPc(UContext));
++        // Nor in FEX's own handler code (on the host signal stack), whatever it interrupted
++        const bool Here = (Thread->CurrentFrame->InSyscallInfo != 0 || ThreadObject->SignalInfo.NoHold ||
++                           CTX->IsAddressInCodeBuffer(Thread, ArchHelpers::Context::GetPc(UContext))) &&
++                          !OnHostSignalStack(ThreadObject, ArchHelpers::Context::GetSp(UContext));
 +        if (!Here && (ThreadObject->SignalInfo.HeldMask || !ThreadObject->SignalInfo.DeferredSignalFrames.empty())) {
 +          ArchHelpers::Context::SetPc(UContext, ArchHelpers::Context::GetPc(UContext) + 4);
 +          return;
@@ -1518,7 +1551,7 @@ index da2b971..266ff23 100644
  
        if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
          // No signals to defer. Just set the fault page back to RW and continue execution.
-@@ -631,8 +865,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -631,8 +902,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
        const auto& Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
        Signal = Top.Signal;
        SigInfo = Top.Info;
@@ -1532,7 +1565,7 @@ index da2b971..266ff23 100644
        ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
  
        // Until we re-protect the page to PROT_NONE, FEX will now *permanently* defer signals and /not/ check them.
-@@ -659,6 +896,10 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -659,6 +933,10 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
    } else if (IsAsyncSignal(&SigInfo, Signal) && MustDeferSignal) {
      // If the signal is asynchronous (as determined by si_code) and FEX is in a state of needing
      // to defer the signal, then add the signal to the thread's signal queue.
@@ -1543,7 +1576,7 @@ index da2b971..266ff23 100644
      LOGMAN_THROW_A_FMT(ThreadObject->SignalInfo.DeferredSignalFrames.size() != ThreadObject->SignalInfo.DeferredSignalFrames.capacity(),
                         "Deferred signals vector hit "
                         "capacity size. This will "
-@@ -668,18 +909,19 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -668,18 +946,19 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      auto& [sigmask_val] = _context->uc_sigmask;
      static_assert(sizeof(sigmask_val[0]) == sizeof(uint64_t), "Unknown sigset_t layout");
  
@@ -1568,7 +1601,7 @@ index da2b971..266ff23 100644
  
      // Postpone the remainder of signal handling logic until we process the SIGSEGV triggered by writing to InterruptFaultPage.
      return;
-@@ -690,27 +932,56 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -690,27 +969,56 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      // This signal is masked, must defer until the guest updates the signal mask.
      // Add it to the pending signal list
      ThreadObject->SignalInfo.PendingSignals |= 1ULL << (Signal - 1);
@@ -1630,7 +1663,7 @@ index da2b971..266ff23 100644
  
        // Update our host signal mask so we don't hit race conditions with signals
        // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
-@@ -728,6 +999,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -728,6 +1036,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      Handler.OldAction.sigaction(Signal, &SigInfo, UContext);
    } else if (Handler.OldAction.handler == SIG_IGN || (Handler.OldAction.handler == SIG_DFL && Handler.DefaultBehaviour == DEFAULT_IGNORE)) {
      // Do nothing
@@ -1638,7 +1671,7 @@ index da2b971..266ff23 100644
    } else if (Handler.OldAction.handler == SIG_DFL && (Handler.DefaultBehaviour == DEFAULT_COREDUMP || Handler.DefaultBehaviour == DEFAULT_TERM)) {
      CTX->FlushAndCloseCodeMap();
  
-@@ -817,11 +1089,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -817,11 +1126,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // Walk the signals we have that are required and make sure to remove it from the mask
    // This'll likely be SIGILL, SIGBUS, SIG63
  
@@ -1662,7 +1695,7 @@ index da2b971..266ff23 100644
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1019,6 +1300,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1019,6 +1337,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
    for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
      RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
    }
@@ -1684,7 +1717,7 @@ index da2b971..266ff23 100644
  }
  
  SignalDelegator::~SignalDelegator() {
-@@ -1064,7 +1360,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1064,7 +1397,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    if (Thread->Thread) {
      // Reserve a small amount of deferred signal frames. Usually the stack won't be utilized beyond
      // 1 or 2 signals but add a few more just in case.
@@ -1695,7 +1728,7 @@ index da2b971..266ff23 100644
    }
  }
  
-@@ -1132,6 +1430,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1132,6 +1467,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;
@@ -1703,7 +1736,7 @@ index da2b971..266ff23 100644
      // Only attempt to install a new thunk handler if we were installing a new guest action
      if (!InstallHostThunk(Signal)) {
        UpdateHostThunk(Signal);
-@@ -1267,6 +1566,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+@@ -1267,6 +1603,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
      }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);

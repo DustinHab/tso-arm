@@ -23,7 +23,11 @@ Asynchronous signals reach a program at an instruction start, and Go's preemptio
   ahead of time, where a signal is still delivered at once; and a loop of register arithmetic in Go's layout, during
   which a timer's signal must come in.
 - `tests/sigsync.c` (in `tests/ci.sh`): SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE sent by another thread to a
-  running loop.
+  running loop, also without pauses between them.
+- Fixed in FEX: such signals sent by another thread or process in quick succession (FEX leaves them open in its
+  handlers, for faults of its own) were delivered to the program from inside FEX's handler, whose stack then ran
+  the program's handler, and the next ones nested deeper until that stack ran out and the process crashed. They wait
+  for the thread's next check now.
 
 ## 0.3.11 (2026-11-21)
 

@@ -2358,8 +2358,17 @@ back, RIP stays at the instruction, and the next block entry delivers it first (
 signal would not interrupt it: SIGINT and a waiting select). Of a real-time signal the instances that wait already go
 back behind it, in their order. The synchronous signals and the ones FEX needs are never held back or blocked: the
 kernel ends a process whose SIGSEGV comes in blocked, and a store to the interrupt page is one (`tests/sigsync.c`
-sends SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE from another thread). FEX's own deferral in its sections holds back
-the same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
+sends SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE from another thread). Sent so (kill, tgkill: si_code <= 0), such a
+number also interrupts FEX's own handler code, since FEX's handlers leave these signals open for faults of its own,
+and the kernel sets up the frames of all pending ones at once, each at the entry of the handler before, which has
+not run yet. The innermost was delivered to the guest from there: its interrupted stack pointer lay on FEX's host
+signal stack, and the guest's handler ran there, dispatcher and all; the next ones came in deeper on that stack,
+until it ran out and the kernel ended the process. `sigsync` crashed so once in a CI run on GitHub's N2 (in none of
+180 runs there after); without pauses between the signals in every run on the Pi, under FEX without the patches as
+well; a core dump held 81 frames on the 256 KiB stack, the same five over and over. A signal of such a number sent
+by another that interrupts code on the host signal stack now waits, not blocked, as a frame of FEX's deferral for the
+next check, merged with one of its number that waits already (as a standard signal pending is); a store to the
+interrupt page there is stepped over. FEX's own deferral in its sections holds back the same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
 (whose si_addr is no address): it could take another thread's request for the fallback there, and the invalidation's
 section ended with a store to the page while SIGSEGV was blocked.
 
@@ -2408,5 +2417,8 @@ plain and on a signal stack); `sigsync` in every mode; `sigspin` with its loop a
 ahead of time, the timer coming in during the register loop. The compat Go program with Go's preemption on: 30 of 30
 (1 to 4 of 10 before, wrong sums among the rest). `TestStatStdin`: 20 of 20 (about half before). `go test -short`
 of sync, sync/atomic, runtime/debug, time, context, os/signal, strings and bytes with Go's preemption on: 6 of 6
-rounds without a failure (every round had one to four before the SIGSEGV handler's fix). `tso-arm run` no longer
-turns Go's preemption off, unless `TSO_EXACT_SIGNALS=0`.
+rounds without a failure (every round had one to four before the SIGSEGV handler's fix). The whole round on that
+build: `tests/ci.sh`, `rootfs_check` 28 of 28, CPython's suite (807 cases) as under full ordering, compat with the
+same outputs, HotSpot 80 of 80 (40 as `tso-arm run` runs it, 40 without fallback or profile), soak 150 of 150; the
+efficiency table 83 % with the hot functions translated ahead of time (pigz 91, xz 88, zstd 70 %), 73 % with the
+page protocol alone. `tso-arm run` no longer turns Go's preemption off, unless `TSO_EXACT_SIGNALS=0`.

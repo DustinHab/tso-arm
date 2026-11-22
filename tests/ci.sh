@@ -102,6 +102,9 @@ done
 for m in tso full unordered; do
     out=$(last timeout 120 $T run --mode $m $B/sigsync) || fail "sigsync, $m: $out"
     ok "$m: $out"
+    # without pauses: each one comes in while FEX still handles the one before
+    out=$(last env SIGSYNC_GAP_US=0 timeout 120 $T run --mode $m $B/sigsync 2000) || fail "sigsync without pauses, $m: $out"
+    ok "$m, without pauses: $out"
 done
 
 # signals that meet: two at once (the second while FEX still handles the first), and one raised while another
