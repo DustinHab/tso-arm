@@ -1,8 +1,10 @@
 # Changes
 
-## 0.4.0 (not released yet)
+## 0.4.0 (2026-11-22)
 
-Asynchronous signals reach a program at an instruction start, and Go's preemption works.
+Asynchronous signals reach a program at an instruction start, and Go's preemption works: Go programs run with it
+on, and Go's own tests under `go test` pass with it. Update from 0.3.11. The FEX patch changed, so this release
+brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.3.11 or older.
 
 - Fixed in FEX: a signal sent to a program (not a fault of its own) that came in while translated code, FEX's
   dispatcher or FEX's own helpers ran was delivered at once, with the state of the middle of an instruction's
@@ -10,11 +12,17 @@ Asynchronous signals reach a program at an instruction start, and Go's preemptio
   elsewhere took that state for the truth: Go programs crashed or computed wrong results with Go's asynchronous
   preemption, under FEX without the patches as well. Such a signal now goes back into the kernel's queue, blocked
   until the thread's next block entry, branch back or system call, where the kernel delivers it with the state of
-  an instruction start (notes section 54);
-  `TSO_EXACT_SIGNALS=0` turns it off. The checks cost about 4 % in pigz's loops as FEX translates them, nothing
-  measurable with the hot functions translated ahead of time (which deliver a signal at once, as before).
+  an instruction start (notes section 54); `TSO_EXACT_SIGNALS=0` turns it off. The checks cost about 4 % in pigz's
+  loops as FEX translates them, nothing measurable with the hot functions translated ahead of time (which deliver a
+  signal at once, as before).
 - Fixed in FEX: a signal FEX deferred in a handler and delivered after the handler had returned put the handler's
   signal mask back for good, and a signal the handler blocked was never delivered again.
+- Fixed in FEX: SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE sent by another thread or process in quick succession
+  (FEX leaves them open in its handlers, for faults of its own) were delivered to the program from inside FEX's
+  handler, whose stack then ran the program's handler, and the next ones nested deeper until that stack ran out and
+  the process crashed. They wait for the thread's next check now. During a translation FEX queued every such
+  signal, past the room it reserved, and grew the queue inside the signal handler while handlers nested in it read
+  it: a signal of a number that waits already merges with it now, and the queue never grows.
 - `tso-arm run` no longer turns Go's preemption off (`GODEBUG=asyncpreemptoff=1`, still so with
   `TSO_EXACT_SIGNALS=0`); goroutines in long loops without calls are preempted again.
 - `tests/preempt.c` (in `tests/ci.sh`): a handler that makes the interrupted thread call a routine at the
@@ -24,12 +32,7 @@ Asynchronous signals reach a program at an instruction start, and Go's preemptio
   which a timer's signal must come in.
 - `tests/sigsync.c` (in `tests/ci.sh`): SIGSEGV, SIGBUS, SIGILL, SIGTRAP and SIGFPE sent by another thread to a
   running loop, also without pauses between them.
-- Fixed in FEX: such signals sent by another thread or process in quick succession (FEX leaves them open in its
-  handlers, for faults of its own) were delivered to the program from inside FEX's handler, whose stack then ran
-  the program's handler, and the next ones nested deeper until that stack ran out and the process crashed. They wait
-  for the thread's next check now. During a translation FEX queued every such signal, past the room it reserved,
-  and grew the queue inside the signal handler while handlers nested in it read it: a signal of a number that waits
-  already merges with it now, and the queue never grows.
+- README: efficiency measured with these patches, 83 % (pigz 91, xz 88, zstd 70 %).
 
 ## 0.3.11 (2026-11-21)
 
