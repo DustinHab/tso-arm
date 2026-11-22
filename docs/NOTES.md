@@ -2415,7 +2415,10 @@ dispatcher's loop top, past the bridge's end: signals are held back again from t
 77 and 78 % without, xz 70 and 71 against 73 and 68 %, zstd 70 and 69 against 69 and 69 % (geometric mean 71 against
 72 to 73 %); with the hot functions translated ahead of time, which have none, 82 % either way (pigz 90 and 89 against
 90 and 90 %, xz 86 and 88 against 89 and 90 %). About 4 % for pigz's loops under FEX's translation, nothing that
-stands out of the noise elsewhere. Holding back costs nothing until a signal comes.
+stands out of the noise elsewhere. Holding back costs nothing until a signal comes. After 0.4.0 the check is a load
+from the interrupt page (`ldr xzr`), which faults on the page made PROT_NONE as the store did and takes no slot in
+the store buffer: pigz with the profile 1.30 and 1.30 s against 1.32 and 1.32 s with the store, alternating, two
+sessions each (1.27 to 1.28 s without the checks); xz and zstd the same within the noise.
 
 **Results** (the build of this section's end, on the Pi): `preempt` right in every mode, 9 of 9 with some 1,500
 redirections each, the handler finding the thread at the loop's `jb` almost always; `sigrace` 48 of 48 (every mode,

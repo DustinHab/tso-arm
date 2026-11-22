@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.1 (not released yet)
+
+- The check at every block entry and branch back for a signal held back is a load instead of a store: no slot in the
+  store buffer, pigz as FEX translates it 1.30 instead of 1.32 s (notes section 54).
+
 ## 0.4.0 (2026-11-22)
 
 Asynchronous signals reach a program at an instruction start, and Go's preemption works: Go programs run with it

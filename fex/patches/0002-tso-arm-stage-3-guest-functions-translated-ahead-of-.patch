@@ -1,4 +1,4 @@
-From 5571ea794844da5c6bc0e7f07070fd032b46b0d2 Mon Sep 17 00:00:00 2001
+From c68f71da6ec14542ad78a6959e64ed938a6c41dd Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -10,7 +10,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Interface/Core/Frontend.cpp    |  20 +-
  FEXCore/Source/Interface/Core/Frontend.h      |   6 +
  .../Source/Interface/Core/JIT/BranchOps.cpp   |  28 +
- FEXCore/Source/Interface/Core/JIT/JIT.cpp     |  21 +-
+ FEXCore/Source/Interface/Core/JIT/JIT.cpp     |  26 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |   9 +
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   2 +-
  FEXCore/Source/Interface/Core/LookupCache.h   |   7 +
@@ -42,7 +42,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |  14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 807 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 38 files changed, 2986 insertions(+), 204 deletions(-)
+ 38 files changed, 2990 insertions(+), 205 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -421,7 +421,7 @@ index ae3ed51..71fc373 100644
  
    InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
 diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-index 435afed..fc59efe 100644
+index 435afed..25cb434 100644
 --- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 @@ -567,7 +567,6 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
@@ -453,7 +453,19 @@ index 435afed..fc59efe 100644
    // For non-calls, this would extend into the block's code, however that's fine as an out-of-range adr would never
    // be generated avoiding any false positives.
    uintptr_t KnownCallMarkerAddr = CallerAddress - 0x8;
-@@ -884,6 +897,7 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
+@@ -782,7 +795,10 @@ void Arm64JITCore::EmitSuspendInterruptCheck() {
+     constexpr size_t InterruptPageOffset =
+       offsetof(FEXCore::Core::InternalThreadState, InterruptFaultPage) - offsetof(FEXCore::Core::InternalThreadState, BaseFrameState);
+     if constexpr (InterruptPageOffset <= 32760) {
+-      str(ARMEmitter::XReg::zr, STATE, InterruptPageOffset);
++      // tso-arm: a load faults on the page made PROT_NONE as a store does, and takes no slot in the store buffer: the
++      // check runs at every block entry and branch back (TSOViews::ExactSignals); pigz as FEX translates it 1.30
++      // instead of 1.32 s (1.27 without the checks)
++      ldr(ARMEmitter::XReg::zr, STATE, InterruptPageOffset);
+     } else {
+       // Need to use vector 128-bit store for this range.
+       // Doesn't matter which register we use to store.
+@@ -884,6 +900,7 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
    CallReturnTargets.clear();
    PendingJumpThunks.clear();
    JumpTargets.resize(IR->GetHeader()->BlockCount, {});
@@ -461,7 +473,7 @@ index 435afed..fc59efe 100644
    Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
  
    CodeData.EntryPoints.clear();
-@@ -952,13 +966,14 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
+@@ -952,13 +969,14 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
  
        // if there's a pending branch, and it is not fall-through
        if (PendingTargetLabel && PendingTargetLabel != Target) {
@@ -477,7 +489,7 @@ index 435afed..fc59efe 100644
        if (BlockIROp->EntryPoint) {
          uint64_t BlockStartRIP = Entry + BlockIROp->GuestEntryOffset;
  
-@@ -1008,7 +1023,7 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
+@@ -1008,7 +1026,7 @@ CPUBackend::CompiledCode Arm64JITCore::EmitJITCode(uint64_t Entry, uint64_t Size
  
    // Make sure last branch is generated. It certainly can't be eliminated here.
    if (PendingTargetLabel) {
@@ -1161,7 +1173,7 @@ index b11f096..af7434c 100644
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index da2b971..e7aa248 100644
+index da2b971..6defb19 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -65,10 +65,11 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
@@ -1432,7 +1444,7 @@ index da2b971..e7aa248 100644
 +  uint32_t Insn;
 +  memcpy(&Insn, reinterpret_cast<const void*>(PC), sizeof(Insn));
 +  if constexpr (Offset <= 32760) {
-+    return Insn == (0xF9000000U | uint32_t(Offset / 8) << 10 | 28U << 5 | 31U); // str xzr, [x28, #Offset]
++    return Insn == (0xF9400000U | uint32_t(Offset / 8) << 10 | 28U << 5 | 31U); // ldr xzr, [x28, #Offset]
 +  } else {
 +    return Insn == (0x3D800000U | uint32_t(Offset / 16) << 10 | 28U << 5); // str q0, [x28, #Offset]
 +  }
