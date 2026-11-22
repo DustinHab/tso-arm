@@ -1,6 +1,11 @@
 # Changes
 
-## 0.4.2 (not released yet)
+## 0.4.2 (2026-11-22)
+
+A fault of a program's own reaches it with its own address under the page protocol (Go's tests pass with the views),
+and `tso-arm learn` lets a program that hands its data between threads move its pages instead of ordering them where
+that is faster: zstd 77 % instead of 70 %, efficiency 85 %. Update from 0.4.1. The FEX patch changed, so this release
+brings FEX prebuilt anew; `tso-arm install` replaces the one of 0.4.1 or older.
 
 - Fixed in FEX: a fault of the program's own through the page protocol's views (an address it never mapped, a page
   it protected, past the end of a file it mapped) reached it with the address in the view instead of its own
@@ -26,6 +31,8 @@
   temporary file.
 - README: efficiency 85 % (pigz 92, xz 88, zstd 77 %), the configuration with translated functions measured as
   `tso-arm learn` leaves a program.
+- `TSO_VIEWS_STATS`: the protocol's `mprotect` calls by cause (chunks moving, single pages, stale views, ranges
+  coming into a view).
 - `litmus/run_views.sh`, `litmus/run_aot.sh`: `FEXV` names the FEX to test, `VIEWS_ENV` adds protocol settings to
   the protocol's runs.
 
