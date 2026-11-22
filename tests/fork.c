@@ -95,12 +95,23 @@ static void with_threads(void)
         pthread_t c;
         if (pthread_create(&c, NULL, worker, &counters[T * Stride]) != 0)
             _exit(4);
-        usleep(10000);
+        // until the new thread has counted, at most 2 s: a fixed 10 ms was too short on a loaded machine, where
+        // starting the thread and translating its loop took longer (0.4.2's check, 1 run in 20 without a profile)
+        volatile long *mine = &counters[T * Stride];
+        for (int i = 0; i < 2000 && *mine == 0; i++)
+            usleep(1000);
         atomic_store(&stop, 1);
         pthread_join(c, NULL);
-        _exit(counters[0] == -5 && counters[Stride] == -5 && counters[T * Stride] > 0 ? 0 : 3);
+        if (counters[0] != -5 || counters[Stride] != -5)
+            _exit(3);
+        _exit(counters[T * Stride] > 0 ? 0 : 5);
     }
-    check(child_status(p) == 0, "the child of a process with threads failed");
+    const int s = child_status(p);
+    if (s != 0) {
+        char what[96];
+        snprintf(what, sizeof what, "the child of a process with threads failed (status %d)", s);
+        check(0, what);
+    }
     atomic_store(&stop, 1);
     for (int i = 0; i < T; i++)
         pthread_join(t[i], NULL);
