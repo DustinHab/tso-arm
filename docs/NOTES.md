@@ -2578,3 +2578,13 @@ kernel reports the address in the view (the slot's base plus the guest's address
 address the guest never mapped, its own protection, a file mapping's end with SIGBUS) now reaches the guest with its
 own address, for addresses within the views' own reservations only (on a 39-bit address space a slot that could not
 be reserved holds host memory). `tests/faultaddr.c` (in `tests/ci.sh`): six such faults with a second thread running.
+
+**Where migration's time goes** (zstd, 1.8 GHz, `getrusage` of the run): with full ordering 2.15 to 2.25 s of user
+time, 0.11 to 0.14 s of system time, some 1,000 voluntary context switches; with migration 1.71 to 1.80 s user, 0.25
+to 0.31 s system and 1,460 to 2,050 switches (threads asleep on the protocol's lock), 7,500 more minor faults (pages a
+view maps on its first touch). `TSO_VIEWS_STATS` now counts the protocol's `mprotect` calls by cause: of some 22,000
+to 30,000 a run, 14,000 to 21,000 come from chunks moving (45 a chunk: every view's runs of equal protection over the
+2 MB), 6,000 to 8,000 from single pages' transitions. Moving a chunk only where rights change (the pages that
+moved, in the views whose protection for them changes) made 60 % fewer calls and 30 % fewer pages, and zstd slower
+(674 against 654 ms, median of 10; pigz the same, xz 1208 against 1266 ms): the whole chunk also gives the views
+rights they had not been given yet, which they would fault for. Left as it was; the counters stay.
