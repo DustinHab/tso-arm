@@ -2614,3 +2614,7 @@ blocks). Against zstd's 0.49 s natively that alone is some 9 points of its effic
   FEX itself, nearly all of it translating: register allocation 10 %, emitting code 5 %, building the IR 4 %, the
   views' pass 3 %, the decoder 4 %, the allocator and the lookup cache the rest. The start is FEX compiling its 3,300
   blocks; a code cache that works is what would take it away.
+- **The views awake from the start** (`TSO_VIEWS_ASLEEP=0`) instead of asleep until the second thread, which
+  throws away what was translated before: zstd on an empty input 48.9 against 51.0 ms (229 compiles fewer), pigz
+  39.1 against 39.8 ms, xz 33.5 against 29.9 ms (it never wakes on an empty input); the whole runs the same (zstd
+  650 against 648, pigz 1119 against 1099, xz 1209 against 1210 ms, best of 6). Left as it is.
