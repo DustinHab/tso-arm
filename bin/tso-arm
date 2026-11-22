@@ -346,8 +346,22 @@ cmd_status() {
                 [ -f "$l.list" ] && echo "$(basename "$1"): its shared library ${k%-*}: $(wc -l <"$l.list") functions translated ahead of time"
             done <"$lib.libs"
         fi
-        n=$(ls "$CACHE"/"$(basename "$1")"-*.prof 2>/dev/null | wc -l)
-        echo "$(basename "$1"): $n page protocol profile(s)"
+        # each profile (one per program file) and what its runs do: the page protocol, full ordering past the fault
+        # budget, or pages moving between threads ('learn' found it faster)
+        n=0
+        for p in "$CACHE"/"$(basename "$1")"-*.prof; do
+            [ -f "$p" ] || continue
+            n=$((n + 1))
+            if grep -q '^fallback' "$p"; then
+                s="full ordering (its threads share too much for the page protocol)"
+            elif grep -q '^migrate' "$p"; then
+                s="pages move between its threads ('learn' found it faster)"
+            else
+                s="page protocol"
+            fi
+            echo "$(basename "$1"): $s, $(grep -c '^esc' "$p") code ranges ordered ($(basename "$p"))"
+        done
+        [ $n -gt 0 ] || echo "$(basename "$1"): no page protocol profile yet"
         return
     fi
     echo "translated ahead of time ($CACHE/aot):"

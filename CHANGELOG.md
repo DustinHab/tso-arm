@@ -2,6 +2,9 @@
 
 ## 0.4.3 (not released yet)
 
+- `tso-arm status PROGRAM` names for each of its profiles what its runs do: the page protocol, full ordering (its
+  threads share too much), or pages moving between its threads (`learn` found it faster), and how many code ranges
+  run ordered.
 - `tests/fork.c`: the child of a process with threads waits up to 2 s for the thread it starts to count, instead of
   10 ms, and a failure names the child's status. On a loaded machine without a profile the thread took longer to
   start (1 run in 20 while Go's tests ran beside it; 40 of 40 right with the wait).
