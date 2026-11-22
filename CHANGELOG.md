@@ -1,6 +1,11 @@
 # Changes
 
-## 0.4.3 (not released yet)
+## 0.4.3 (2026-11-22)
+
+Programs started from scripts and test runners no longer wait for FEX's server: a shell command substitution with
+`tso-arm run` ends with the program instead of a second later, and `go test -exec` with tso-arm runs Go's standard
+library. Update from 0.4.2. The FEX patch changed, so this release brings FEX prebuilt anew; `tso-arm install`
+replaces the one of 0.4.2 or older.
 
 - Fixed in FEX: the FEXServer a program starts kept that program's stdin, stdout and stderr and every other
   descriptor it had open, and outlived it. A parent waiting for the end of such a pipe waited for the server: a
