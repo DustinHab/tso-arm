@@ -2427,4 +2427,7 @@ rounds without a failure (every round had one to four before the SIGSEGV handler
 build: `tests/ci.sh`, `rootfs_check` 28 of 28, CPython's suite (807 cases) as under full ordering, compat with the
 same outputs, HotSpot 80 of 80 (40 as `tso-arm run` runs it, 40 without fallback or profile), soak 150 of 150; the
 efficiency table 83 % with the hot functions translated ahead of time (pigz 91, xz 88, zstd 70 %), 73 % with the
-page protocol alone. `tso-arm run` no longer turns Go's preemption off, unless `TSO_EXACT_SIGNALS=0`.
+page protocol alone. `tso-arm run` no longer turns Go's preemption off, unless `TSO_EXACT_SIGNALS=0`. Open: once,
+in the first of 37 rounds of those eight packages with the held-back signals, the strings test ran for 11 minutes
+until Go's test timeout ended it; 90 rounds after it (strings alone, and all eight at once) took 2 and 15 s each,
+and the hang came back in none.
