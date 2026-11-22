@@ -2373,8 +2373,16 @@ runs (on the Pi in none), and a core of a FEX linked with symbols showed where: 
 translation (`LookupExecutableFileSection` in `CompileBlock`), queued every one of the signals that came in, past
 the 64 frames reserved, and the vector grew inside the signal handler (rpmalloc freeing, `mprotect`), while the
 handlers nested in it read it. Every frame goes through one function now: a standard signal merges with a frame of
-its number that waits, and nothing goes beyond the room reserved. FEX's own deferral in its sections holds back the
-same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
+its number that waits, and nothing goes beyond the room reserved. After that, `sigsync` with its pauses still crashed
+on the N2 now and then in CI, always in the first run, without a profile; with no profile in any run, 6 of 60 in tso
+mode. The core: the page protocol's fault handler (SIGSEGV) invalidating code, at the store that ends its
+signal-deferring section, to the interrupt page, PROT_NONE. FEX's handler had made the page writable on entry, but a
+SIGBUS or SIGILL sent by the other thread came in during it and queued its frame, which arms the page again, and the
+store's fault came in with SIGSEGV blocked in its own handler. FEX's handler for SIGSEGV now runs with SIGSEGV open
+(SA_NODEFER on the host whatever the guest asked for; the guest's mask in its handler is FEX's to keep anyway): such a
+store is a nested fault on the host signal stack, stepped over like any outside an exact point, and a fault of the
+page protocol while FEX writes a guest frame is handled there instead of ending the process. FEX's own deferral in its
+sections holds back the same way. The page protocol's fault handler leaves the interrupt page's fault alone, and a SIGSEGV sent with kill
 (whose si_addr is no address): it could take another thread's request for the fallback there, and the invalidation's
 section ended with a store to the page while SIGSEGV was blocked.
 

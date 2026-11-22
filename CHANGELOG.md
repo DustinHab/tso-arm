@@ -4,6 +4,10 @@
 
 - The check at every block entry and branch back for a signal held back is a load instead of a store: no slot in the
   store buffer, pigz as FEX translates it 1.30 instead of 1.32 s (notes section 54).
+- Fixed in FEX: FEX's handler for SIGSEGV ran with SIGSEGV blocked (taken from the guest's action), and a fault of
+  FEX's own in it ended the process: the store at the end of a signal-deferring section to the interrupt page that a
+  signal sent meanwhile by another thread had armed (`tests/sigsync.c` on GitHub's N2, 6 of 60 runs without a
+  profile), or a fault of the page protocol while FEX wrote a guest frame. It runs with SIGSEGV open now.
 
 ## 0.4.0 (2026-11-22)
 

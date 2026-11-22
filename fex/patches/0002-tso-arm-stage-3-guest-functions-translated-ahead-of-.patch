@@ -1,4 +1,4 @@
-From c68f71da6ec14542ad78a6959e64ed938a6c41dd Mon Sep 17 00:00:00 2001
+From 71199adfcb7fa67ff5fa860d960c929a1736417e Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -30,7 +30,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |  12 +
  .../LinuxSyscalls/FileManagement.cpp          |  16 +-
  .../LinuxSyscalls/FileManagement.h            |   1 +
- .../LinuxSyscalls/SignalDelegator.cpp         | 417 +++++++-
+ .../LinuxSyscalls/SignalDelegator.cpp         | 427 +++++++-
  .../LinuxSyscalls/SignalDelegator.h           |  23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  56 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  54 +-
@@ -42,7 +42,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |  14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        | 807 +++++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |  28 +
- 38 files changed, 2990 insertions(+), 205 deletions(-)
+ 38 files changed, 3000 insertions(+), 205 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -1173,7 +1173,7 @@ index b11f096..af7434c 100644
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index da2b971..6defb19 100644
+index da2b971..e5ee117 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -65,10 +65,11 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
@@ -1697,7 +1697,24 @@ index da2b971..6defb19 100644
    } else if (Handler.OldAction.handler == SIG_DFL && (Handler.DefaultBehaviour == DEFAULT_COREDUMP || Handler.DefaultBehaviour == DEFAULT_TERM)) {
      CTX->FlushAndCloseCodeMap();
  
-@@ -817,11 +1126,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -807,6 +1116,16 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+   // SA_RESTORER : We always need our host side restorer on x86-64, Couldn't use guest restorer anyway
+   SignalHandler.HostAction.sa_flags = CheckAndAddFlags(SignalHandler.HostAction.sa_flags, SignalHandler.GuestAction.sa_flags,
+                                                        SA_NOCLDSTOP | SA_NOCLDWAIT | SA_NODEFER | SA_RESTART);
++  // tso-arm: FEX's handler for SIGSEGV runs with SIGSEGV open, whatever the guest asked for (the guest's own mask in
++  // its handler is FEX's to keep, CurrentSignalMask; SIGSEGV is one FEX needs and never blocks on the host there
++  // either). Faults of FEX's own come in during it: the store at the end of each signal-deferring section to the
++  // interrupt page, which a signal sent by another thread that came in meanwhile (SIGBUS, SIGILL: open there as
++  // well) had made PROT_NONE for its frame. Blocked, that fault ended the process (tests/sigsync.c on GitHub's N2,
++  // the page protocol's fault handler invalidating code); open, it is stepped over as any such store outside an
++  // exact point.
++  if (Signal == SIGSEGV) {
++    SignalHandler.HostAction.sa_flags |= SA_NODEFER;
++  }
+ 
+ #ifdef ARCHITECTURE_x86_64
+ #define SA_RESTORER 0x04000000
+@@ -817,11 +1136,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // Walk the signals we have that are required and make sure to remove it from the mask
    // This'll likely be SIGILL, SIGBUS, SIG63
  
@@ -1721,7 +1738,7 @@ index da2b971..6defb19 100644
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1019,6 +1337,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1019,6 +1347,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
    for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
      RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
    }
@@ -1743,7 +1760,7 @@ index da2b971..6defb19 100644
  }
  
  SignalDelegator::~SignalDelegator() {
-@@ -1064,7 +1397,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1064,7 +1407,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    if (Thread->Thread) {
      // Reserve a small amount of deferred signal frames. Usually the stack won't be utilized beyond
      // 1 or 2 signals but add a few more just in case.
@@ -1754,7 +1771,7 @@ index da2b971..6defb19 100644
    }
  }
  
-@@ -1132,6 +1467,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1132,6 +1477,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;
@@ -1762,7 +1779,7 @@ index da2b971..6defb19 100644
      // Only attempt to install a new thunk handler if we were installing a new guest action
      if (!InstallHostThunk(Signal)) {
        UpdateHostThunk(Signal);
-@@ -1267,6 +1603,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+@@ -1267,6 +1613,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
      }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);
