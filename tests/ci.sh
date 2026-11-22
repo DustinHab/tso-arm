@@ -40,6 +40,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/exactstart tests/exactstart.c
     $CC -O2 -static -pthread -o $B/xmc tests/xmc.c
     $CC -O2 -static -o $B/sigign tests/sigign.c
+    $CC -O2 -static -pthread -o $B/faultaddr tests/faultaddr.c
     $CC -O2 -static -pthread -o $B/preempt tests/preempt.c
     $CC -O2 -static -o $B/sigspin tests/sigspin.c
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
@@ -85,6 +86,13 @@ done
 # notes section 53)
 for m in tso full unordered; do
     out=$(last $T run --mode $m $B/sigign) || fail "sigign, $m: $out"
+    ok "$m: $out"
+done
+
+# the address a fault of the program's own reports, SIGSEGV and SIGBUS, with the views awake (FEX passed on the
+# address in the view; Go's runtime took its nil pointer panics for fatal faults; notes section 55)
+for m in tso full unordered; do
+    out=$(last $T run --mode $m $B/faultaddr) || fail "faultaddr, $m: $out"
     ok "$m: $out"
 done
 

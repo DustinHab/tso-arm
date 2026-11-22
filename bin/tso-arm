@@ -29,8 +29,10 @@ usage: tso-arm COMMAND [...]
   learn PROGRAM [ARGS...]
         profile an x86-64 program, translate its hot functions ahead of time and check them against a run
         without; later runs use them. Static and position-independent programs; of a dynamically linked one its
-        own functions (its libraries stay with FEX). Runs the program several times with these arguments: give it
-        an input whose processing has no side effects (stdin is empty, the output is compared)
+        own functions (its libraries stay with FEX). A program that falls back to full ordering is timed with
+        pages moving between its threads as well, and keeps that where it is faster. Runs the program several
+        times with these arguments: give it an input whose processing has no side effects (stdin is empty, the
+        output is compared)
   status [PROGRAM]      what tso-arm has learned
   forget PROGRAM        drop what it learned about PROGRAM
   check                 whether this machine can run tso-arm

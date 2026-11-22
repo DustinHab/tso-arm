@@ -2442,3 +2442,139 @@ page protocol alone. `tso-arm run` no longer turns Go's preemption off, unless `
 in the first of 37 rounds of those eight packages with the held-back signals, the strings test ran for 11 minutes
 until Go's test timeout ended it; 90 rounds after it (strings alone, and all eight at once) took 2 and 15 s each,
 and the hang came back in none.
+
+## 55. zstd: what its ordering costs, and pages that change hands before full ordering (2026-11-22)
+
+zstd was the program that kept the mean below 90 %: it fell back to full ordering in every run (70 %), translated
+without ordering it runs at 89 %. Where the difference lies, with variants of its translated library that leave one
+kind of access unordered (wrong for other programs, only for measuring), in the fallback as `tso-arm run` runs it,
+1.8 GHz, 8 runs each alternating, user cycles' median:
+
+| zstd, fallback to full ordering | best | cycles |
+|---|---|---|
+| native | 513 ms | 2.73 G |
+| without any ordering | 575 ms | 2.88 G |
+| as measured (everything ordered) | 733 ms | 3.90 G |
+| unaligned loads without their `dmb ishld` | 700 ms | 3.72 G |
+| aligned loads plain instead of `ldapr` | 713 ms | 3.82 G |
+| stores plain, no barrier | 669 ms | 3.53 G |
+| the translated code plain, FEX's ordered | 610 ms | 3.13 G |
+
+Stores cost the most (aligned `stlr` about 0.16 G, the barriers before unaligned stores about 0.2 G), then the
+barriers after unaligned loads, then FEX's own code (about 0.26 G); FEX's vector and string ordering cost zstd nothing
+(`FEX_VECTORTSOENABLED=0` and `FEX_MEMCPYSETTSOENABLED=0`: the same times). What orders the same for less:
+
+- **`dmb ishst` before an unaligned store** instead of `dmb ish`: every earlier load is ordered before the store
+  already (acquire, or a plain load followed by `dmb ishld`), so it needs store-store order only. 1.0 to 2.4 % fewer
+  cycles in three sessions, the wall time within the noise (best 722 against 730 ms, 711 against 730 ms, 727 against
+  722 ms). Kept (`AOT_STB` in `aot/lift.py`; `AOT_STFULL=1` builds the old barrier).
+- **Every ordered store as `dmb ishst; str`** instead of `stlr`: 792 against 730 ms, 4.24 G cycles. No.
+- **An address dependency instead of `dmb ishld`** after an unaligned load: the value, and-ed with zero in an `asm`
+  the compiler cannot see through, goes into the address of every ordered access after it (an artificial dependency,
+  which the architecture orders as a real one), so the next load waits for this one only and, being acquire, orders
+  the rest; calls and returns settle it with an acquire load that carries it. 757 against 722 ms, 4.10 G cycles:
+  each access after such a load waited for its value. Taken out.
+
+On this core zstd's ordering is spread over every kind of access, and nothing that orders the same gives more than
+a point or two. What does give more is not ordering its data at all where only one thread uses it at a time.
+
+**Migratory ownership once more** (section 13 built it and left it off): a page written by a thread other than its
+owner moves to the writer, the old owner losing it through `mprotect`, instead of becoming shared; a page that changes
+hands quickly several times in a row is used by two threads at once and is shared as before. Measured today with
+everything since section 13 in place (thread ends, chunks, the views asleep), zstd with its translated functions:
+
+| zstd | best | median | cycles |
+|---|---|---|---|
+| fallback to full ordering | 726 ms | 740 ms | 3.84 G |
+| page protocol without the fallback | 777 ms | 832 ms | 3.93 G |
+| migration without the fallback | 694 ms | 720 ms | 3.05 G |
+| migration with the budget (it still falls back) | 721 ms | 740 ms | 3.87 G |
+
+With migration zstd's code runs nearly unordered (3.05 against 2.92 G cycles without any ordering); what it pays is
+the faults: some 6,000 a run, handled in 0.4 to 0.6 s over all threads, half of it waiting for the protocol's lock
+while another thread's `mprotect` runs. Runs of 840 to 880 ms among the rest had more pages shared and more
+instructions escalated (2,185 migrations and 981 escalations against some 1,100 and 150). pigz and xz with migration
+from the start are 1 to 3 % slower (pigz 1168 against 1136 ms, xz 1265 against 1247 ms), and with the budget pigz falls
+back (1.8 s). The kernel's other ways of changing a page's rights without `mprotect` are not there:
+`userfaultfd` returns ENOSYS on the Pi's kernel (6.18, not configured), and the A76 has no permission overlays.
+
+**Migration as a stage at run time, first.** A program past the fault budget (5,000 faults a second over 1,000
+faults) migrated from there on instead of going to full ordering, and its profile said so. With migration the faults'
+rate says little (zstd 5,000 to 8,500 a second, and faster than with full ordering: with the rate budget at 20,000 it
+still fell back); full ordering came when the faults held the protocol's lock for more than 900 per mille of the time
+in three windows of 1,000 faults in a row (`TSO_VIEWS_HELD`): the lock all but taken for good. zstd's busiest windows
+held it 220 to 680 per mille; a first limit of 500 in a single window sent it to full ordering in one run of seven.
+How quick a change of hands counts as sharing decides how often pages move. zstd in the stage, 12 runs each:
+
+| change of hands counted as quick within | best | median | worst | migrations |
+|---|---|---|---|---|
+| (fallback to full ordering) | 707 ms | 721 ms | 764 ms | - |
+| 1 ms | 668 ms | 679 ms | 736 ms | 1,009 |
+| 3 ms | 644 ms | 656 ms | 737 ms | 752 |
+| 10 ms | 645 ms | 650 ms | 880 ms | 587 |
+| 30 ms | 644 ms | 657 ms | 869 ms | 466 |
+
+Moving pages more often is worse (250 microseconds: 817 ms median; four quick changes allowed instead of two: 700
+ms). 3 ms is the default now (`TSO_VIEWS_QUICK`); it matters only where pages migrate.
+
+The whole round on that build was correct (both litmus series with migration forced from the start among it, none
+forbidden), but slow where it mattered: compat's programs, which fall back past the budget, against 0.4.1 (full
+ordering without views):
+
+| compat, tso | 0.4.1 | migration past the budget |
+|---|---|---|
+| sort | 2453 ms | 3162 ms |
+| python | 3088 ms | 4414 ms |
+| node | 4947 ms | 9436 ms |
+| go | 2565 ms | 3179 ms |
+| java | 4517 ms | 4512 ms (full ordering after all: the lock) |
+
+Full ordering without views is fast, and for most programs that hand data between threads all the time migration
+costs more than ordering; zstd is the exception, and nothing in a run tells which kind a program is. So the choice is
+measured: `tso-arm learn` times a program that falls back with migration from its start as well (`aot/stage.py`, both
+with profiles of their own, alternating rounds), and where that is more than 3 % faster, one more run with
+`TSO_VIEWS_MIGRATE=learn` writes the program's own profile anew with `migrate` in it. `tso-arm run` without it falls
+back as before. `bench/efficiency.sh` makes the same choice for its configuration with translated functions, which
+stands for a learned program. `TSO_VIEWS_MIGRATE=1` migrates for one run, `=0` not even where the profile says so;
+a run with either, or with `TSO_VIEWS_BUDGET=0`, writes the profile's stage back as it found it. A review of the first
+version (migration entered at run time) found its profile's states inconsistent in four ways (a stage written by a
+run with `TSO_VIEWS_MIGRATE=0` or `=1`, applied with `TSO_VIEWS_BUDGET=0`, escalations decided before the stage kept
+after it), and an older fault: processes of one program that ended together wrote their profiles through the same
+temporary file.
+
+Measured as `learn` leaves it (`bench/efficiency.sh`, which now makes the same choice for its configuration with
+translated functions, 1.8 GHz, cooled): zstd's stage step 667 ms with migration against 719 ms with full ordering,
+the profile says migrate, and the table's zstd 0.64 s, 77 % (70 % before); pigz and xz do not fall back and have
+nothing to choose. Geometric mean 85 % (pigz 92, xz 88, zstd 77 %), the page protocol alone 73 % as before (zstd
+falls back there: no `learn`). At the Pi's own clock (schedutil up to 2.4 GHz, cooled below 55 degrees before every
+run, 10 runs each): full ordering best 630, median 638 ms; migration 615 and 620 ms, with two runs of 757 and 779
+ms. The gain is smaller there, 2 to 3 %, near the 3 % `learn` asks for; on a chip still warm from the ci the stage step
+kept full ordering (689 against 668 ms). It is measured where the program runs, which is the point of measuring.
+
+The round on this build: `go test` with preemption 3 of 3 rounds without a failure, `tests/ci.sh`, compat with the
+same outputs and 0.4.1's times again (sort 2297, python 3128, node 5080, go 2503 ms), HotSpot 20 of 20 as
+`tso-arm run` runs it, without fallback or profile, and with migration from the start, `rootfs_check` 28 of 28,
+CPython's suite as under full ordering, soak 75 of 75, both litmus series with migration forced, none forbidden.
+
+**A lock left held.** `tests/faultaddr.c` hung under the page protocol at its last fault, the read past the end of a
+file it mapped: its two threads waited, one in `pthread_join`, the other for the protocol's lock in a fault of its
+own. A shared file mapping is shared read-write from the start, so the access faulted on the plain view and was
+completed in the handler (`EmulateAccess`, on the identity mapping, under the lock); there it raised SIGBUS, which
+went on to the guest, whose handler left by `siglongjmp` with the lock still held. Before completing an access the
+handler now asks `process_vm_readv` on the process itself whether the guest can read the 64 bytes around it (EFAULT
+instead of a signal; `GuestReadable`); where it cannot, the instruction runs again by itself, ordered, and faults in
+translated code, where the guest gets its SIGBUS with an exact state. `faultaddr` 20 of 20 in every mode after it.
+(Translated ahead of time code has no such second way: its access goes to the guest as a SIGSEGV with a message.)
+The efficiency table above was measured before this check, which costs one system call per access completed in the
+handler (zstd: some 150 a run).
+
+
+**A fault address through the views.** In that round `go test` failed in sync/atomic, runtime/debug and time, both
+times: "unexpected fault address 0x6000000000", "fault address fb12983e7, want 3b12983e7". The tests dereference
+nil pointers and bad addresses on purpose, and Go's runtime compares the faulting address with the one it used (a
+nil pointer's field becomes a panic the test recovers from, anything else a fatal fault). Through the views the
+kernel reports the address in the view (the slot's base plus the guest's address), and FEX passed that on; under
+0.4.1 those test binaries ran in full ordering without views and never saw it. A fault the protocol does not own (an
+address the guest never mapped, its own protection, a file mapping's end with SIGBUS) now reaches the guest with its
+own address, for addresses within the views' own reservations only (on a 39-bit address space a slot that could not
+be reserved holds host memory). `tests/faultaddr.c` (in `tests/ci.sh`): six such faults with a second thread running.

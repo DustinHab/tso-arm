@@ -96,6 +96,19 @@ cooldown() {
         i=$((i + 1))
     done
 }
+# The aot configuration as `tso-arm learn` leaves a program: one that falls back to full ordering migrates where that
+# is faster here (aot/stage.py times both and writes its profile; notes section 55)
+case " $CONFIGS " in
+*" aot "*)
+    for w in $WORKLOADS; do
+        [ -f $PWD/out/aot/$w.so ] || continue
+        cooldown
+        TSO_ARM_FEX=$FEXV python3 aot/stage.py $X/$w --profile $HOME/.cache/tso-arm/$w-aot.prof --env FEX_MAXINST=150 \
+            --env FEX_MULTIBLOCK=0 --env TSO_AOT=$PWD/out/aot/$w.so $(for e in $FEXENV; do printf -- '--env %s ' "$e"; done) \
+            -- $(args_of $w) | sed "s/^/$w /"
+    done
+    ;;
+esac
 for r in $(seq 1 $ROUNDS); do
     cooldown
     for w in $WORKLOADS; do

@@ -21,6 +21,8 @@ TSO_AOT_DIR, where FEX looks it up under the shared library's file name and buil
      that make it more than 3 % slower on this machine are not used (the program's becomes OUT.slower, the shared
      libraries' are not installed), and OUT.multiblock records that multiblock was 3 % faster (when much of the
      program stays with FEX).
+  7. With --timed, for a program that falls back to full ordering as `tso-arm run` runs it: migratory ownership
+     timed against it (aot/stage.py); where it is more than 3 % faster, the program's own profile says migrate.
 
 The program's chosen functions go to OUT.list, a shared library's to LIBDIR/NAME-BUILDID.so.list.
   aot/auto.py BINARY OUT.so [--libdir DIR] [--share PCT] [--max N] [--timed] -- ARGS...
@@ -38,6 +40,7 @@ import tempfile
 import time
 
 import elfsyms  # aot/elfsyms.py, beside this file
+import stage as migration_stage  # aot/stage.py
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIFT = os.path.join(ROOT, "aot", "lift.py")
@@ -246,13 +249,18 @@ def timed(binary, args, out, lib, libdir, work):
         os.remove(out + ".multiblock")
     if best > wo * 1.03:
         print(f"timed: {how}: slower on this machine, not used")
-        return False
-    if wm < w * 0.97:
+        keep, env = False, run_env(None, None)
+    elif wm < w * 0.97:
         open(out + ".multiblock", "w").close()
         print(f"timed: {how}: kept, with multiblock")
+        keep, env = True, run_env(lib, libdir, multiblock=True)
     else:
         print(f"timed: {how}: kept")
-    return True
+        keep, env = True, run_env(lib, libdir)
+    # step 7: a program that falls back to full ordering as `tso-arm run` runs it, timed with migratory ownership as
+    # well; its own profile says migrate where that is faster
+    migration_stage.choose(binary, args, env, work, rounds)
+    return keep
 
 
 def build(binary, names, out_so):

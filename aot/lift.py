@@ -2082,8 +2082,8 @@ static inline void hst64(uint8_t *p, uint64_t v) { __builtin_memcpy(p, &v, 8); }
 static inline void hst128(uint8_t *p, u128 v) { __builtin_memcpy(p, &v, 16); }
 
 // guest memory in the ordered variant: the ordered view, x86 order kept. Loads acquire (`ldapr`), stores release
-// (`stlr`); unaligned, a load is followed by `dmb ishld` and a store preceded by `dmb ish`, which orders them the
-// same way. (Reading the covering aligned words with `ldapr` instead was slower for zstd: 725 -> 782 ms, notes
+// (`stlr`); unaligned, a load is followed by `dmb ishld` and a store preceded by `dmb ishst` (AOT_STB), which orders
+// them the same way. (Reading the covering aligned words with `ldapr` instead was slower for zstd: 725 -> 782 ms, notes
 // section 21.) With views, guest addresses lie below 2^34; a larger value is the address of a stack object kept in
 // host memory (relative to the plain view, private to the thread): plain.
 // The test as a mask computed once per function (H, aot_hmask): one `tst` per access instead of comparing O and V
@@ -2107,6 +2107,15 @@ static inline uint64_t aot_hmask(const uint8_t *O, const uint8_t *V)
 #define AOT_LDA "ldapr"
 #else
 #define AOT_LDA "ldar"
+#endif
+// The barrier before an unaligned store (a plain str: release faults on it): `dmb ishst`. Every earlier load is
+// already ordered before the store (acquire, or a plain load followed by `dmb ishld`), so it needs store-store order
+// only, which is what x86 gives it; `dmb ish` waited for the earlier loads as well (AOT_STFULL=1, for comparing;
+// zstd in the fallback 2 % fewer cycles without it, notes section 55)
+#ifdef AOT_STFULL
+#define AOT_STB "dmb ish"
+#else
+#define AOT_STB "dmb ishst"
 #endif
 static inline uint8_t uld8(uint8_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 static inline uint16_t uld16(uint8_t *p)
@@ -2167,7 +2176,7 @@ static inline void ust64(uint8_t *p, uint64_t v) { __asm__ volatile("stlr %x0, [
             ust##bits(O + a, v);                                                                                       \
             return;                                                                                                    \
         }                                                                                                              \
-        __asm__ volatile("dmb ish" ::: "memory");                                                                      \
+        __asm__ volatile(AOT_STB ::: "memory");                                                                        \
         *(volatile T##u *)(O + a) = v;                                                                                 \
     }
 typedef uint8_t uint8_tu;

@@ -17,7 +17,7 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **83 %** (pigz 91 %, xz 88 %, zstd 70 %) |
+| **tso-arm**, with functions translated ahead of time | **85 %** (pigz 92 %, xz 88 %, zstd 77 %) |
 | tso-arm, page protocol alone | 73 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
@@ -53,7 +53,8 @@ about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md
 `learn` runs the program a few times with the given arguments (profile, then a check of the translated functions
 against a run without them, then both timed against each other), so give it an input whose processing has no side
 effects. Afterwards every `tso-arm run` of that program uses the translated functions, unless they made it slower
-on this machine; `tso-arm status` and `tso-arm forget` show and drop what was learned.
+on this machine; a program that falls back to full ordering is timed with its pages moving between threads as well
+and keeps that where it is faster (zstd). `tso-arm status` and `tso-arm forget` show and drop what was learned.
 
 Dynamically linked programs need an x86-64 root file system: `tso-arm rootfs` fetches Ubuntu 24.04 with FEX's own
 tool (unpacked, about 2 GB, 95 s on a Pi 5), or `FEX_ROOTFS` names a directory with the x86-64 libraries. `learn`
@@ -118,9 +119,13 @@ faster than with full ordering.
   with a plain and an ordered variant of each. FEX takes a shared library's translation when the program maps the
   library and gives it up when it unmaps it. A plain access that meets shared memory is patched at run time into an
   ordered one.
-- **Fallback:** a program whose threads hand data back and forth constantly (zstd) or uses more threads at once than
-  the address space has views for (11 on a 39-bit kernel, 15 on 48 bits) goes on with full ordering, as fast as
-  FEX's own.
+- **Fallback:** a program whose threads hand data back and forth constantly, so that the protocol faults too often,
+  or that uses more threads at once than the address space has views for (11 on a 39-bit kernel, 15 on 48 bits),
+  goes on with full ordering, as fast as FEX's own.
+- **Pages that change hands** (notes sections 13 and 55): for such a program `learn` also times migratory
+  ownership, where a page another thread writes moves to that thread instead of becoming shared, so both keep plain
+  accesses. zstd's buffers and compression contexts go from one worker to the next, and it is faster that way; most
+  other programs are not (Node, CPython). The profile keeps the choice.
 - **Compile units** (notes section 43): FEX compiles from each place a function is entered everything reachable
   from there; tso-arm limits that to 150 instructions (`FEX_MAXINST`), so programs with large functions entered at
   many points (ffmpeg, Node) no longer compile the same code again and again.
@@ -130,24 +135,26 @@ faster than with full ordering.
 x86-64 builds of zstd, pigz and xz under FEX, against native Arm builds of the same sources with the same compiler
 options (`bench/build_native.sh`, `bench/efficiency.sh`). "x86 memory order kept" says whether the configuration is
 correct for multithreaded x86 programs. "Ahead of time" rows run the program's hot functions translated ahead of
-time, chosen from a profile by `aot/auto.py`. FEX's telemetry file, written with an `fsync` at every exit, is off in
-every FEX configuration (notes section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
+time, chosen from a profile by `aot/auto.py`; the last row is a program as `tso-arm learn` leaves it, zstd, which
+falls back to full ordering, with its pages moving between threads, which `aot/stage.py` timed faster here (notes
+section 55). FEX's telemetry file, written with an `fsync` at every exit, is off in every FEX configuration (notes
+section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-22T06:52, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-22T17:39, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
 | native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.35 s, 79 % | 0.58 s, 84 % | 84 % |
-| tso-arm build, TSO off | no | 1.15 s, 87 % | 1.35 s, 79 % | 0.58 s, 84 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.51 s, 71 % | 0.66 s, 74 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.63 s, 61 % | 1.53 s, 70 % | 0.72 s, 68 % | 66 % |
-| tso-arm, first run | yes | 1.35 s, 74 % | 1.54 s, 69 % | 0.84 s, 58 % | 67 % |
-| tso-arm, with profile | yes | 1.29 s, 78 % | 1.50 s, 71 % | 0.71 s, 69 % | 73 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.58 s, 84 % | 84 % |
+| tso-arm build, TSO off | no | 1.14 s, 88 % | 1.35 s, 79 % | 0.58 s, 84 % | 84 % |
+| FEX default | no | 1.57 s, 64 % | 1.51 s, 71 % | 0.67 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.65 s, 61 % | 1.53 s, 70 % | 0.72 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.34 s, 75 % | 1.55 s, 69 % | 0.85 s, 58 % | 67 % |
+| tso-arm, with profile | yes | 1.28 s, 78 % | 1.52 s, 70 % | 0.70 s, 70 % | 73 % |
 | ahead of time, TSO off | no | 1.06 s, 94 % | 1.17 s, 91 % | 0.55 s, 89 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.76 s, 57 % | 1.55 s, 69 % | 0.70 s, 70 % | 65 % |
-| ahead of time + tso-arm, with profile | yes | 1.10 s, 91 % | 1.21 s, 88 % | 0.70 s, 70 % | 83 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.78 s, 56 % | 1.55 s, 69 % | 0.69 s, 71 % | 65 % |
+| ahead of time + tso-arm, with profile | yes | 1.09 s, 92 % | 1.21 s, 88 % | 0.64 s, 77 % | 85 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.

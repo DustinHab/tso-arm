@@ -2,8 +2,10 @@
 # Litmus tests with the thread functions translated ahead of time (aot/): under FEX without ordering (the forbidden
 # outcomes should show, so the test can see them) and under the page protocol (none allowed).
 # Result in out/litmus_aot.txt.
-#   litmus/run_aot.sh [iterations]
+#   litmus/run_aot.sh [iterations]      (extra protocol settings: VIEWS_ENV="TSO_VIEWS_MIGRATE=1 ...")
+#   FEXV: another tso-arm FEX (the installed one: ~/.local/opt/tso-arm/bin/FEX)
 cd "$(dirname "$0")/.."
+F=${FEXV:-$HOME/opt/fex-views/bin/FEX}
 N=${1:-200000}
 out=out/litmus_aot.txt
 mkdir -p out/aot
@@ -15,10 +17,10 @@ for cfg in off ordered protocol; do
     off) vars="FEX_TSOENABLED=0" ;;
     # FEX with full ordering, the translated functions in their ordered variants from the start
     ordered) vars="FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 TSO_AOT_ORDERED=1" ;;
-    protocol) vars="TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1" ;;
+    protocol) vars="TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $VIEWS_ENV" ;;
     esac
     for v in ${VARIANTS:-mp vec rep vecflag repflag vecwait lb sb}; do
-        r=$(env $vars TSO_AOT=$PWD/out/aot/mp.so timeout 900 taskset -c 2,3 $HOME/opt/fex-views/bin/FEX build/mp-x86 $v $N 2>&1 | tail -n 1)
+        r=$(env $vars TSO_AOT=$PWD/out/aot/mp.so timeout 900 taskset -c 2,3 $F build/mp-x86 $v $N 2>&1 | tail -n 1)
         printf '%-14s %s\n' "aot $cfg" "$r" | tee -a $out
     done
 done

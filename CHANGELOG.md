@@ -1,5 +1,34 @@
 # Changes
 
+## 0.4.2 (not released yet)
+
+- Fixed in FEX: a fault of the program's own through the page protocol's views (an address it never mapped, a page
+  it protected, past the end of a file it mapped) reached it with the address in the view instead of its own
+  (0x6000000000 for a nil pointer). Go's runtime compares it with the address it dereferenced and took its own nil
+  pointer panics for fatal faults: `go test` failed in sync/atomic, runtime/debug and time once these ran with the
+  views. SIGSEGV and SIGBUS name the program's address now (`tests/faultaddr.c` in `tests/ci.sh`).
+- `tso-arm learn`: a program that falls back to full ordering is timed with migratory ownership as well, where a page
+  another thread writes moves to that thread instead of becoming shared (aot/stage.py); where that is more than 3 %
+  faster, its profile says `migrate` and `tso-arm run` uses it. zstd, translated ahead of time, 656 instead of 721
+  ms at 1.8 GHz (median of 12); Node, CPython and sort are slower with it and keep full ordering (notes section 55).
+  With migration, full ordering comes when the faults hold the protocol's lock for more than 900 per mille of the
+  time in three windows of 1,000 faults in a row (`TSO_VIEWS_HELD`). `TSO_VIEWS_MIGRATE=1` migrates for one run,
+  `=0` not even where the profile says so.
+- A change of hands within 3 ms of the one before counts as quick (was 1 ms; `TSO_VIEWS_QUICK`): fewer pages move
+  back and forth.
+- Translated code: an unaligned ordered store follows `dmb ishst` instead of `dmb ish`; every earlier load is
+  ordered before it already. 1 to 2 % fewer cycles for zstd in full ordering; `AOT_STFULL=1` builds the old barrier.
+- Fixed in FEX: a read or write past the end of a file a program mapped shared, under the page protocol, raised
+  SIGBUS while FEX completed the access in its fault handler, under the protocol's lock; a handler of the program's
+  that left by `siglongjmp` kept the lock, and the next fault of any thread waited forever. FEX checks first whether
+  the access can be made and lets the instruction fault where it belongs otherwise.
+- Fixed in FEX: processes of one program that ended at the same time wrote their profiles through the same
+  temporary file.
+- README: efficiency 85 % (pigz 92, xz 88, zstd 77 %), the configuration with translated functions measured as
+  `tso-arm learn` leaves a program.
+- `litmus/run_views.sh`, `litmus/run_aot.sh`: `FEXV` names the FEX to test, `VIEWS_ENV` adds protocol settings to
+  the protocol's runs.
+
 ## 0.4.1 (2026-11-22)
 
 A crash with signals sent from outside fixed, and the check for held-back signals made cheaper. Update from 0.4.0.
