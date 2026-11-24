@@ -38,7 +38,7 @@ while IFS= read -r f; do
     id=$(LC_ALL=C readelf -n "$f" 2>/dev/null | sed -n 's/^ *Build ID: *//p' | head -n 1 | cut -c1-16)
     want="$m $k ${id:--}"
     [ $m = other ] && want="other other -"
-    got=$(elfinfo "$f")
+    got=$(elfinfo "$f" | cut -d' ' -f1-3) # machine, kind, build ID (the fourth field, AppImage or not, readelf has not)
     [ $m = other ] && got=$(echo "$got" | sed 's/ [^ ]*$/ -/')
     n=$((n + 1))
     if [ "$got" != "$want" ]; then

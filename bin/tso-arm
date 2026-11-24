@@ -243,15 +243,16 @@ fex() {
 }
 
 # What an ELF file is, read with od and awk (no binutils needed): its machine (x86-64, i386 or other), its kind
-# (static, pie, dynamic, or other) and the first 8 bytes of its GNU build ID in hex (- without one). The program
-# headers and the build ID note sit at the start of a file: its first KB is read (od is slow: 0.8 ms for it on a Pi 5),
-# the first 64 KB if they lie further.
+# (static, pie, dynamic, or other), the first 8 bytes of its GNU build ID in hex (- without one), and whether it is an
+# AppImage (appimage or -: "AI" and its type after the ELF magic). The program headers and the build ID note sit at
+# the start of a file: its first KB is read (od is slow: 0.8 ms for it on a Pi 5), the first 64 KB if they lie
+# further.
 elfinfo() {
     for lim in 1024 65536; do
         r=$(od -An -v -tu1 -N $lim "$1" 2>/dev/null | LC_ALL=C awk -v last=$([ $lim = 1024 ] && echo 0 || echo 1) '
         { for (i = 1; i <= NF; i++) b[n++] = $i + 0 }
         function u(o, len,   v, k) { v = 0; for (k = len - 1; k >= 0; k--) v = v * 256 + b[o + k]; return v }
-        function out(m, k, id) { print m, k, id; done = 1 }
+        function out(m, k, id) { print m, k, id, (n > 10 && b[8] == 65 && b[9] == 73 && (b[10] == 1 || b[10] == 2)) ? "appimage" : "-" }
         END {
             if (n < 52 || b[0] != 127 || b[1] != 69 || b[2] != 76 || b[3] != 70 || b[5] != 1) { out("other", "other", "-"); exit }
             c = b[4]; mach = u(18, 2); t = u(16, 2)
@@ -282,7 +283,7 @@ elfinfo() {
         }')
         [ "$r" = more ] || break
     done
-    echo "${r:-other other -}"
+    echo "${r:-other other - -}"
 }
 
 # x86-64 | i386 | other: the program's machine
@@ -304,7 +305,8 @@ kind() {
 key() {
     p=$(readlink -f "$1")
     i=${2:-$(elfinfo "$p")}
-    id=${i##* }
+    set -- $i
+    id=$3
     if [ "$id" = - ] || [ -z "$id" ]; then
         id=$(sha256sum "$p" | cut -c1-16)
     fi
@@ -365,6 +367,12 @@ cmd_run() {
         [ -n "$TSO_VIEWS_STATS" ] && echo "tso-arm: $(basename "$prog") is a 32-bit program: FEX orders all of its accesses (the page protocol is for x86-64 programs)" >&2
         aot=/dev/null/none
     fi
+    # an AppImage mounts its contents with FUSE, through a fusermount it looks for in the root file system, which has
+    # none: it unpacks them into a temporary directory instead and runs from there (a 15 MB one starts in 0.36 s on
+    # the Pi 5, 0.33 s from a copy unpacked beforehand)
+    case $info in
+    *" appimage") export APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-1} ;;
+    esac
     if [ "$k" = dynamic ] && ! has_rootfs; then
         r=$(shared_rootfs) ||
             die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
