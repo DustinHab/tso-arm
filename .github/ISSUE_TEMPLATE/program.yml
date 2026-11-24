@@ -1,0 +1,27 @@
+name: A program does not run, or runs wrong
+description: An x86 program that fails, crashes, hangs or gives other results under tso-arm than it should.
+body:
+  - type: input
+    id: program
+    attributes:
+      label: Program
+      description: Which program, which version, where it comes from (a distribution's package, a download, built yourself).
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: The command you ran, what you expected, and what happened instead (messages, exit status).
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: tso-arm report
+      description: |
+        The output of `tso-arm report PROGRAM ARGS...` (it runs the program once in each mode, stdin empty, output
+        discarded). If it changes files, give arguments that do not, or `tso-arm report` alone.
+      render: text
+    validations:
+      required: true

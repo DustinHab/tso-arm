@@ -9,5 +9,7 @@ if [ -n "$(git diff --cached --name-only)" ]; then
     git commit -q --amend --no-edit
 fi
 rm -f $R/fex/patches/*tso-arm-stage*.patch
-git format-patch -q -o $R/fex/patches be66e03..tso-views
+# full object names in the index lines: abbreviated ones grow with the objects the checkout has (a fetch), and the
+# patch hash tso-arm checks a FEX build against would change with them
+git format-patch -q --full-index -o $R/fex/patches be66e03..tso-views
 ls $R/fex/patches

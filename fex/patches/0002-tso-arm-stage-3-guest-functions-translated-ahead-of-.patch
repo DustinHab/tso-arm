@@ -1,4 +1,4 @@
-From c9961c7bdf2f23c093957dc1ea239ac4396d26f4 Mon Sep 17 00:00:00 2001
+From 9a9f90b6a16cdd797d98b6e2bd01a4e6a5269265 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -43,10 +43,11 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |   14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
- 39 files changed, 3252 insertions(+), 220 deletions(-)
+ ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
+ 40 files changed, 3253 insertions(+), 221 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index dc85492..53dce36 100644
+index dc854922615a9d1a3509965dd265c4a647f63ea7..53dce36b9f6bca912b62906aa80161a7535233b3 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
 @@ -238,6 +238,10 @@ public:
@@ -61,7 +62,7 @@ index dc85492..53dce36 100644
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd..18636e8 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..18636e8be6ee722d333a69044d0babfd124f7bba 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
@@ -253,7 +254,7 @@ index a1cddcd..18636e8 100644
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
 diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
-index c903d3b..6fd5a81 100644
+index c903d3ba4552c3386b19ddf411d2dd3d5ff2d56e..6fd5a818646dc56a8e02557b8b93881ffc70e99e 100644
 --- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
 +++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
 @@ -86,9 +86,17 @@ void Dispatcher::EmitDispatcher() {
@@ -295,7 +296,7 @@ index c903d3b..6fd5a81 100644
      ldr(ARMEmitter::WReg::w2, STATE_PTR(CpuStateFrame, SignalHandlerRefCounter));
      add(ARMEmitter::Size::i32Bit, ARMEmitter::Reg::r2, ARMEmitter::Reg::r2, 1);
 diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
-index 94e4ac5..eee3115 100644
+index 94e4ac522637ca2bf36d204221d20f9ff9fb82e1..eee31154dff2480a01ccaee04d7085818983c47e 100644
 --- a/FEXCore/Source/Interface/Core/Frontend.cpp
 +++ b/FEXCore/Source/Interface/Core/Frontend.cpp
 @@ -1634,12 +1634,16 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
@@ -344,7 +345,7 @@ index 94e4ac5..eee3115 100644
    EntryBlock = true;
    FinalInstruction = false;
 diff --git a/FEXCore/Source/Interface/Core/Frontend.h b/FEXCore/Source/Interface/Core/Frontend.h
-index ade14bc..d4f515b 100644
+index ade14bc445a99e9ed566b02747c41ba2eb40e551..d4f515b6cb3049bc9b465188bbe31cfcb0d66dfa 100644
 --- a/FEXCore/Source/Interface/Core/Frontend.h
 +++ b/FEXCore/Source/Interface/Core/Frontend.h
 @@ -110,6 +110,12 @@ private:
@@ -361,7 +362,7 @@ index ade14bc..d4f515b 100644
    bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
    bool InstCanContinue() const;
 diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
-index ae3ed51..71fc373 100644
+index ae3ed51e4f430c5c482ce4cf595717616cd70c21..71fc373a3e1d984ee7f751a5d3f067c0d2f17df6 100644
 --- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
 @@ -24,7 +24,16 @@ DEF_OP(CallbackReturn) {
@@ -422,7 +423,7 @@ index ae3ed51..71fc373 100644
  
    InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
 diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-index 435afed..25cb434 100644
+index 435afed5ef93d3b75a9942233110dfa8b2a154dc..25cb434f5abf82a35311041a23f92980a349539b 100644
 --- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 @@ -567,7 +567,6 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
@@ -500,7 +501,7 @@ index 435afed..25cb434 100644
      }
      b_OrRestart(PendingTargetLabel);
 diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
-index 3a754ae..0b5ced6 100644
+index 3a754ae2d90b8772e949c1b3c49be4188ad127eb..0b5ced69b68f65ec4573397e086d88f58de8f335 100644
 --- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
 +++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
 @@ -93,6 +93,15 @@ private:
@@ -520,7 +521,7 @@ index 3a754ae..0b5ced6 100644
    ARMEmitter::BiDirectionalLabel* JumpTarget(IR::OrderedNodeWrapper Node) {
      auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
 diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
-index 7c12607..892afe8 100644
+index 7c1260756b33e35465f5256e8a87b309d5c29d88..892afe8323887702555d642769fe299db31fbe2f 100644
 --- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 @@ -1522,7 +1522,7 @@ void Arm64JITCore::EmitOrderedViewAddress(ARMEmitter::Register Dst, ARMEmitter::
@@ -533,7 +534,7 @@ index 7c12607..892afe8 100644
  
  DEF_OP(Push) {
 diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
-index 391d485..1ba432d 100644
+index 391d48560dfd7dce7ab5c92307f83c27860376c5..1ba432d5e84d25e6dba9f7c1fe748b4cfa771e47 100644
 --- a/FEXCore/Source/Interface/Core/LookupCache.h
 +++ b/FEXCore/Source/Interface/Core/LookupCache.h
 @@ -293,6 +293,13 @@ public:
@@ -551,7 +552,7 @@ index 391d485..1ba432d 100644
    void AddBlockMapping(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode) {
      std::optional<FEXCore::SHMStats::AccumulationBlock<uint64_t>> LockTime(
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
-index 3eb2fbb..0f2f82a 100644
+index 3eb2fbb0c0b6a40dd9fd264d981fddc72ac26e07..0f2f82a0c0d654f73be46f6df361ef750e500169 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
 @@ -862,7 +862,11 @@ void OpDispatchBuilder::JUMPOp(OpcodeArgs) {
@@ -568,7 +569,7 @@ index 3eb2fbb..0f2f82a 100644
      } else {
        // If the block isn't a jump target then we need to create an exit block
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 360d605..2dae1cb 100644
+index 360d6053d99f131d9d30199ed66b0837a20ced1b..2dae1cbdb84fcee586b58dc05d244e8ac3911275 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 @@ -284,6 +284,35 @@ public:
@@ -608,7 +609,7 @@ index 360d605..2dae1cb 100644
    void ForeachDirection(F&& Routine) {
      // Otherwise, prepare to branch.
 diff --git a/FEXCore/Source/Interface/IR/IREmitter.h b/FEXCore/Source/Interface/IR/IREmitter.h
-index 711ab54..020614b 100644
+index 711ab54f93fbfe08f0704070f5164cbc4f486e30..020614b44416766d9a73eec22f4809be7352aa6d 100644
 --- a/FEXCore/Source/Interface/IR/IREmitter.h
 +++ b/FEXCore/Source/Interface/IR/IREmitter.h
 @@ -44,6 +44,13 @@ public:
@@ -641,7 +642,7 @@ index 711ab54..020614b 100644
      return InvalidNode;
    }
 diff --git a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
-index dd0ddac..e114cf1 100644
+index dd0ddacfb588e6ed420c97f2cdfb0b327540c46e..e114cf192b1bfbe4132d5febccd678bfe1bd5ce6 100644
 --- a/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 +++ b/FEXCore/Source/Interface/IR/Passes/GuestViewPass.cpp
 @@ -82,8 +82,8 @@ namespace {
@@ -710,7 +711,7 @@ index dd0ddac..e114cf1 100644
 +}
  } // namespace FEXCore::IR
 diff --git a/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp b/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp
-index 26f579f..d286793 100644
+index 26f579fef5962e87c7af2810748f1866108afa87..d286793ec508d522767ab248ae0f79adc582df1c 100644
 --- a/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp
 +++ b/FEXCore/Source/Interface/IR/Passes/RegisterAllocationPass.cpp
 @@ -651,7 +651,7 @@ void ConstrainedRAPass::Run(IREmitter* IREmit_) {
@@ -723,7 +724,7 @@ index 26f579f..d286793 100644
          }
          continue;
 diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
-index 63f84a8..55ac344 100644
+index 63f84a824c25858ec175b0bad99823cb85628225..55ac344d163faec286be9024f023d96459b0cdaf 100644
 --- a/FEXCore/Source/Utils/AllocatorHooks.cpp
 +++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
 @@ -199,6 +199,45 @@ static rpmalloc_interface_t global_interface {
@@ -782,7 +783,7 @@ index 63f84a8..55ac344 100644
  
  #endif
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index ddec229..c47887a 100644
+index ddec22912ee7cbae4205aa523b86a2f71a37b835..c47887aa4305266e2275737772fd80568975d785 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
 @@ -182,6 +182,16 @@ public:
@@ -803,7 +804,7 @@ index ddec229..c47887a 100644
     * @brief Adds additional per-instruction granularity TSO enable/disable information for the given range.
     *
 diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
-index 19ae82f..4e6a385 100644
+index 19ae82f261e8669140a5292a453dc06380287b7d..4e6a3851343f85f314c223604112fb5ea8822e18 100644
 --- a/FEXCore/include/FEXCore/Core/CoreState.h
 +++ b/FEXCore/include/FEXCore/Core/CoreState.h
 @@ -477,6 +477,11 @@ struct CpuStateFrame {
@@ -819,7 +820,7 @@ index 19ae82f..4e6a385 100644
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
-index a7ac53a..55503c1 100644
+index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..55503c129a4498b4053b8cfa374dbab5f8ac448e 100644
 --- a/FEXCore/include/FEXCore/Core/TSOViews.h
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
 @@ -9,8 +9,10 @@
@@ -927,7 +928,7 @@ index a7ac53a..55503c1 100644
    timespec T;
    clock_gettime(CLOCK_MONOTONIC, &T);
 diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
-index c4cadf4..54c679d 100644
+index c4cadf40aa8a54b5caa792d51a39a1810793c3d7..54c679d5b51d4de6af765ff33c349b2f895be585 100644
 --- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 +++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 @@ -166,6 +166,8 @@ FEX_DEFAULT_VISIBILITY extern void InitializeThread();
@@ -940,7 +941,7 @@ index c4cadf4..54c679d 100644
  void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
  #endif
 diff --git a/Source/Common/Config.cpp b/Source/Common/Config.cpp
-index 8d72358..df69e7a 100644
+index 8d72358bc9fb24c36e2812d1a52e1988014a5456..df69e7a5c5fdb59f3b6f968dd795a6904350d54f 100644
 --- a/Source/Common/Config.cpp
 +++ b/Source/Common/Config.cpp
 @@ -21,6 +21,7 @@
@@ -1000,7 +1001,7 @@ index 8d72358..df69e7a 100644
  
    auto HomeDir = GetHomeDirectory();
 diff --git a/Source/Common/FDUtils.h b/Source/Common/FDUtils.h
-index f4e1d6b..943374f 100644
+index f4e1d6bb424f903c136b336a10d00756d8dacc37..943374fd9ad95d215276393b7048725358958025 100644
 --- a/Source/Common/FDUtils.h
 +++ b/Source/Common/FDUtils.h
 @@ -3,8 +3,10 @@
@@ -1050,7 +1051,7 @@ index f4e1d6b..943374f 100644
 +
  } // namespace FEX
 diff --git a/Source/Common/FEXServerClient.cpp b/Source/Common/FEXServerClient.cpp
-index 0680323..baa1a0e 100644
+index 0680323785932da0c45f60bbf37fdc92a612c950..baa1a0e986fe2df7d17f4fbf3b18cb7ec87df264 100644
 --- a/Source/Common/FEXServerClient.cpp
 +++ b/Source/Common/FEXServerClient.cpp
 @@ -13,8 +13,10 @@
@@ -1144,7 +1145,7 @@ index 0680323..baa1a0e 100644
  
  /**  @} */
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b9..9369635 100644
+index bed03b914c97204dfaadc24771b96fc9bc4163bc..93696358a26f55bf091256eb503a663167254ddf 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -22,6 +22,7 @@ $end_info$
@@ -1200,7 +1201,7 @@ index bed03b9..9369635 100644
  
    SyscallHandler->DefaultProgramBreak(BRKInfo.Base, BRKInfo.Size);
 diff --git a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
-index 02bb6bf..2e1d44a 100644
+index 02bb6bfef5053101164bef99371c3990cf3075ef..2e1d44a03d582caeb5a1dec776f1c7e50c414102 100644
 --- a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
 +++ b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
 @@ -49,6 +49,12 @@ struct X86ContextBackup {
@@ -1230,7 +1231,7 @@ index 02bb6bf..2e1d44a 100644
  
    // Arm64 doesn't have a red zone
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
-index 7172460..91c5e0a 100644
+index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb07725326 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -1285,7 +1286,7 @@ index 7172460..91c5e0a 100644
    if (Match) {
      struct stat Buffer;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
-index b11f096..af7434c 100644
+index b11f096f79a57347638af5d0b4e69d7a6d7c9c58..af7434c0470ac4c2490b152adcc6e9bfbb2d55dd 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.h
 @@ -192,6 +192,7 @@ private:
@@ -1297,7 +1298,7 @@ index b11f096..af7434c 100644
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index da2b971..14a0e7c 100644
+index da2b9712c3b0ada66f024f72942b59189b2f4179..14a0e7cb9e94ff6817e253fe7d111f7027e10fab 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -65,10 +65,11 @@ static void SignalHandlerThunk(int Signal, siginfo_t* Info, void* UContext) {
@@ -1955,7 +1956,7 @@ index da2b971..14a0e7c 100644
  
    if (oldset) {
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
-index c37d82c..db76713 100644
+index c37d82c3ecdd902c4976c41823adbe2cc4d98093..db76713de7e2d86e58bc0ee598a01c95d8c3bec8 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
 @@ -89,6 +89,12 @@ public:
@@ -2010,7 +2011,7 @@ index c37d82c..db76713 100644
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432b..2c72b7c 100644
+index a7a432bbd650081e4a8ed1af18a3b0650357af94..2c72b7c55fb53703357fafb07821479ad25bc8f5 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -2135,7 +2136,7 @@ index a7a432b..2c72b7c 100644
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index 76c7e6b..9d31afa 100644
+index 76c7e6be0d3b000c7b5551c70e33af75499dbdd8..9d31afa3090b25293f19bad9772a0b0b783682cf 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -2255,7 +2256,7 @@ index 76c7e6b..9d31afa 100644
        pollfd PollFD {};
        PollFD.fd = VForkFDs[0];
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d..fb84625 100644
+index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e40bd4a8a 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -2588,7 +2589,7 @@ index 41aba2d..fb84625 100644
  }
  
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
-index 277cd3f..3c03f91 100644
+index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba57678b1b1 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
 @@ -14,6 +14,8 @@
@@ -2653,7 +2654,7 @@ index 277cd3f..3c03f91 100644
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d..d010b54 100644
+index 76be33d737559e72474c8c50006170f43d983c57..d010b54b1e365eb5c4aca43f5a8f294297c8b08d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -30,8 +30,14 @@ $end_info$
@@ -4168,7 +4169,7 @@ index 76be33d..d010b54 100644
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-index cf5fc2b..43f6909 100644
+index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..43f69097dd9e5c1fe711500c4693f49335f3579b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 @@ -5,10 +5,12 @@
@@ -4429,7 +4430,7 @@ index cf5fc2b..43f6909 100644
      uint64_t Transitions {};
    } Stats;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-index 01b077e..fb89c4c 100644
+index 01b077ee4a24e19547c040332f25800f1f9285d7..fb89c4c9eb143d35db437a75ead7ff39892a9dec 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 @@ -6,6 +6,7 @@
@@ -4467,7 +4468,7 @@ index 01b077e..fb89c4c 100644
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
        Views->LoadProfile(CTX);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-index dfcd4b0..cf5fbb2 100644
+index dfcd4b0eb607b98b498454b6c4db0614139ca75a..cf5fbb296a3990d7ceb9032445c8bc658a22440d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
 @@ -50,7 +50,11 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
@@ -4499,7 +4500,7 @@ index dfcd4b0..cf5fbb2 100644
  
    // Seccomp thread specific data.
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
-index 9c018bc..0273f3d 100644
+index 9c018bc46143c93f1083300592ac64be7de67478..0273f3d17dcbf8ba18c8ac2c721ef168b5a51262 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
 +++ b/Source/Tools/LinuxEmulation/Thunks.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -5346,7 +5347,7 @@ index 9c018bc..0273f3d 100644
    struct TruncatingSHA256Hash {
      size_t operator()(const FEXCore::IR::SHA256Sum& SHA256Sum) const noexcept {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.h b/Source/Tools/LinuxEmulation/Thunks.h
-index 16a89ce..609c9b2 100644
+index 16a89ce706bb4b42cfc7cb8eab98243235cc7d21..609c9b26431f3918d6efe4a144937af17113ccef 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.h
 +++ b/Source/Tools/LinuxEmulation/Thunks.h
 @@ -7,6 +7,13 @@
@@ -5391,6 +5392,19 @@ index 16a89ce..609c9b2 100644
 +// tso-arm: all translated functions ordered (the page protocol fell back to full ordering)
 +void AOTOrderAll();
  } // namespace FEX::HLE
+diff --git a/ThunkLibs/libvulkan/Guest.cpp b/ThunkLibs/libvulkan/Guest.cpp
+index 553518ea2450b61181b4fed572c7e6f0e5a86eea..f6f8c7d4b9f858001034ee7447cfa7d55c1d5465 100644
+--- a/ThunkLibs/libvulkan/Guest.cpp
++++ b/ThunkLibs/libvulkan/Guest.cpp
+@@ -58,7 +58,7 @@ static PFN_vkVoidFunction MakeGuestCallable(const char* origin, PFN_vkVoidFuncti
+     }
+     return nullptr;
+   }
+-  fprintf(stderr, "Linking address %p to host invoker %#zx\n", func, It->second);
++  // tso-arm: no line on stderr for every function an application looks up
+   LinkAddressToFunction((uintptr_t)func, It->second);
+   return func;
+ }
 -- 
 2.53.0
 

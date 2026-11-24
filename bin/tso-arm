@@ -20,12 +20,14 @@ usage() {
     cat <<EOF
 usage: tso-arm COMMAND [...]
 
-  run [--mode MODE] [--aot LIBRARY | --no-aot] [--stats] PROGRAM [ARGS...]
+  run [--mode MODE] [--aot LIBRARY | --no-aot] [--gpu] [--stats] PROGRAM [ARGS...]
         run an x86-64 or 32-bit x86 Linux program. MODE: tso (default; x86 memory order kept, with the page
         protocol and what 'learn' translated; a 32-bit program as with full), full (FEX's own full ordering),
         unordered (fastest, not correct for programs whose threads share data without locks). --aot: a library of translated functions other than the learned one;
         --no-aot: without what 'learn' translated.
         --stats: what the page protocol did, at the end (shared pages, ordered instructions, fallback)
+        --gpu: OpenGL and Vulkan through the host's own libraries and GPU driver (FEX's thunks; TSO_ARM_THUNKS=1
+        does the same, for programs started directly as well)
   learn PROGRAM [ARGS...]
         profile an x86-64 program, translate its hot functions ahead of time and check them against a run
         without; later runs use them. Static and position-independent programs; of a dynamically linked one its
@@ -48,6 +50,9 @@ usage: tso-arm COMMAND [...]
         whether x86 programs started directly (./program) run through tso-arm; register and unregister change
         that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
   version               this version and the FEX it uses
+  report [PROGRAM [ARGS...]]
+        what a bug report needs, to paste: versions, machine, root file system; with a program, what tso-arm knows
+        of it and how it ends in each mode (it runs once per mode, stdin empty, output discarded, at most 60 s)
 EOF
 }
 
@@ -324,6 +329,10 @@ cmd_run() {
             export TSO_VIEWS_STATS=1
             shift
             ;;
+        --gpu)
+            export TSO_ARM_THUNKS=1
+            shift
+            ;;
         --no-aot)
             aot=/dev/null/none
             shift
@@ -405,13 +414,19 @@ cmd_run() {
     exec "$F" "$prog" "$@"
 }
 
-# FEX's thunks, where FEX was built with them: an x86 program's OpenGL and Vulkan calls go to the host's own Arm
-# libraries, and with them to the GPU's driver (the x86 Mesa of a root file system has no driver for the GPUs of many
-# Arm boards and draws with the CPU). The directories are given here because a prebuilt FEX was built for another
-# prefix. TSO_ARM_THUNKS=0 leaves them off; FEX_THUNKCONFIG names another selection (fex/thunks.json: GL, Vulkan).
+# FEX's thunks (--gpu, TSO_ARM_THUNKS=1), where FEX was built with them: an x86 program's OpenGL and Vulkan calls go
+# to the host's own Arm libraries, and with them to the GPU's driver (the x86 Mesa of a root file system has no driver
+# for the GPUs of many Arm boards and draws with the CPU). Off unless asked for, as in FEX: they cover what FEX
+# implemented of each library (x86-64 Vulkan reaches the Pi 5's V3D; vulkaninfo stops with SIGILL in every ordering
+# mode, FEX's EGL thunk lacks functions, 32-bit programs have no Vulkan thunk). The directories are given here because
+# a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection (fex/thunks.json: GL, Vulkan).
 thunks() {
     p=$(dirname "$(dirname "$1")")
-    [ "${TSO_ARM_THUNKS:-1}" != 0 ] && [ -d "$p/lib/fex-emu/HostThunks" ] || return 0
+    [ "${TSO_ARM_THUNKS:-0}" = 1 ] || return 0
+    [ -d "$p/lib/fex-emu/HostThunks" ] || {
+        echo "tso-arm: the FEX in $p was built without thunks (the prebuilt one of a release has them); --gpu has no effect" >&2
+        return 0
+    }
     export FEX_THUNKHOSTLIBS="$p/lib/fex-emu/HostThunks" FEX_THUNKGUESTLIBS="$p/share/fex-emu/GuestThunks"
     export FEX_THUNKCONFIG="${FEX_THUNKCONFIG:-$REPO/fex/thunks.json}"
 }
@@ -524,6 +539,41 @@ cmd_forget() {
     echo "tso-arm: forgot $(basename "$1")"
 }
 
+# What a bug report needs, in one block to paste: versions, machine, kernel, distribution, the root file system, and
+# for a program what tso-arm knows of it and how it ends in each mode
+cmd_report() {
+    echo '```'
+    cmd_version
+    echo "system: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"), kernel $(uname -r), glibc $(ldd --version 2>/dev/null | sed -n '1s/.* //p')"
+    sh "$REPO/tools/board_check.sh" 2>&1 | grep -v '^for \|^to build' | sed 's/  */ /g'
+    if has_rootfs; then
+        echo "root file system: ${FEX_ROOTFS:-from FEX's configuration}"
+    elif r=$(shared_rootfs); then
+        echo "root file system: $r (for every user)"
+    else
+        echo "root file system: none ('tso-arm rootfs')"
+    fi
+    F=$(fex 2>/dev/null) && [ -d "$(dirname "$(dirname "$F")")/lib/fex-emu/HostThunks" ] &&
+        echo "thunks: built in, $([ "${TSO_ARM_THUNKS:-0}" = 1 ] && echo on || echo "off (--gpu, TSO_ARM_THUNKS=1)")"
+    for v in $(env | sed -n 's/^\(FEX_[A-Z_]*\|TSO_[A-Z_]*\)=.*/\1/p'); do
+        [ "$v=$(printenv "$v")" = FEX_MAXINST=150 ] && continue # tso-arm's own setting
+        echo "set: $v=$(printenv "$v")"
+    done
+    if [ $# -ge 1 ]; then
+        p=$1
+        [ -f "$p" ] || p=$(command -v "$p" 2>/dev/null) || p=$1
+        echo "program: $p: $(elfinfo "$p" 2>/dev/null)"
+        [ -f "$p" ] && cmd_status "$p" | sed 's/^/  /'
+        for m in tso full unordered; do
+            s=0
+            o=$(timeout 60 "$REPO/bin/tso-arm" run --mode $m "$@" </dev/null 2>&1 >/dev/null | tail -n 3) || s=$?
+            echo "  --mode $m: exit status $s${o:+, last messages:}"
+            [ -n "$o" ] && printf '%s\n' "$o" | sed 's/^/    /'
+        done
+    fi
+    echo '```'
+}
+
 cmd_rootfs() {
     F=$(fex)
     fetcher="$(dirname "$F")/FEXRootFSFetcher"
@@ -554,6 +604,7 @@ check) exec sh "$REPO/tools/board_check.sh" ;;
 install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
 uninstall) shift && cmd_uninstall "$@" ;;
 update) shift && cmd_update "$@" ;;
+report) shift && cmd_report "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
 binfmt) shift && cmd_binfmt "$@" ;;
 version | --version) cmd_version ;;
