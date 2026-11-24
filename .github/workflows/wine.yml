@@ -1,36 +1,38 @@
 name: Wine
 
-# Windows programs through Wine under tso-arm: an x86-64 runner packs Ubuntu 24.04's wine64 with its libraries and the
-# Windows test programs of tests/win (tools/wine_rootfs.sh), an Arm runner makes a Wine prefix and runs them with x86
-# order kept, under FEX's full TSO and without ordering (tests/wine_check.sh).
+# Windows programs the way a user runs them: an x86-64 runner builds the Windows test programs of tests/win with MinGW,
+# an Arm runner fetches the root file system with `tso-arm rootfs` and WineHQ's Wine with `tso-arm wine`, makes a
+# Wine prefix and runs them with x86 order kept, under FEX's full TSO and without ordering (tests/winehq_check.sh).
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  rootfs:
-    name: Wine from x86-64 Ubuntu
+  programs:
+    name: Windows test programs
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Packages
+      - name: MinGW
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends wine64 gcc-mingw-w64-x86-64 zstd
-      - name: Root file system with Wine and the test programs
-        run: sh tools/wine_rootfs.sh wine-rootfs.tar.zst
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64
+      - name: Build
+        run: |
+          mkdir -p win
+          for c in tests/win/*.c; do x86_64-w64-mingw32-gcc -O2 -o win/$(basename $c .c).exe $c; done
       - uses: actions/upload-artifact@v4
         with:
-          name: wine-rootfs-${{ github.sha }}
+          name: win-programs-${{ github.sha }}
           retention-days: 3
-          path: wine-rootfs.tar.zst
+          path: win/
 
   run:
     name: Wine on an Arm runner
-    needs: rootfs
+    needs: programs
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Packages
@@ -48,21 +50,15 @@ jobs:
         run: bin/tso-arm install --generic
       - uses: actions/download-artifact@v4
         with:
-          name: wine-rootfs-${{ github.sha }}
-      - name: Windows programs under tso-arm (Ubuntu's Wine)
+          name: win-programs-${{ github.sha }}
+          path: win
+      - name: Root file system as a user fetches it
+        run: bin/tso-arm rootfs >/dev/null
+      - name: Windows programs through tso-arm wine (WineHQ's Wine)
+        timeout-minutes: 45
         run: |
           s=0
-          sh tests/wine_check.sh wine-rootfs.tar.zst >wine.txt 2>&1 || s=$?
-          cat wine.txt
-          { echo; echo '```'; cat wine.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
-          exit $s
-      # as a user runs them: the root file system from FEX's server, WineHQ's Wine fetched by tso-arm wine
-      - name: Windows programs through tso-arm wine (WineHQ's Wine, the root file system of tso-arm rootfs)
-        if: always()
-        run: |
-          bin/tso-arm rootfs >/dev/null
-          s=0
-          sh tests/winehq_check.sh build/wine-rootfs/opt/tso-arm-tests/spsc.exe >winehq.txt 2>&1 || s=$?
+          sh tests/winehq_check.sh win/spsc.exe >winehq.txt 2>&1 || s=$?
           cat winehq.txt
           { echo; echo '```'; cat winehq.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s

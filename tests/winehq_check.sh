@@ -10,6 +10,14 @@ T=$PWD/bin/tso-arm
 exe=$(readlink -f "${1:?usage: tests/winehq_check.sh SPSC.EXE}")
 n=${MESSAGES:-20000000}
 export WINEPREFIX=${WINEPREFIX:-$HOME/.wine-tso-arm-check}
+# FEX's server keeps the root file system of the program that started it until a second after its last one: one a
+# program with another root file system started (FEX_ROOTFS) would serve Wine that one ("/lib/ld-linux.so.2: could
+# not open")
+for i in $(seq 100); do
+    pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1 || break
+    sleep 0.2
+done
+pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1 && { echo "FAIL: a FEXServer of another program still runs"; exit 1; }
 $T wine install >/dev/null || { echo "FAIL: tso-arm wine install"; exit 1; }
 echo "      $($T wine)"
 w=$($T wine | sed -n 's/^Wine .* in \(.*\)$/\1/p')/opt/wine-stable/bin/wineserver

@@ -115,7 +115,8 @@ Wine: `tso-arm wine` fetches WineHQ's Wine 11 for Ubuntu 24.04 and runs Windows 
 file system of `tso-arm rootfs`. Under full ordering it ran a ring buffer between two Win32 threads right at once;
 with the page protocol Wine did not start, for two faults of the views (notes section 58): mappings with `PROT_WRITE`
 alone (wineserver), and segment register loads (Wine's ntdll in its signal handler). Both fixed, with tests of their
-own. The Wine workflow runs Ubuntu's Wine in a root file system of its own and WineHQ's through `tso-arm wine`.
+own. The Wine workflow runs WineHQ's Wine through `tso-arm wine` with the root file system of `tso-arm rootfs`, as a
+user does (Ubuntu's wine64 packed into a root file system of its own did not find kernel32.dll; dropped).
 
 Programs with a window: `tests/graphics_check.sh` in the Compat workflow runs glxinfo, glxgears and vkcube from
 the root file system on Xvfb, with the x86 Mesa and with `--gpu`.
