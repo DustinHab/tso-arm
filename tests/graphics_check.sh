@@ -1,7 +1,8 @@
 #!/bin/sh
 # Programs with a window, on the X server in DISPLAY (CI: Xvfb), from the root file system 'tso-arm rootfs' fetched:
 # glxinfo and glxgears (OpenGL through GLX), vkcube (Vulkan through XCB), with the x86 Mesa of the root file system and
-# with --gpu (Vulkan through FEX's thunk to the host's library, OpenGL through the x86 Mesa's Zink onto it). The
+# with --gpu (Vulkan through FEX's thunk to the host's library, OpenGL through the x86 Mesa's Zink onto it, on Mesa's
+# software window path). The
 # renderer string says which one drew: llvmpipe with 256-bit vectors is the x86 Mesa (AVX2), 128 the host's on Arm,
 # "zink" OpenGL on Vulkan. FEX's own OpenGL thunk is tried as well, for information.
 #   tests/graphics_check.sh [ROOTFS]     exit status 1 if OpenGL or Vulkan fails with the x86 Mesa or with --gpu
@@ -45,6 +46,7 @@ check() {
 }
 check "x86 Mesa" FAIL $T run
 check "--gpu" FAIL $T run --gpu
-check "FEX's OpenGL thunk" "info" env TSO_ARM_THUNKS=1 FEX_THUNKCONFIG=$gl MESA_LOADER_DRIVER_OVERRIDE= $T run
+check "Zink's own window path (needs DRI3)" "info" env TSO_ARM_THUNKS=1 GALLIUM_DRIVER= MESA_LOADER_DRIVER_OVERRIDE=zink $T run
+check "FEX's OpenGL thunk" "info" env TSO_ARM_THUNKS=1 FEX_THUNKCONFIG=$gl GALLIUM_DRIVER= $T run
 rm -f $gl
 exit $fail

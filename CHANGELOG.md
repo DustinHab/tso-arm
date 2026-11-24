@@ -1,9 +1,13 @@
 # Changes
 
-## 0.4.4 (not released yet)
+## 0.4.4 (2026-11-24)
 
-What people run on an Arm computer beyond command-line x86-64 programs: `docs/ROADMAP.md` lists what was missing for
-that and is worked through from the top.
+What people run on an Arm computer beyond command-line x86-64 programs: 32-bit programs, AppImages, Windows programs
+through Wine, programs with a window and a GPU, installed in one line for one user or for everyone. `docs/GUIDE.md`
+is the guide for using it, `docs/ROADMAP.md` lists what was missing and what is still open. Install with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, or update from 0.4.3 with
+`tso-arm install` in a checkout or package of this release. The FEX patch changed, so this release brings FEX
+prebuilt anew, now with FEX's thunks.
 
 - 32-bit x86 programs run: `tso-arm run` took only x86-64 programs, and `binfmt register` registered only them. FEX
   orders every access of a 32-bit program itself (the page protocol is for x86-64 programs), as fast as `--mode
