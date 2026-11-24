@@ -43,7 +43,8 @@ jobs:
       - name: Prefix and program, with the kernel's messages and memory alongside
         timeout-minutes: 30
         run: |
-          sudo dmesg -n 7 || true
+          set +e
+          sudo dmesg -n 7
           sudo dmesg -w --time-format iso | sed 's/^/kernel: /' &
           ( while :; do echo "memory: $(date +%T) $(free -m | awk '/^Mem/ { print $3 " MB used, " $7 " MB available" }') load $(cut -d' ' -f1 /proc/loadavg)"; sleep 5; done ) &
           export WINEPREFIX=$HOME/.wine-diag WINEDEBUG=err+all
