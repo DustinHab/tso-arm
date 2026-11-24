@@ -23,10 +23,20 @@ that and is worked through from the top.
   installation for every user, `tso-arm rootfs` fetches one root file system for all of them. `tso-arm run` takes
   the FEX a release package brings along without installing it.
 - GPU acceleration, when asked for: the prebuilt FEX now has FEX's thunks, and `tso-arm run --gpu` (or
-  `TSO_ARM_THUNKS=1`) sends an x86 program's OpenGL and Vulkan calls to the host's own libraries and GPU driver.
-  On the Pi 5 an x86-64 program reaches the V3D through Vulkan instead of seeing only llvmpipe. Off unless asked
-  for, as in FEX: Ubuntu's `vulkaninfo` stops with SIGILL through the Vulkan thunk (in every ordering mode), FEX's
-  EGL thunk lacks functions, 32-bit programs have no Vulkan thunk.
+  `TSO_ARM_THUNKS=1`) sends an x86 program's Vulkan calls to the host's own Vulkan library and GPU driver, and its
+  OpenGL through the x86 Mesa's Zink onto the same (FEX's own OpenGL thunk stopped with an X error on an X server).
+  On the Pi 5 an x86-64 program reaches the V3D through Vulkan instead of seeing only llvmpipe; on an X server
+  `vkcube` draws 200 frames in 1.1 instead of 2.7 s. Off unless asked for, as in FEX: Ubuntu's `vulkaninfo` stops
+  with SIGILL through the Vulkan thunk (in every ordering mode), 32-bit programs have no Vulkan thunk.
+- Windows programs: `tso-arm wine PROGRAM.exe` runs them through WineHQ's Wine 11 for Ubuntu 24.04, fetched on first
+  use (checked against WineHQ's package index). A ring buffer between two Win32 threads: 20 million messages, all
+  right with x86 order kept, 351,869 wrong without ordering. The Wine workflow runs it on GitHub's Arm runner.
+- Fixed in FEX, found with Wine: memory mapped with `PROT_WRITE` or `PROT_EXEC` alone is readable on x86, and the
+  page protocol took reads of it for faults of the program's own (wineserver stopped at its start); a segment
+  register load (`mov %eax, %ds`) read the descriptor from FEX's own table through the views (every Windows program
+  stopped with "nested exception on signal stack"). `tests/writeonly.c` and `tests/segload.c` in `tests/ci.sh`.
+- `TSO_ARM_MODE` sets the ordering mode for programs started without `--mode` (started directly, through `tso-arm
+  wine`).
 - Fixed in FEX: a prebuilt FEX unpacked elsewhere than the prefix it was built for did not find its own data
   directory (application configs, the thunks' database and libraries); it now takes the one beside its programs.
   The Vulkan thunk no longer prints a line for every function an application looks up.

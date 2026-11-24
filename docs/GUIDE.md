@@ -57,8 +57,10 @@ the computer's own libraries and its GPU driver instead:
 tso-arm run --gpu ./game
 ```
 
-This uses FEX's thunks, which cover much but not all of these libraries: try a program with and without it. To
-have it for programs started directly, set `TSO_ARM_THUNKS=1` in the environment (for example in `~/.profile`).
+Vulkan goes through FEX's thunk to the computer's own Vulkan driver, OpenGL through Mesa's Zink (OpenGL on Vulkan)
+onto the same. It covers much but not all of Vulkan: try a program with and without `--gpu`. To have it for
+programs started directly, set `TSO_ARM_THUNKS=1` in the environment (for example in `~/.profile`); `TSO_ARM_MODE`
+does the same for the ordering mode.
 
 ## Faster: learn
 
@@ -91,9 +93,18 @@ ordering mode (stdin empty, output discarded), so give it arguments that change 
 
 ## Windows programs
 
-Windows programs run through Wine, an x86 Linux program itself: Wine from an x86 distribution in the root file system,
-started with `tso-arm run`. The tests run Ubuntu's Wine with a Windows program that relies on x86's memory order
-between its threads (`tests/wine_check.sh`).
+```sh
+tso-arm rootfs                  # once, if not done yet
+tso-arm wine setup.exe          # a Windows program; the first time fetches Wine (about 240 MB)
+tso-arm wine notepad            # Wine's own programs as well: winecfg, regedit, ...
+```
+
+`tso-arm wine` runs Windows programs through Wine, WineHQ's own build for Ubuntu 24.04 (the distribution of the
+root file system), which it fetches from WineHQ the first time and keeps in `~/.local/share/tso-arm/wine`; `tso-arm
+wine install` fetches a newer one. The Windows "C:" drive and settings are in `~/.wine` as usual (`WINEPREFIX` for
+another). Windows programs need x86's memory order between their threads just as Linux programs do: the tests run
+one that passes data between two threads without locks, 20 million messages, all of them right with tso-arm and some
+hundred thousand wrong without ordering.
 
 ## Keeping it up to date
 

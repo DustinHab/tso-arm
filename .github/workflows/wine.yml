@@ -36,7 +36,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 zstd
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 zstd squashfs-tools
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
@@ -49,10 +49,20 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: wine-rootfs-${{ github.sha }}
-      - name: Windows programs under tso-arm
+      - name: Windows programs under tso-arm (Ubuntu's Wine)
         run: |
           s=0
           sh tests/wine_check.sh wine-rootfs.tar.zst >wine.txt 2>&1 || s=$?
           cat wine.txt
           { echo; echo '```'; cat wine.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $s
+      # as a user runs them: the root file system from FEX's server, WineHQ's Wine fetched by tso-arm wine
+      - name: Windows programs through tso-arm wine (WineHQ's Wine, the root file system of tso-arm rootfs)
+        if: always()
+        run: |
+          bin/tso-arm rootfs >/dev/null
+          s=0
+          sh tests/winehq_check.sh build/wine-rootfs/opt/tso-arm-tests/spsc.exe >winehq.txt 2>&1 || s=$?
+          cat winehq.txt
+          { echo; echo '```'; cat winehq.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s

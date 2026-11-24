@@ -21,6 +21,8 @@ $CC -O2 -static -pthread -o build/ci/exactstart tests/exactstart.c
 $CC -O2 -static -pthread -o build/ci/xmc tests/xmc.c
 $CC -O2 -static -o build/ci/sigign tests/sigign.c
 $CC -O2 -static -pthread -o build/ci/faultaddr tests/faultaddr.c
+$CC -O2 -static -pthread -o build/ci/writeonly tests/writeonly.c
+$CC -O2 -static -pthread -o build/ci/segload tests/segload.c
 $CC -O2 -static -pthread -o build/ci/preempt tests/preempt.c
 $CC -O2 -static -o build/ci/sigspin tests/sigspin.c
 $CC -O2 -static -pthread -o build/ci/sigsync tests/sigsync.c

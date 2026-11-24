@@ -2656,3 +2656,55 @@ the server's idle time (`tests/ci.sh`: 86 s before, 17 s after). The server now 
 on /dev/null and everything else closed but its pipe to the starting FEX and the watched descriptor. `tests/ci.sh`
 checks it with a server of its own (socket and lock in a new directory): the substitution ends in 61 to 73 ms, the
 server's stdout is /dev/null.
+
+## 58. Everyday use: what was missing, and two faults Wine found (2026-11-24)
+
+`docs/ROADMAP.md` lists what stood between tso-arm and the programs people run on an Arm computer; this section is
+what working through it found.
+
+- **32-bit programs** ran under FEX (also with `TSO_VIEWS=1`: the views are not set up in 32-bit mode, FEX orders
+  every access), but `tso-arm run` refused them. `litmus/mp32.c` on the Pi 5: without ordering 3 forbidden outcomes
+  of 2,000,000 for vector stores, with `tso-arm run` 0 at the speed of `--mode full` (197 against 191 ms).
+- **binutils**: `tso-arm run` read the ELF header three times with `readelf` (3.4 ms); `od` on the first kilobyte and
+  `awk` (1.3 ms, od formats 0.4 µs per byte, so not more than needed) give machine, kind, build ID and whether it is
+  an AppImage; the same as readelf for 1,084 files of the root file system.
+- **A prebuilt FEX** compiles its global data directory in (`GLOBAL_DATA_DIRECTORY`, the install prefix of the build
+  machine): application configs and the thunks' database and guest libraries were not found where the package was
+  unpacked. FEX's portable mode (`FEX_PORTABLE`) would move the user's data and root file system as well. The patch:
+  where the compiled-in directory does not exist, the one beside the running program. Checked with a copy of the
+  prefix elsewhere and a `Config.json` there that turns TSO off (`FEXGetConfig --tso-emulation-info`).
+- **Thunks** (release build with `TSO_ARM_THUNKS=1`: libclang 14 of Ubuntu 22.04, with `Clang_DIR` named since the
+  runner has a partial clang 15). Vulkan through the thunk reaches the Pi's V3D (`tests/gpu_info.c`: 185 ms against
+  541 ms with the x86 Mesa's llvmpipe) and runs `vkcube` on Xvfb (1.1 against 2.7 s). FEX's OpenGL thunk stopped with
+  an X error and a core dump on Xvfb (glxinfo, glxgears), its EGL thunk lacks `eglGetConfigs`, Ubuntu's `vulkaninfo`
+  stops with SIGILL through the Vulkan thunk in every mode when its output is not a terminal. `--gpu` therefore
+  selects the Vulkan thunk and puts OpenGL on it through the x86 Mesa's Zink; off unless asked for.
+- **AppImages** look for `fusermount` on the PATH, which inside the root file system has none; unpacked instead
+  (`APPIMAGE_EXTRACT_AND_RUN`, set by `tso-arm run` for them) `appimagetool` runs and builds an AppImage, 0.36 s
+  against 0.33 s from a copy unpacked beforehand.
+- **Containers** need FEX and FEXServer without a dynamic loader (binfmt_misc's `F` flag): FEX has no static build,
+  and its server's socket is per network namespace. Not started.
+
+**Wine.** `tso-arm wine` fetches WineHQ's Wine 11 for Ubuntu 24.04 (the root file system's distribution; checked
+against WineHQ's package index, unpacked with dpkg-deb or by hand) and runs Windows programs through it.
+`tests/win/spsc.c`, a ring buffer between two Win32 threads with plain stores: under `--mode full` 0 of 20,000,000
+messages wrong (13.1 s), without ordering 392,155 wrong (12.4 s): Windows programs need x86's order as much as Linux
+ones. With x86 order kept by the page protocol, Wine did not start, for two faults of the views:
+
+- **Write-only mappings.** wineserver maps a file shared with `PROT_WRITE` alone and writes to it. x86's page tables
+  cannot say "write" without "read", so on x86 such memory is readable (and read-modify-write instructions work on
+  it); the views kept the rights asked for, took the access for one the guest may not make ("guest protection") and
+  passed the fault on: wineserver's handler reported "wineserver crashed". The ranges now keep the rights x86 gives
+  (`PROT_WRITE` or `PROT_EXEC` adds `PROT_READ`). `tests/writeonly.c`: the prebuilt FEX of 0.4.3's patches
+  segfaults with the views, the fixed one gives the right values in every mode.
+- **Segment register loads.** Wine's ntdll loads DS and ES (`mov %eax, %ds`) in its signal handler. FEX reads the
+  descriptor's base from its own GDT and LDT through a pointer in the thread's context (`LoadContextIndexed` of
+  `segment_arrays`, then a `LoadMemGPR`), and the views pass took that load for a guest access: the view base added
+  to a host address gave `0x83a00d0768`, beyond the Pi's 39-bit address space, and every Windows program stopped with
+  "nested exception on signal stack". The views pass now leaves loads based on an indexed context load alone, as it
+  does the x87 registers' `FormContextAddress`. `tests/segload.c` loads DS and ES 1,000 times with a second thread
+  running.
+
+Found with strace (`-e trace=memory,signal`: the guest's `mmap(…, PROT_WRITE, MAP_SHARED, fd, 0)` before the fault
+that killed wineserver) and `TSO_VIEWS_LOG` (`fault R at 0x83a00d0768 … not ours: another thread's view` at
+`rip 0x3f7d21ba1`, which `objdump` of Wine's ntdll.so names as `mov %eax, %ds`).

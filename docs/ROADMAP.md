@@ -14,7 +14,7 @@ done.
 | 4 | GPU acceleration for x86 programs (FEX's thunks) | when asked for (0.4.4); FEX's thunks are incomplete |
 | 5 | Installing for every user, in one line, and updating | done (0.4.4) |
 | 6 | Containers: `docker run --platform linux/amd64` | open |
-| 7 | Windows programs through Wine, AppImages, programs with a window: tested | AppImages done (0.4.4); Wine open |
+| 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine`, two faults fixed |
 | 8 | The page protocol for 32-bit programs | open |
 | 9 | A guide for users: what runs, what to do when something does not | `tso-arm report` (0.4.4); guide open |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | open |
@@ -58,7 +58,8 @@ for Panfrost on Rockchip boards): OpenGL falls back to the CPU (llvmpipe), Vulka
 OpenGL, EGL, Vulkan and other libraries to the host's own Arm libraries; tso-arm's FEX was built without them.
 
 Done so far: the release workflow builds the prebuilt FEX with its thunks (libclang 14 on Ubuntu 22.04, the x86 cross
-C++ libraries), and `tso-arm run --gpu` points FEX at them and selects GL and Vulkan. A FEX patch lets a prebuilt FEX
+C++ libraries), and `tso-arm run --gpu` points FEX at them and selects the Vulkan thunk, with OpenGL through the
+x86 Mesa's Zink onto it (FEX's OpenGL thunk stopped with an X error on Xvfb). A FEX patch lets a prebuilt FEX
 find its data directory beside itself (the thunks' database and guest libraries were looked for under the prefix of
 the build machine). `tests/gpu_info.c` on the Pi 5:
 
@@ -109,6 +110,15 @@ AppImages: an AppImage mounts its contents with FUSE through a `fusermount` it l
 the root file system has none, and stopped ("Cannot mount AppImage"). Unpacked instead (`APPIMAGE_EXTRACT_AND_RUN`,
 which `tso-arm run` now sets for them) the official `appimagetool` AppImage runs on the Pi 5 and builds an AppImage
 itself; a 15 MB one starts in 0.36 s, 0.33 s from a copy unpacked beforehand, so nothing is kept.
+
+Wine: `tso-arm wine` fetches WineHQ's Wine 11 for Ubuntu 24.04 and runs Windows programs through it, with the root
+file system of `tso-arm rootfs`. Under full ordering it ran a ring buffer between two Win32 threads right at once;
+with the page protocol Wine did not start, for two faults of the views (notes section 58): mappings with `PROT_WRITE`
+alone (wineserver), and segment register loads (Wine's ntdll in its signal handler). Both fixed, with tests of their
+own. The Wine workflow runs Ubuntu's Wine in a root file system of its own and WineHQ's through `tso-arm wine`.
+
+Programs with a window: `tests/graphics_check.sh` in the Compat workflow runs glxinfo, glxgears and vkcube from
+the root file system on Xvfb, with the x86 Mesa and with `--gpu`.
 
 ## 8. The page protocol for 32-bit programs
 

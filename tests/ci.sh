@@ -43,6 +43,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/xmc tests/xmc.c
     $CC -O2 -static -o $B/sigign tests/sigign.c
     $CC -O2 -static -pthread -o $B/faultaddr tests/faultaddr.c
+    $CC -O2 -static -pthread -o $B/writeonly tests/writeonly.c
+    $CC -O2 -static -pthread -o $B/segload tests/segload.c
     $CC -O2 -static -pthread -o $B/preempt tests/preempt.c
     $CC -O2 -static -o $B/sigspin tests/sigspin.c
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
@@ -121,6 +123,15 @@ rm -rf "$S"
 for m in tso full unordered; do
     out=$(last $T run --mode $m $B/faultaddr) || fail "faultaddr, $m: $out"
     ok "$m: $out"
+done
+
+# what Wine does and the views took wrongly (notes section 58): memory mapped with PROT_WRITE or PROT_EXEC alone,
+# which x86 makes readable, and segment register loads, whose descriptor FEX reads from its own memory
+for p in writeonly segload; do
+    for m in tso full unordered; do
+        out=$(last $T run --mode $m $B/$p) || fail "$p, $m: $out"
+        ok "$m: $out"
+    done
 done
 
 # asynchronous signals at an instruction start: a handler that makes the interrupted thread call a routine at the

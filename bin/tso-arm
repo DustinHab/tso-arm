@@ -317,7 +317,8 @@ key() {
 }
 
 cmd_run() {
-    mode=tso
+    # TSO_ARM_MODE: the mode for programs started without --mode (started directly through binfmt_misc, by tso-arm wine)
+    mode=${TSO_ARM_MODE:-tso}
     aot=""
     while [ $# -gt 0 ]; do
         case $1 in
@@ -425,12 +426,14 @@ cmd_run() {
     exec "$F" "$prog" "$@"
 }
 
-# FEX's thunks (--gpu, TSO_ARM_THUNKS=1), where FEX was built with them: an x86 program's OpenGL and Vulkan calls go
-# to the host's own Arm libraries, and with them to the GPU's driver (the x86 Mesa of a root file system has no driver
-# for the GPUs of many Arm boards and draws with the CPU). Off unless asked for, as in FEX: they cover what FEX
-# implemented of each library (x86-64 Vulkan reaches the Pi 5's V3D; vulkaninfo stops with SIGILL in every ordering
-# mode, FEX's EGL thunk lacks functions, 32-bit programs have no Vulkan thunk). The directories are given here because
-# a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection (fex/thunks.json: GL, Vulkan).
+# The GPU (--gpu, TSO_ARM_THUNKS=1), where FEX was built with its thunks: an x86 program's Vulkan calls go to the
+# host's own Vulkan library and with it to the GPU's driver (the x86 Mesa of a root file system has no driver for the
+# GPUs of many Arm boards and draws with the CPU), and its OpenGL goes through the x86 Mesa's Zink (OpenGL on Vulkan)
+# onto that. FEX's own OpenGL thunk stopped with an X error and a core dump on an X server in CI (glxinfo, glxgears),
+# so it is not selected. Off unless asked for, as in FEX: x86-64 Vulkan reaches the Pi 5's V3D and vkcube runs, but
+# vulkaninfo stops with SIGILL in every ordering mode, and 32-bit programs have no Vulkan thunk. The directories are
+# given here because a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection
+# (fex/thunks.json: Vulkan), MESA_LOADER_DRIVER_OVERRIDE another OpenGL driver.
 thunks() {
     p=$(dirname "$(dirname "$1")")
     [ "${TSO_ARM_THUNKS:-0}" = 1 ] || return 0
@@ -440,6 +443,9 @@ thunks() {
     }
     export FEX_THUNKHOSTLIBS="$p/lib/fex-emu/HostThunks" FEX_THUNKGUESTLIBS="$p/share/fex-emu/GuestThunks"
     export FEX_THUNKCONFIG="${FEX_THUNKCONFIG:-$REPO/fex/thunks.json}"
+    # Zink over the Vulkan thunk for x86-64 programs (32-bit ones have no Vulkan thunk to put it on)
+    [ "$m" = x86-64 ] && export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE-zink}"
+    return 0
 }
 
 # what `learn` translated: the program's library (TSO_AOT, for this program only: programs it starts with execve look
