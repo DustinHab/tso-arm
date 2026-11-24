@@ -433,7 +433,7 @@ cmd_run() {
 # so it is not selected. Off unless asked for, as in FEX: x86-64 Vulkan reaches the Pi 5's V3D and vkcube runs, but
 # vulkaninfo stops with SIGILL in every ordering mode, and 32-bit programs have no Vulkan thunk. The directories are
 # given here because a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection
-# (fex/thunks.json: Vulkan), GALLIUM_DRIVER another OpenGL driver.
+# (fex/thunks.json: Vulkan), MESA_LOADER_DRIVER_OVERRIDE another OpenGL driver.
 thunks() {
     p=$(dirname "$(dirname "$1")")
     [ "${TSO_ARM_THUNKS:-0}" = 1 ] || return 0
@@ -443,12 +443,11 @@ thunks() {
     }
     export FEX_THUNKHOSTLIBS="$p/lib/fex-emu/HostThunks" FEX_THUNKGUESTLIBS="$p/share/fex-emu/GuestThunks"
     export FEX_THUNKCONFIG="${FEX_THUNKCONFIG:-$REPO/fex/thunks.json}"
-    # Zink over the Vulkan thunk for x86-64 programs (32-bit ones have no Vulkan thunk to put it on), through Mesa's
-    # software window path: Zink draws with Vulkan and the picture is copied into the window, on any X server (its
-    # own window path, kopper, needs DRI3, which Xvfb has not: "DRI3 not available", no visual)
-    if [ "$m" = x86-64 ] && [ -z "${GALLIUM_DRIVER+set}" ]; then
-        export GALLIUM_DRIVER=zink LIBGL_ALWAYS_SOFTWARE=1
-    fi
+    # Zink over the Vulkan thunk for x86-64 programs (32-bit ones have no Vulkan thunk to put it on): on the Pi 5
+    # OpenGL then reports "zink Vulkan 1.3(V3D 7.1.10.2 (MESA_V3DV))". Its window path needs DRI3 of the X server
+    # (desktops have it, Xwayland as well; Xvfb has not: "DRI3 not available"); Mesa's software window path instead
+    # (LIBGL_ALWAYS_SOFTWARE) makes Zink take a CPU device, llvmpipe again
+    [ "$m" = x86-64 ] && export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE-zink}"
     return 0
 }
 
