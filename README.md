@@ -28,6 +28,9 @@ libraries translated ahead of time: 82 % of the host's own Arm builds, against 6
 
 ## Quick start
 
+[docs/GUIDE.md](docs/GUIDE.md) is the guide for using it: installing, programs with libraries, AppImages, graphics,
+Windows programs, what to do when a program does not run.
+
 On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS with the 4 KB
 kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and `tso-arm check` names the line that changes that):
 
@@ -306,7 +309,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 
 | | |
 |---|---|
-| `tso-arm run [--mode tso\|full\|unordered] [--aot LIB] PROGRAM [ARGS]` | run an x86-64 or 32-bit x86 program (default `tso`: x86 order kept) |
+| `tso-arm run [--mode tso\|full\|unordered] [--aot LIB] [--gpu] PROGRAM [ARGS]` | run an x86-64 or 32-bit x86 program (default `tso`: x86 order kept; `--gpu`: OpenGL and Vulkan through the host's libraries) |
 | `tso-arm learn PROGRAM [ARGS]` | translate its hot functions ahead of time, check them, keep them if faster |
 | `tso-arm status [PROGRAM]`, `tso-arm forget PROGRAM` | what was learned, and dropping it |
 | `tso-arm check` | the machine's requirements |
@@ -316,6 +319,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
 | `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) run through tso-arm; register and unregister need root |
 | `tso-arm version` | the version, and the FEX it uses |
+| `tso-arm report [PROGRAM [ARGS]]` | what a bug report needs, as one block to paste |
 
 ## Layout
 
@@ -330,6 +334,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `bench/` | microbenchmarks of ordered accesses, workload and efficiency runs, Box64 |
 | `tools/` | board check, sync and run scripts for the test machine |
 | `docs/NOTES.md` | measurements, decisions and findings in order |
+| `docs/GUIDE.md` | the guide for using it |
 | `docs/ROADMAP.md` | what is missing for everyday use, and what was done about it |
 
 ## Test machine

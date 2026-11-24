@@ -38,16 +38,23 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools golang-go
-      - name: FEX with the tso-arm patches (cached)
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools golang-go \
+            xvfb libgl1-mesa-dri mesa-vulkan-drivers libvulkan1
+          # FEX's thunks, as the release builds them
+          g=$(gcc -dumpversion | cut -d. -f1)
+          sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
+            libstdc++-$g-dev-amd64-cross libgcc-$g-dev-amd64-cross libstdc++-$g-dev-i386-cross libgcc-$g-dev-i386-cross \
+            libgl-dev libegl-dev libx11-dev libxrandr-dev libxrender-dev libxcb1-dev libwayland-dev libdrm-dev \
+            libasound2-dev
+      - name: FEX with the tso-arm patches and its thunks (cached)
         id: fex
         uses: actions/cache@v4
         with:
           path: ~/.local/opt/tso-arm
-          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+          key: fex-thunks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
       - name: Build FEX
         if: steps.fex.outputs.cache-hit != 'true'
-        run: bin/tso-arm install --generic
+        run: TSO_ARM_THUNKS=1 bin/tso-arm install --generic
       - uses: actions/download-artifact@v4
         with:
           name: compat-rootfs-${{ github.sha }}
@@ -66,6 +73,15 @@ jobs:
           sh tests/rootfs_check.sh >rootfs_check.txt 2>&1 || s=$?
           cat rootfs_check.txt
           { echo; echo '```'; cat rootfs_check.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $s
+      # programs with a window: OpenGL and Vulkan of the root file system on an X server without a screen (Xvfb), with
+      # the x86 Mesa of the root file system and with --gpu through the host's (both draw with the CPU here)
+      - name: Graphics on an X server, with and without --gpu
+        run: |
+          s=0
+          xvfb-run -a -s '-screen 0 1280x720x24' sh tests/graphics_check.sh >graphics.txt 2>&1 || s=$?
+          cat graphics.txt
+          { echo; echo '```'; cat graphics.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s
       # rare failures: multi-threaded programs of it, 5 runs each in three settings, outputs against full ordering
       - name: Multi-threaded programs, many runs
