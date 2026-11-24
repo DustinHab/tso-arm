@@ -11,12 +11,13 @@ done.
 | 1 | 32-bit x86 programs | done (0.4.4) |
 | 2 | Starting without binutils | done (0.4.4) |
 | 3 | Raspberry Pi OS on a Pi 5 boots a 16 KB-page kernel | done (0.4.4) |
-| 4 | GPU acceleration for x86 programs (FEX's thunks) | open |
-| 5 | Installing for every user, in one line, and updating | open |
+| 4 | GPU acceleration for x86 programs (FEX's thunks) | when asked for (0.4.4); FEX's thunks are incomplete |
+| 5 | Installing for every user, in one line, and updating | done (0.4.4) |
 | 6 | Containers: `docker run --platform linux/amd64` | open |
-| 7 | Windows programs through Wine, AppImages, programs with a window: tested | open |
+| 7 | Windows programs through Wine, AppImages, programs with a window: tested | AppImages done (0.4.4); Wine open |
 | 8 | The page protocol for 32-bit programs | open |
-| 9 | A guide for users: what runs, what to do when something does not | open |
+| 9 | A guide for users: what runs, what to do when something does not | `tso-arm report` (0.4.4); guide open |
+| 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | open |
 
 ## 1. 32-bit x86 programs
 
@@ -56,11 +57,36 @@ x86 programs draw with the x86 Mesa of the root file system. Ubuntu's x86 Mesa h
 for Panfrost on Rockchip boards): OpenGL falls back to the CPU (llvmpipe), Vulkan to lavapipe. FEX's thunks forward
 OpenGL, EGL, Vulkan and other libraries to the host's own Arm libraries; tso-arm's FEX was built without them.
 
+Done so far: the release workflow builds the prebuilt FEX with its thunks (libclang 14 on Ubuntu 22.04, the x86 cross
+C++ libraries), and `tso-arm run --gpu` points FEX at them and selects GL and Vulkan. A FEX patch lets a prebuilt FEX
+find its data directory beside itself (the thunks' database and guest libraries were looked for under the prefix of
+the build machine). `tests/gpu_info.c` on the Pi 5:
+
+| | Vulkan device | start |
+|---|---|---|
+| x86-64, without thunks | llvmpipe (x86 Mesa, the CPU) | 541 ms |
+| x86-64, `--gpu` | V3D 7.1.10.2 (the host's driver) | 185 ms |
+| 32-bit, `--gpu` | llvmpipe: FEX has no 32-bit Vulkan thunk | 587 ms |
+
+Why not by default: Ubuntu's `vulkaninfo` stops with SIGILL through FEX's Vulkan thunk in every ordering mode when
+its output goes to a file (to a terminal it finishes), FEX's EGL thunk lacks `eglGetConfigs` and `eglQueryString`
+(FEX's database has no entry for it), and OpenGL through GLX could not be tried on the Pi without an X server. FEX
+leaves its thunks off by default for the same reason. Open: a program with a window under Xvfb in CI with and without
+`--gpu`, and where `vulkaninfo` stops.
+
 ## 5. Installing for every user, and updating
 
 `tso-arm install` installs into the home directory of whoever runs it; `binfmt register` then points the whole system
 at a program in that home directory. Installing needs git or a downloaded package, and there is no way to update to a
 newer release but doing it again.
+
+Done: `tools/get.sh`, run with one line from the README, installs the newest release with its prebuilt FEX, for the
+user (`~/.local/share/tso-arm`) or as root for everyone (`/opt/tso-arm`, binfmt_misc registered by the link to the
+version in use). Versions lie side by side; `tso-arm update` installs the newest (never an older one unless asked),
+the one before stays until the next update; `tso-arm uninstall` removes it all. `tso-arm run` takes the FEX a
+release package brings along without installing it. As root, `tso-arm rootfs` fetches one root file system for every
+user of such an installation. Checked on the Pi as a user in a throwaway home directory and in CI as root (install,
+programs started directly, update, removal).
 
 ## 6. Containers
 
@@ -73,6 +99,11 @@ loader of its own: FEX is dynamically linked against the host's libraries.
 CI runs command-line programs from x86-64 Ubuntu (sort, 7-Zip, Python, ffmpeg, Node, Java, Go, git, make). Not yet:
 Wine with a Windows program, an AppImage, a program with an X11 window.
 
+AppImages: an AppImage mounts its contents with FUSE through a `fusermount` it looks for on the PATH, which inside
+the root file system has none, and stopped ("Cannot mount AppImage"). Unpacked instead (`APPIMAGE_EXTRACT_AND_RUN`,
+which `tso-arm run` now sets for them) the official `appimagetool` AppImage runs on the Pi 5 and builds an AppImage
+itself; a 15 MB one starts in 0.36 s, 0.33 s from a copy unpacked beforehand, so nothing is kept.
+
 ## 8. The page protocol for 32-bit programs
 
 32-bit programs run with FEX's full ordering (item 1). The views would need 4 GB windows per thread instead of 16 GB
@@ -82,3 +113,12 @@ and the translated code's 32-bit addresses based on them.
 
 The README describes the mechanism and its measurements. A user needs: what runs (and how fast), the commands for
 the common cases, and what to do when a program does not run (`tso-arm check`, `--mode full`, what to report).
+
+Done so far: `tso-arm report [PROGRAM ARGS]` puts versions, machine, root file system, settings and, for a program,
+how it ends in each ordering mode into one block; the issue template asks for it.
+
+## 10. FEX's newest commit
+
+The patches are made on FEX be66e03 (2026-11-16) and applied to it in every build. FEX's main branch has moved on
+since: stage 2 still applies with a three-way merge, stage 3 conflicts in `SignalDelegator.cpp`. The weekly
+`upstream.yml` run against FEX's main fails until the patches are rebased.

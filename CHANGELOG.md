@@ -16,6 +16,26 @@ that and is worked through from the top.
 - On a kernel with 16 or 64 KB pages, `tso-arm check` and `tso-arm install` say what to do: on a Raspberry Pi the
   line in `config.txt` that boots Raspberry Pi OS's 4 KB-page kernel (the Pi 5 starts with a 16 KB one), on Apple
   silicon that x86 programs run in a 4 KB-page virtual machine there.
+- Installing in one line: `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`
+  installs the newest release with FEX prebuilt into `~/.local/share/tso-arm`; with `sudo sh` for every user into
+  `/opt/tso-arm`, with x86 programs started directly running through tso-arm. `tso-arm update` brings such an
+  installation up to date (never to an older release unless asked), `tso-arm uninstall` removes it. As root in an
+  installation for every user, `tso-arm rootfs` fetches one root file system for all of them. `tso-arm run` takes
+  the FEX a release package brings along without installing it.
+- GPU acceleration, when asked for: the prebuilt FEX now has FEX's thunks, and `tso-arm run --gpu` (or
+  `TSO_ARM_THUNKS=1`) sends an x86 program's OpenGL and Vulkan calls to the host's own libraries and GPU driver.
+  On the Pi 5 an x86-64 program reaches the V3D through Vulkan instead of seeing only llvmpipe. Off unless asked
+  for, as in FEX: Ubuntu's `vulkaninfo` stops with SIGILL through the Vulkan thunk (in every ordering mode), FEX's
+  EGL thunk lacks functions, 32-bit programs have no Vulkan thunk.
+- Fixed in FEX: a prebuilt FEX unpacked elsewhere than the prefix it was built for did not find its own data
+  directory (application configs, the thunks' database and libraries); it now takes the one beside its programs.
+  The Vulkan thunk no longer prints a line for every function an application looks up.
+- AppImages run: `tso-arm run` unpacks them instead of mounting them (the root file system has no `fusermount`).
+  The official `appimagetool` AppImage runs on the Pi 5 and builds an AppImage itself.
+- `tso-arm report [PROGRAM ARGS]` gathers what a bug report needs into one block to paste; the issue template on
+  GitHub asks for it.
+- An empty `XDG_CONFIG_HOME` or `XDG_DATA_HOME` counts as unset: FEX took it as set, looked for its configuration in
+  `/fex-emu/`, and its server did not start.
 
 ## 0.4.3 (2026-11-22)
 
