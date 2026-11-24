@@ -40,6 +40,7 @@ usage: tso-arm COMMAND [...]
         install FEX with the tso-arm patches into $PREFIX and the command into ~/.local/bin: the prebuilt FEX
         of this release (from its package, or fetched from GitHub), otherwise built from source.
         --source: built from source for this machine's core; --generic: from source for any Armv8.0 core
+  update                the newest release, for an installation made with tools/get.sh (the one-line install)
   uninstall [--all]     remove FEX and the command again (--all: what 'learn' translated as well)
   rootfs [OPTIONS]      fetch an x86-64 root file system for dynamically linked programs with FEX's own tool:
         without options Ubuntu 24.04, unpacked (about 2 GB); with options the tool's own (rootfs --help)
@@ -68,7 +69,43 @@ cmd_version() {
     fi
 }
 
+# An installation by tools/get.sh: versions side by side in one directory, "current" the link to the one in use (this
+# one). Prints that directory.
+installed_dir() {
+    d=$(dirname "$REPO")
+    [ -L "$d/current" ] && [ "$(readlink -f "$d/current")" = "$REPO" ] && echo "$d"
+}
+
+cmd_update() {
+    d=$(installed_dir) || {
+        if [ -e "$REPO/.git" ]; then
+            die "this is a git checkout ($REPO): 'git -C $REPO pull' and then 'tso-arm install' bring it up to date"
+        fi
+        die "this copy in $REPO was not installed by tools/get.sh; install the newest release that way (README) or unpack it by hand"
+    }
+    [ -w "$d" ] || die "$d belongs to another user: 'sudo tso-arm update'"
+    TSO_ARM_DEST=$d exec sh "$REPO/tools/get.sh"
+}
+
 cmd_uninstall() {
+    if inst=$(installed_dir) && [ -n "$inst" ]; then
+        # installed by tools/get.sh: the whole directory, the command's link, and binfmt_misc where it points here
+        [ -w "$inst" ] || die "$inst belongs to another user: 'sudo tso-arm uninstall'"
+        if [ "$(id -u)" = 0 ] && grep -qs "$inst/" /proc/sys/fs/binfmt_misc/tso-arm /proc/sys/fs/binfmt_misc/tso-arm-i386; then
+            (cmd_binfmt unregister)
+        fi
+        for l in /usr/local/bin/tso-arm "$HOME/.local/bin/tso-arm"; do
+            if [ -L "$l" ] && [ "$(readlink "$l")" = "$inst/current/bin/tso-arm" ]; then
+                rm -f "$l"
+                echo "tso-arm: removed $l"
+            fi
+        done
+        case $inst in
+        / | /opt | /usr | /usr/local | "$HOME" | "$HOME/.local" | "$HOME/.local/share") die "will not remove $inst" ;;
+        esac
+        rm -rf "$inst"
+        echo "tso-arm: removed $inst"
+    fi
     if [ -x "$PREFIX/bin/FEX" ]; then
         rm -rf "$PREFIX"
         echo "tso-arm: removed $PREFIX"
@@ -104,6 +141,15 @@ has_rootfs() {
     grep -qs '"RootFS"' "${c%/}/Config.json" "$PREFIX/share/fex-emu/Config.json"
 }
 
+# The root file system 'tso-arm rootfs' fetched for every user of an installation for all (as root), if there is one
+shared_rootfs() {
+    d=$(installed_dir) || return 1
+    for r in "$d"/rootfs/RootFS/*/; do
+        [ -d "$r/usr" ] && echo "${r%/}" && return 0
+    done
+    return 1
+}
+
 # binfmt_misc: x86-64 and 32-bit x86 ELF files, executables and position-independent ones (the magics and the mask
 # qemu-user registers). Entry name, magic, the machine's name.
 BINFMT_MASK='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
@@ -134,18 +180,21 @@ cmd_binfmt() {
         ;;
     register)
         [ "$(id -u)" = 0 ] || die "binfmt register changes the system and needs root: sudo $REPO/bin/tso-arm binfmt register"
+        # an installation by tools/get.sh is registered by its link to the version in use, which updates change
+        interp=$REPO/bin/tso-arm-binfmt
+        inst=$(installed_dir) && interp=$inst/current/bin/tso-arm-binfmt
         mkdir -p "$(dirname "$conf")"
         : >"$conf"
         printf '%s\n' "$BINFMT_ENTRIES" | while read -r name magic what; do
             # the kernel reads the \x escapes itself; the line goes to it as written
-            line=":$name:M::$magic:$BINFMT_MASK:$REPO/bin/tso-arm-binfmt:"
+            line=":$name:M::$magic:$BINFMT_MASK:$interp:"
             if [ -f "$d/$name" ]; then
                 echo -1 >"$d/$name"
             fi
             printf '%s\n' "$line" >"$d/register"
             printf '%s\n' "$line" >>"$conf"
         done
-        echo "tso-arm: x86-64 and 32-bit x86 programs started directly run through $REPO/bin/tso-arm-binfmt now, and after a reboot ($conf)"
+        echo "tso-arm: x86-64 and 32-bit x86 programs started directly run through $interp now, and after a reboot ($conf)"
         ;;
     unregister)
         [ "$(id -u)" = 0 ] || die "binfmt unregister changes the system and needs root: sudo $REPO/bin/tso-arm binfmt unregister"
@@ -161,21 +210,30 @@ cmd_binfmt() {
     esac
 }
 
+# The FEX to run: TSO_ARM_FEX, the one 'tso-arm install' put into PREFIX, the prebuilt one a release package brings
+# along, a development build. An installed FEX says which patches it was built with; translated code and FEX must
+# agree on them, so one built with others is passed over.
 fex() {
-    for f in "$TSO_ARM_FEX" "$PREFIX/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
-        if [ -n "$f" ] && [ -x "$f" ]; then
-            # an installed FEX says which patches it was built with; translated code and FEX must agree on them
-            b="$(dirname "$(dirname "$f")")/BUILD"
-            if [ -f "$b" ]; then
-                have=$(sed -n 's/^patches //p' "$b")
-                want=$(cat "$REPO"/fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
-                [ "$have" = "$want" ] ||
-                    die "the FEX in $(dirname "$(dirname "$f")") was built with other patches ($have) than this tso-arm has ($want): 'tso-arm install' brings it up to date"
+    want=""
+    stale=""
+    for f in "$TSO_ARM_FEX" "$PREFIX/bin/FEX" "$REPO/fex/prebuilt/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
+        [ -n "$f" ] && [ -x "$f" ] || continue
+        b="$(dirname "$(dirname "$f")")/BUILD"
+        if [ -f "$b" ]; then
+            have=$(sed -n 's/^patches //p' "$b")
+            [ -n "$want" ] || want=$(cat "$REPO"/fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
+            if [ "$have" != "$want" ]; then
+                [ "$f" = "$TSO_ARM_FEX" ] &&
+                    die "TSO_ARM_FEX: $f was built with other patches ($have) than this tso-arm has ($want)"
+                stale=${stale:-"$(dirname "$(dirname "$f")") ($have)"}
+                continue
             fi
-            echo "$f"
-            return
         fi
+        echo "$f"
+        return
     done
+    [ -z "$stale" ] ||
+        die "the FEX in $stale was built with other patches than this tso-arm has ($want): 'tso-arm install' brings it up to date"
     die "FEX with the tso-arm patches not found: run 'tso-arm install' (or set TSO_ARM_FEX)"
 }
 
@@ -299,15 +357,17 @@ cmd_run() {
         aot=/dev/null/none
     fi
     if [ "$k" = dynamic ] && ! has_rootfs; then
-        die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
+        r=$(shared_rootfs) ||
+            die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
+        export FEX_ROOTFS="$r"
     fi
     F=$(fex)
     # FEX takes the root file system from its server, which lives as long as programs it started run (and a second
     # after): one started with another root file system serves this program too, whatever FEX_ROOTFS says
     if [ -n "$FEX_ROOTFS" ] && [ "$k" = dynamic ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
         r=$("$(dirname "$F")/FEXGetConfig" --current-rootfs 2>/dev/null)
-        if [ -n "$r" ] && [ "$(readlink -f "$r")" != "$(readlink -f "$FEX_ROOTFS")" ]; then
-            echo "tso-arm: FEX's server serves the root file system $r until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
+        if [ "$(readlink -f "${r:-/nonexistent}")" != "$(readlink -f "$FEX_ROOTFS")" ]; then
+            echo "tso-arm: FEX's server serves ${r:-no root file system} until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
         fi
     fi
     lib=${aot:-"$CACHE/aot/$(key "$prog" "$info").so"}
@@ -337,6 +397,11 @@ cmd_run() {
         esac
     fi
     thunks "$F"
+    # an empty XDG_* variable counts as unset (XDG base directory specification); FEX took it as set and looked for
+    # its configuration in /fex-emu/, and its server did not start
+    for x in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
+        eval "[ -n \"\${$x-unset}\" ] || unset $x"
+    done
     exec "$F" "$prog" "$@"
 }
 
@@ -376,7 +441,9 @@ cmd_learn() {
     static | pie) ;;
     dynamic)
         if ! has_rootfs; then
-            die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
+            r=$(shared_rootfs) ||
+                die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
+            export FEX_ROOTFS="$r"
         fi
         echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, and those of its shared libraries (for every program that uses them)"
         ;;
@@ -464,6 +531,17 @@ cmd_rootfs() {
     # without options: Ubuntu 24.04, unpacked, without questions (what tso-arm is tested with); with options, the
     # fetcher's own (--help)
     [ $# -gt 0 ] || set -- -y -x --distro-name=ubuntu --distro-version=24.04
+    # as root in an installation for every user: one root file system for all of them, beside the versions
+    # (FEX_APP_DATA_LOCATION: where the fetcher puts it; the configuration it writes goes nowhere, tso-arm run finds it)
+    if [ "$(id -u)" = 0 ] && d=$(installed_dir) && [ -z "$FEX_APP_DATA_LOCATION" ]; then
+        mkdir -p "$d/rootfs"
+        c=$(mktemp -d)
+        s=0
+        FEX_APP_DATA_LOCATION="$d/rootfs/" FEX_APP_CONFIG_LOCATION="$c/" "$fetcher" "$@" || s=$?
+        rm -rf "$c"
+        [ $s = 0 ] && r=$(shared_rootfs) && echo "tso-arm: the root file system for every user of $d: $r"
+        return $s
+    fi
     exec "$fetcher" "$@"
 }
 
@@ -475,6 +553,7 @@ forget) shift && cmd_forget "$@" ;;
 check) exec sh "$REPO/tools/board_check.sh" ;;
 install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
 uninstall) shift && cmd_uninstall "$@" ;;
+update) shift && cmd_update "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
 binfmt) shift && cmd_binfmt "$@" ;;
 version | --version) cmd_version ;;

@@ -55,6 +55,29 @@ jobs:
             exit 1
           fi
 
+      - name: Installed for every user from a release package (tools/get.sh as root), updated, removed
+        run: |
+          # a release package of this commit with the FEX built above (its source is not cached with it)
+          [ -f ~/.local/src/tso-arm/FEX/LICENSE ] && src=~/.local/src/tso-arm/FEX || { src=$(mktemp -d); echo FEX > $src/LICENSE; }
+          sh tools/package.sh ~/.local/opt/tso-arm dist "$src"
+          v=$(cat VERSION)
+          sudo TSO_ARM_TARBALL=$PWD/dist/tso-arm-$v-linux-arm64.tar.gz sh tools/get.sh
+          test "$(readlink /opt/tso-arm/current)" = "$v"
+          grep -q /opt/tso-arm/current/bin/tso-arm-binfmt /proc/sys/fs/binfmt_misc/tso-arm
+          grep -q /opt/tso-arm/current/bin/tso-arm-binfmt /proc/sys/fs/binfmt_misc/tso-arm-i386
+          tso-arm version
+          ./build/ci/threads 8 | grep 'wrong 0'
+          ./build/ci/threads32 8 | grep 'wrong 0'
+          # an update to a newer package: the link moves, the version before stays
+          t=$(mktemp -d) && tar -xzf dist/tso-arm-$v-linux-arm64.tar.gz -C $t
+          mv $t/tso-arm-$v $t/tso-arm-99.0.0 && echo 99.0.0 > $t/tso-arm-99.0.0/VERSION
+          tar -czf $t/tso-arm-99.0.0-linux-arm64.tar.gz -C $t tso-arm-99.0.0
+          sudo TSO_ARM_TARBALL=$t/tso-arm-99.0.0-linux-arm64.tar.gz tso-arm update
+          test "$(readlink /opt/tso-arm/current)" = 99.0.0 && test -d /opt/tso-arm/$v
+          ./build/ci/threads32 8 | grep 'wrong 0'
+          sudo tso-arm uninstall
+          test ! -e /opt/tso-arm && test ! -e /usr/local/bin/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm
+
       - name: Efficiency on this runner (informational)
         continue-on-error: true
         run: |

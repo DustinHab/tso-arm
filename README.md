@@ -32,24 +32,27 @@ On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer
 kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and `tso-arm check` names the line that changes that):
 
 ```sh
-git clone https://github.com/DustinHab/tso-arm && cd tso-arm
-bin/tso-arm install                     # FEX with the tso-arm patches, prebuilt: a few seconds
-bin/tso-arm check                       # whether this machine can run it
-bin/tso-arm rootfs                      # once, for dynamically linked programs: x86-64 Ubuntu from FEX's server
-bin/tso-arm run ./program args...       # an x86 Linux program, x86 memory order kept
-bin/tso-arm learn ./program args...     # optional: translate its hot functions ahead of time
+curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh
+tso-arm rootfs                          # once, for dynamically linked programs: x86-64 Ubuntu from FEX's server
+tso-arm run ./program args...           # an x86 Linux program, x86 memory order kept
+tso-arm learn ./program args...         # optional: translate its hot functions ahead of time
 ```
 
-`install` also links the command into `~/.local/bin`, so with that on the `PATH` it is just `tso-arm`. With
-`sudo bin/tso-arm binfmt register`, x86 programs started directly (`./program`) run through tso-arm too, for the
-whole system and after a reboot; `binfmt unregister` takes that back.
+The first line installs the newest release with FEX prebuilt (a few seconds, nothing is compiled) into
+`~/.local/share/tso-arm` and the command into `~/.local/bin`; `tso-arm update` brings it up to date later, `tso-arm
+uninstall` removes it. With `| sudo sh` instead it installs for every user: into `/opt/tso-arm`, the command into
+`/usr/local/bin`, and x86 programs started directly (`./program`, a double click) run through tso-arm, after a reboot
+as well; `sudo tso-arm rootfs` then fetches one root file system for all users.
+
+From a git checkout instead: `git clone https://github.com/DustinHab/tso-arm && tso-arm/bin/tso-arm install`
+(FEX prebuilt where the release has one for exactly these patches, otherwise built from source), and `sudo
+bin/tso-arm binfmt register` for programs started directly. `tso-arm check` says whether a machine can run it.
 
 `run` needs nothing beyond what every distribution has; `learn` needs `sudo apt install binutils python3
 python3-capstone clang linux-perf` (Ubuntu: `linux-tools-generic` for perf; it needs Capstone 5, and Ubuntu
-packages 4: `pip install --user capstone`). Without git, the [release package](https://github.com/DustinHab/tso-arm/releases) holds the same files
-and the prebuilt FEX: unpack it and run `bin/tso-arm install` in it. The prebuilt FEX needs glibc 2.35 or newer; on
-older systems, and with `install --source`, FEX is built from source (`git cmake ninja-build clang lld python3`,
-about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md` lists what each release changed.
+packages 4: `pip install --user capstone`). The prebuilt FEX needs glibc 2.35 or newer; on older systems, and with
+`install --source`, FEX is built from source (`git cmake ninja-build clang lld python3`, about 10 minutes on a Pi
+5). `CHANGELOG.md` lists what each release changed.
 
 `learn` runs the program a few times with the given arguments (profile, then a check of the translated functions
 against a run without them, then both timed against each other), so give it an input whose processing has no side
@@ -308,6 +311,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm status [PROGRAM]`, `tso-arm forget PROGRAM` | what was learned, and dropping it |
 | `tso-arm check` | the machine's requirements |
 | `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |
+| `tso-arm update` | the newest release, for an installation by `tools/get.sh` (`sudo` for one for every user) |
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
 | `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) run through tso-arm; register and unregister need root |
