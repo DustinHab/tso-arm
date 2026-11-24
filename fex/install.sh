@@ -139,6 +139,12 @@ case $tune in *none*) B="$B-generic" ;; esac
 thunks="-DBUILD_THUNKS=False"
 if [ "${TSO_ARM_THUNKS:-0}" = 1 ]; then
     thunks="-DBUILD_THUNKS=True -DENABLE_CLANG_THUNKS=True -DX86_DEV_ROOTFS=/"
+    # the thunk generator links libclang: the one of the clang that builds, not another version's CMake files that
+    # the system has without their libraries (Ubuntu 22.04's runner: clang 14, a partial clang 15)
+    v=$(clang --version | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -n 1)
+    if [ -n "$v" ] && [ -d "/usr/lib/llvm-$v/lib/cmake/clang" ]; then
+        thunks="$thunks -DClang_DIR=/usr/lib/llvm-$v/lib/cmake/clang -DLLVM_DIR=/usr/lib/llvm-$v/lib/cmake/llvm"
+    fi
     B="$B-thunks"
 fi
 mkdir -p "$B"
