@@ -58,7 +58,10 @@ tso-arm run --gpu ./game
 ```
 
 Vulkan goes through FEX's thunk to the computer's own Vulkan driver, OpenGL through Mesa's Zink (OpenGL on Vulkan)
-onto the same. It covers much but not all of Vulkan: try a program with and without `--gpu`. To have it for
+onto the same: on a Raspberry Pi 5 an x86 program's OpenGL then runs on the Pi's GPU (`zink Vulkan 1.3(V3D 7.1…)`).
+It covers much but not all of Vulkan: try a program with and without `--gpu`. OpenGL in a window needs an X server
+with DRI3 (desktops have it, Wayland's Xwayland too; Xvfb and some VNC servers do not): without it, leave `--gpu`
+off, or Vulkan programs only. 32-bit programs keep drawing with the x86 Mesa (FEX has no 32-bit Vulkan thunk). To have it for
 programs started directly, set `TSO_ARM_THUNKS=1` in the environment (for example in `~/.profile`); `TSO_ARM_MODE`
 does the same for the ordering mode.
 

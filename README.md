@@ -283,6 +283,13 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **32-bit x86 programs** run with FEX ordering every access itself (the page protocol is for x86-64 programs), as
   fast as FEX's full TSO; `learn` translates x86-64 code only. The root file system `tso-arm rootfs` fetches has the
   i386 libraries as well.
+- **Windows programs** through `tso-arm wine` (WineHQ's Wine 11, fetched on first use; notes section 58): a ring
+  buffer between two Win32 threads gets all of 20 million messages right with x86 order kept, some 350,000 wrong
+  without ordering. **AppImages** run unpacked (they find no `fusermount` in the root file system).
+- **Graphics:** x86 programs draw with the x86 Mesa of the root file system, which has no driver for the GPUs of many
+  Arm boards. `--gpu` sends Vulkan through FEX's thunk to the host's driver and puts OpenGL on it through Zink: on
+  the Pi 5 an x86-64 program's OpenGL reports `zink Vulkan 1.3(V3D 7.1.10.2)`. Off unless asked for (FEX's thunks
+  cover much, not all; Zink's window path needs DRI3, which desktops have).
 - **FEAT_LRCPC** (`ldapr`, Cortex-A55/A75/A76 and later) makes ordered loads as cheap as plain ones. Older cores
   (Cortex-A53, A72) get `ldar` instead, which orders at least as strongly and costs more; both paths are tested.
 - **Threads:** a thread with views of its own needs two 16 GB windows of address space. On a 39-bit address space
