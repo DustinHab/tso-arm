@@ -24,7 +24,9 @@ n=${MESSAGES:-20000000}
 wine=$root/usr/lib/wine/wine64
 server=$root/usr/lib/wine/wineserver64
 [ -x "$server" ] || server=$root/usr/lib/wine/wineserver
-export FEX_ROOTFS=$root WINEPREFIX=$R/build/wineprefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
+# Ubuntu's wine64 looks for its server as /usr/bin/wineserver, which is a script there; WINESERVER names the binary
+export FEX_ROOTFS=$root WINEPREFIX=$R/build/wineprefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" \
+    WINESERVER=$server
 # FEX's server keeps the root file system of the program that started it until a second after its last one
 for i in $(seq 50); do
     pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1 || break
