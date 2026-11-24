@@ -49,6 +49,9 @@ usage: tso-arm COMMAND [...]
   binfmt [register | unregister]
         whether x86 programs started directly (./program) run through tso-arm; register and unregister change
         that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
+  wine [install [VERSION] | PROGRAM.exe [ARGS...]]
+        Windows programs through Wine: WineHQ's build for Ubuntu 24.04 (the root file system's distribution),
+        fetched into ~/.local/share/tso-arm/wine on first use; needs the root file system ('tso-arm rootfs')
   version               this version and the FEX it uses
   report [PROGRAM [ARGS...]]
         what a bug report needs, to paste: versions, machine, root file system; with a program, what tso-arm knows
@@ -613,6 +616,7 @@ install) shift && exec sh "$REPO/fex/install.sh" "$@" ;;
 uninstall) shift && cmd_uninstall "$@" ;;
 update) shift && cmd_update "$@" ;;
 report) shift && cmd_report "$@" ;;
+wine) shift && exec sh "$REPO/tools/wine.sh" "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
 binfmt) shift && cmd_binfmt "$@" ;;
 version | --version) cmd_version ;;

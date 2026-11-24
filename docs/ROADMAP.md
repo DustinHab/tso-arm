@@ -94,6 +94,12 @@ On Arm servers and laptops, x86-64 container images run through binfmt_misc with
 `F` flag, so that it is found inside the container's own file system. That needs an interpreter without a dynamic
 loader of its own: FEX is dynamically linked against the host's libraries.
 
+Looked at: FEX's build has no static variant, and FEX will not start without its server (FEXServer, which it starts
+from its own path when none answers on its socket); inside a container both the server's socket (an abstract one,
+per network namespace) and the libraries the server and FEX link are missing. A container needs FEX and FEXServer
+linked statically (or the host's Arm libraries mounted in), and FEX's root file system set to the container's own
+`/`. Not started.
+
 ## 7. Wider tests
 
 CI runs command-line programs from x86-64 Ubuntu (sort, 7-Zip, Python, ffmpeg, Node, Java, Go, git, make). Not yet:

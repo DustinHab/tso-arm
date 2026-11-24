@@ -32,9 +32,13 @@ for i in $(seq 50); do
 done
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     s=$(date +%s)
-    timeout 1200 $T run $wine wineboot --init >/dev/null 2>&1 || true
+    timeout 1200 $T run $wine wineboot --init >$R/build/wineboot.log 2>&1 || true
     timeout 120 $T run $server -w || true
-    [ -f "$WINEPREFIX/system.reg" ] || { echo "FAIL: wineboot made no prefix"; exit 1; }
+    [ -f "$WINEPREFIX/system.reg" ] || {
+        echo "FAIL: wineboot made no prefix:"
+        tail -n 20 $R/build/wineboot.log
+        exit 1
+    }
     echo "ok:   a Wine prefix made in $(($(date +%s) - s)) s"
 fi
 fail=0
