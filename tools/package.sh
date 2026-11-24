@@ -27,7 +27,14 @@ trap 'rm -rf "$t"' EXIT
 F=$t/tso-arm-fex-$V
 mkdir -p "$F/licenses"
 cp -R "$P/bin" "$P/share" "$F/"
-sed "s/^built .*/built prebuilt, tso-arm $V, for any Armv8.0 core/" "$P/BUILD" >"$F/BUILD"
+# the thunks' host libraries (FEX's own libFEXCore.so is linked into its programs)
+if [ -d "$P/lib/fex-emu" ]; then
+    mkdir -p "$F/lib"
+    cp -R "$P/lib/fex-emu" "$F/lib/"
+fi
+th=""
+grep -q '^built .*with thunks' "$P/BUILD" && th=", with thunks"
+sed "s/^built .*/built prebuilt, tso-arm $V, for any Armv8.0 core$th/" "$P/BUILD" >"$F/BUILD"
 # FEX's license and those of the libraries built into it
 cp "$S/LICENSE" "$F/licenses/FEX"
 for d in "$S"/External/*/; do

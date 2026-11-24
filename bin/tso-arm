@@ -336,7 +336,19 @@ cmd_run() {
         *) export GODEBUG="${GODEBUG:+$GODEBUG,}asyncpreemptoff=1" ;;
         esac
     fi
+    thunks "$F"
     exec "$F" "$prog" "$@"
+}
+
+# FEX's thunks, where FEX was built with them: an x86 program's OpenGL and Vulkan calls go to the host's own Arm
+# libraries, and with them to the GPU's driver (the x86 Mesa of a root file system has no driver for the GPUs of many
+# Arm boards and draws with the CPU). The directories are given here because a prebuilt FEX was built for another
+# prefix. TSO_ARM_THUNKS=0 leaves them off; FEX_THUNKCONFIG names another selection (fex/thunks.json: GL, Vulkan).
+thunks() {
+    p=$(dirname "$(dirname "$1")")
+    [ "${TSO_ARM_THUNKS:-1}" != 0 ] && [ -d "$p/lib/fex-emu/HostThunks" ] || return 0
+    export FEX_THUNKHOSTLIBS="$p/lib/fex-emu/HostThunks" FEX_THUNKGUESTLIBS="$p/share/fex-emu/GuestThunks"
+    export FEX_THUNKCONFIG="${FEX_THUNKCONFIG:-$REPO/fex/thunks.json}"
 }
 
 # what `learn` translated: the program's library (TSO_AOT, for this program only: programs it starts with execve look

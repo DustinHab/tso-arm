@@ -1,4 +1,4 @@
-From d6e953b2c738d687e27a1f2d55f5ba70e96cfc57 Mon Sep 17 00:00:00 2001
+From c9961c7bdf2f23c093957dc1ea239ac4396d26f4 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -24,6 +24,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   56 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |    2 +
+ Source/Common/Config.cpp                      |   28 +-
  Source/Common/FDUtils.h                       |   32 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |   17 +
@@ -42,7 +43,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |   14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
- 38 files changed, 3226 insertions(+), 218 deletions(-)
+ 39 files changed, 3252 insertions(+), 220 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc85492..53dce36 100644
@@ -938,6 +939,66 @@ index c4cadf4..54c679d 100644
  #else
  void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
  #endif
+diff --git a/Source/Common/Config.cpp b/Source/Common/Config.cpp
+index 8d72358..df69e7a 100644
+--- a/Source/Common/Config.cpp
++++ b/Source/Common/Config.cpp
+@@ -21,6 +21,7 @@
+ #ifndef _WIN32
+ #include <linux/limits.h>
+ #include <pwd.h>
++#include <unistd.h>
+ #endif
+ #include <optional>
+ #include <utility>
+@@ -622,6 +623,29 @@ fextl::string GetHomeDirectory() {
+ }
+ #endif
+ 
++// tso-arm: the global data directory (application configs, the thunks' database and guest libraries) is compiled
++// in from the install prefix. A prebuilt FEX runs from wherever it was unpacked: where the compiled-in directory does
++// not exist, the one beside the running program is taken (<prefix>/bin/FEX -> <prefix>/share/fex-emu/).
++static fextl::string GlobalDataDirectory() {
++#ifndef _WIN32
++  if (!FHU::Filesystem::Exists(GLOBAL_DATA_DIRECTORY)) {
++    char Self[PATH_MAX];
++    const auto Length = readlink("/proc/self/exe", Self, sizeof(Self) - 1);
++    if (Length > 0) {
++      std::string_view SelfView {Self, static_cast<size_t>(Length)};
++      const auto Slash = SelfView.find_last_of('/');
++      if (Slash != std::string_view::npos) {
++        fextl::string Beside = fextl::fmt::format("{}/../share/fex-emu/", SelfView.substr(0, Slash));
++        if (FHU::Filesystem::Exists(Beside)) {
++          return Beside;
++        }
++      }
++    }
++  }
++#endif
++  return GLOBAL_DATA_DIRECTORY;
++}
++
+ fextl::string GetDataDirectory(bool Global, const PortableInformation& PortableInfo) {
+ #ifdef FEX_STEAM_SUPPORT
+   const char* SteamDataPath = getenv("STEAM_COMPAT_DATA_PATH");
+@@ -637,7 +661,7 @@ fextl::string GetDataDirectory(bool Global, const PortableInformation& PortableI
+   }
+ 
+   if (Global) {
+-    return GLOBAL_DATA_DIRECTORY;
++    return GlobalDataDirectory();
+   }
+ 
+   auto HomeDir = GetHomeDirectory();
+@@ -684,7 +708,7 @@ fextl::string GetConfigDirectory(bool Global, const PortableInformation& Portabl
+ 
+   fextl::string ConfigDir;
+   if (Global) {
+-    return GLOBAL_DATA_DIRECTORY;
++    return GlobalDataDirectory();
+   }
+ 
+   auto HomeDir = GetHomeDirectory();
 diff --git a/Source/Common/FDUtils.h b/Source/Common/FDUtils.h
 index f4e1d6b..943374f 100644
 --- a/Source/Common/FDUtils.h

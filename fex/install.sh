@@ -8,6 +8,8 @@
 #   TSO_ARM_PACKAGE: a FEX package downloaded beforehand (tso-arm-fex-VERSION-linux-arm64.tar.gz) to install
 #   TSO_ARM_PREFIX (default ~/.local/opt/tso-arm), TSO_ARM_SRC (default ~/.local/src/tso-arm/FEX): the FEX checkout
 #   TSO_ARM_FEX_REF: another FEX commit or branch than the one the patches were made on (origin/main: FEX's newest)
+#   TSO_ARM_THUNKS=1: built from source with FEX's thunks (x86 programs' OpenGL, Vulkan, EGL, Wayland, ALSA and libdrm
+#   calls go to the host's own libraries); needs libclang and the x86 cross C++ libraries (listed when missing)
 set -e
 R=$(cd "$(dirname "$0")/.." && pwd)
 SRC=${TSO_ARM_SRC:-$HOME/.local/src/tso-arm/FEX}
@@ -61,6 +63,10 @@ from_dir() {
     rm -rf "$PREFIX.new"
     mkdir -p "$PREFIX.new"
     cp -R "$1/bin" "$1/share" "$1/BUILD" "$PREFIX.new/"
+    # the thunks' host libraries, in a FEX built with them
+    if [ -d "$1/lib" ]; then
+        cp -R "$1/lib" "$PREFIX.new/"
+    fi
     rm -rf "$PREFIX"
     mv "$PREFIX.new" "$PREFIX"
 }
@@ -130,12 +136,23 @@ done
 
 B="$SRC/Build-tso-arm"
 case $tune in *none*) B="$B-generic" ;; esac
+thunks="-DBUILD_THUNKS=False"
+if [ "${TSO_ARM_THUNKS:-0}" = 1 ]; then
+    thunks="-DBUILD_THUNKS=True -DENABLE_CLANG_THUNKS=True -DX86_DEV_ROOTFS=/"
+    B="$B-thunks"
+fi
 mkdir -p "$B"
 cd "$B"
 CC=clang CXX=clang++ cmake -G Ninja .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DUSE_LINKER=lld -DENABLE_LTO=False -DBUILD_TESTING=False -DENABLE_ASSERTIONS=False \
-    -DBUILD_FEXCONFIG=False -DBUILD_THUNKS=False $tune >"$B/cmake.log" 2>&1 || {
+    -DBUILD_FEXCONFIG=False $thunks $tune >"$B/cmake.log" 2>&1 || {
     tail -n 20 "$B/cmake.log" >&2
+    if [ "${TSO_ARM_THUNKS:-0}" = 1 ]; then
+        g=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
+        echo "tso-arm install: the thunks need, on Debian or Ubuntu: sudo apt install libclang-dev llvm-dev libssl-dev pkg-config \\
+  libstdc++-${g:-N}-dev-amd64-cross libgcc-${g:-N}-dev-amd64-cross libstdc++-${g:-N}-dev-i386-cross libgcc-${g:-N}-dev-i386-cross \\
+  libgl-dev libegl-dev libx11-dev libxrandr-dev libxrender-dev libxcb1-dev libwayland-dev libdrm-dev libasound2-dev" >&2
+    fi
     exit 1
 }
 say "building (this takes a while; log in $B/build.log)"
@@ -148,5 +165,6 @@ case $tune in
 *none*) built="from source, for any Armv8.0 core" ;;
 *) built="from source, for this core" ;;
 esac
+[ "${TSO_ARM_THUNKS:-0}" = 1 ] && built="$built, with thunks"
 printf 'patches %s\nfex %s\nbuilt %s\n' "$(patches)" "$commit" "$built" >"$PREFIX/BUILD"
 finish "built $built"

@@ -28,11 +28,18 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q cmake ninja-build clang lld python3 git
+          # FEX's thunks: libclang for their generator, the x86 C++ libraries for their guest side, the host's headers
+          g=$(gcc -dumpversion | cut -d. -f1)
+          sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
+            libstdc++-$g-dev-amd64-cross libgcc-$g-dev-amd64-cross libstdc++-$g-dev-i386-cross libgcc-$g-dev-i386-cross \
+            libgl-dev libegl-dev libx11-dev libxrandr-dev libxrender-dev libxcb1-dev libwayland-dev libdrm-dev \
+            libasound2-dev
 
-      - name: Build FEX with the tso-arm patches, for any Armv8.0 core
+      - name: Build FEX with the tso-arm patches and its thunks, for any Armv8.0 core
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" /opt/tso-arm
-          TSO_ARM_PREFIX=/opt/tso-arm sh fex/install.sh --generic
+          TSO_ARM_PREFIX=/opt/tso-arm TSO_ARM_THUNKS=1 sh fex/install.sh --generic
+          ls /opt/tso-arm/lib/fex-emu/HostThunks /opt/tso-arm/share/fex-emu/GuestThunks
 
       - name: Packages for the release
         run: sh tools/package.sh /opt/tso-arm dist
