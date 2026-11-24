@@ -1,5 +1,22 @@
 # Changes
 
+## 0.4.4 (not released yet)
+
+What people run on an Arm computer beyond command-line x86-64 programs: `docs/ROADMAP.md` lists what was missing for
+that and is worked through from the top.
+
+- 32-bit x86 programs run: `tso-arm run` took only x86-64 programs, and `binfmt register` registered only them. FEX
+  orders every access of a 32-bit program itself (the page protocol is for x86-64 programs), as fast as `--mode
+  full`; `learn` says it translates x86-64 code only. `litmus/mp32.c` (message passing, vector and string stores,
+  load buffering) and a 32-bit `tests/threads.c` in `tests/ci.sh`, and started directly in CI.
+- `tso-arm run` no longer needs binutils: it reads a program's machine, kind and build ID itself (with `od` and
+  `awk`, from the file's first kilobyte), a few milliseconds faster than three `readelf` calls. Only `learn` needs
+  `readelf` still. `tests/elfinfo_check.sh` compares both over a root file system's programs and libraries (1,084
+  ELF files, x86-64 and i386: the same).
+- On a kernel with 16 or 64 KB pages, `tso-arm check` and `tso-arm install` say what to do: on a Raspberry Pi the
+  line in `config.txt` that boots Raspberry Pi OS's 4 KB-page kernel (the Pi 5 starts with a 16 KB one), on Apple
+  silicon that x86 programs run in a 4 KB-page virtual machine there.
+
 ## 0.4.3 (2026-11-22)
 
 Programs started from scripts and test runners no longer wait for FEX's server: a shell command substitution with

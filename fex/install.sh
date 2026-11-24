@@ -41,6 +41,7 @@ patches() { cat "$R"/fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16;
 # the command itself, on the user's PATH where the distribution puts ~/.local/bin
 finish() {
     say "FEX installed to $PREFIX ($1)"
+    sh "$R/tools/pages_hint.sh" | sed 's/^/tso-arm install: /' >&2 || true
     mkdir -p "$HOME/.local/bin"
     ln -sf "$R/bin/tso-arm" "$HOME/.local/bin/tso-arm"
     case ":$PATH:" in

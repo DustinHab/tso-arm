@@ -26,6 +26,10 @@ $CC -O2 -static -o build/ci/sigspin tests/sigspin.c
 $CC -O2 -static -pthread -o build/ci/sigsync tests/sigsync.c
 $CC -O2 -static -o build/ci/x87 tests/x87.c
 $CC -O2 -static -o build/ci/filemap tests/filemap.c
+# 32-bit (gcc-multilib, or CC_X86_32 a cross compiler)
+CC32=${CC_X86_32:-"$CC -m32"}
+$CC32 -O2 -msse2 -static -pthread -o build/ci/mp32 litmus/mp32.c
+$CC32 -O2 -static -pthread -o build/ci/threads32 tests/threads.c
 # dynamically linked, with this machine's C library as the root file system
 R=build/ci/rootfs
 LIBC=$($CC -print-file-name=libc.so.6)

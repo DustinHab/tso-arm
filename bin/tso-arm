@@ -21,9 +21,9 @@ usage() {
 usage: tso-arm COMMAND [...]
 
   run [--mode MODE] [--aot LIBRARY | --no-aot] [--stats] PROGRAM [ARGS...]
-        run an x86-64 Linux program. MODE: tso (default; x86 memory order kept, with the page protocol and what
-        'learn' translated), full (FEX's own full ordering), unordered (fastest, not correct for programs whose
-        threads share data without locks). --aot: a library of translated functions other than the learned one;
+        run an x86-64 or 32-bit x86 Linux program. MODE: tso (default; x86 memory order kept, with the page
+        protocol and what 'learn' translated; a 32-bit program as with full), full (FEX's own full ordering),
+        unordered (fastest, not correct for programs whose threads share data without locks). --aot: a library of translated functions other than the learned one;
         --no-aot: without what 'learn' translated.
         --stats: what the page protocol did, at the end (shared pages, ordered instructions, fallback)
   learn PROGRAM [ARGS...]
@@ -44,7 +44,7 @@ usage: tso-arm COMMAND [...]
   rootfs [OPTIONS]      fetch an x86-64 root file system for dynamically linked programs with FEX's own tool:
         without options Ubuntu 24.04, unpacked (about 2 GB); with options the tool's own (rootfs --help)
   binfmt [register | unregister]
-        whether x86-64 programs started directly (./program) run through tso-arm; register and unregister change
+        whether x86 programs started directly (./program) run through tso-arm; register and unregister change
         that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
   version               this version and the FEX it uses
 EOF
@@ -104,9 +104,11 @@ has_rootfs() {
     grep -qs '"RootFS"' "${c%/}/Config.json" "$PREFIX/share/fex-emu/Config.json"
 }
 
-# binfmt_misc: x86-64 ELF files, executables and position-independent ones (the magic and mask qemu-user registers)
-BINFMT_MAGIC='\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00'
+# binfmt_misc: x86-64 and 32-bit x86 ELF files, executables and position-independent ones (the magics and the mask
+# qemu-user registers). Entry name, magic, the machine's name.
 BINFMT_MASK='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
+BINFMT_ENTRIES='tso-arm \x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00 x86-64
+tso-arm-i386 \x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x03\x00 32-bit-x86'
 
 cmd_binfmt() {
     d=/proc/sys/fs/binfmt_misc
@@ -114,37 +116,46 @@ cmd_binfmt() {
     [ -f "$d/status" ] || die "binfmt_misc is not mounted here ($d)"
     case ${1:-} in
     "")
-        if [ -f "$d/tso-arm" ]; then
-            echo "x86-64 programs started directly run through tso-arm ($(head -n 1 "$d/tso-arm"), $(sed -n 's/^interpreter //p' "$d/tso-arm"))"
-        else
-            echo "x86-64 programs started directly do not run through tso-arm ('sudo $REPO/bin/tso-arm binfmt register')"
-        fi
-        for f in "$d"/*; do
-            case $(basename "$f") in register | status | tso-arm) continue ;; esac
-            if grep -q '^magic 7f454c4602010100000000000000000002003e00' "$f" 2>/dev/null; then
-                echo "another handler for x86-64 programs: $(basename "$f") ($(sed -n 's/^interpreter //p' "$f")); the one registered last is asked first"
+        printf '%s\n' "$BINFMT_ENTRIES" | while read -r name magic what; do
+            what=$(echo "$what" | tr - ' ')
+            if [ -f "$d/$name" ]; then
+                echo "$what programs started directly run through tso-arm ($(head -n 1 "$d/$name"), $(sed -n 's/^interpreter //p' "$d/$name"))"
+            else
+                echo "$what programs started directly do not run through tso-arm ('sudo $REPO/bin/tso-arm binfmt register')"
             fi
+            m=$(printf '%s' "$magic" | sed 's/\\x//g; s/^7fELF/7f454c46/')
+            for f in "$d"/*; do
+                case $(basename "$f") in register | status | tso-arm | tso-arm-i386) continue ;; esac
+                if grep -q "^magic $m" "$f" 2>/dev/null; then
+                    echo "another handler for $what programs: $(basename "$f") ($(sed -n 's/^interpreter //p' "$f")); the one registered last is asked first"
+                fi
+            done
         done
         ;;
     register)
         [ "$(id -u)" = 0 ] || die "binfmt register changes the system and needs root: sudo $REPO/bin/tso-arm binfmt register"
-        # the kernel reads the \x escapes itself; the line goes to it as written
-        line=":tso-arm:M::$BINFMT_MAGIC:$BINFMT_MASK:$REPO/bin/tso-arm-binfmt:"
-        if [ -f "$d/tso-arm" ]; then
-            echo -1 >"$d/tso-arm"
-        fi
-        printf '%s\n' "$line" >"$d/register"
         mkdir -p "$(dirname "$conf")"
-        printf '%s\n' "$line" >"$conf"
-        echo "tso-arm: x86-64 programs started directly run through $REPO/bin/tso-arm-binfmt now, and after a reboot ($conf)"
+        : >"$conf"
+        printf '%s\n' "$BINFMT_ENTRIES" | while read -r name magic what; do
+            # the kernel reads the \x escapes itself; the line goes to it as written
+            line=":$name:M::$magic:$BINFMT_MASK:$REPO/bin/tso-arm-binfmt:"
+            if [ -f "$d/$name" ]; then
+                echo -1 >"$d/$name"
+            fi
+            printf '%s\n' "$line" >"$d/register"
+            printf '%s\n' "$line" >>"$conf"
+        done
+        echo "tso-arm: x86-64 and 32-bit x86 programs started directly run through $REPO/bin/tso-arm-binfmt now, and after a reboot ($conf)"
         ;;
     unregister)
         [ "$(id -u)" = 0 ] || die "binfmt unregister changes the system and needs root: sudo $REPO/bin/tso-arm binfmt unregister"
-        if [ -f "$d/tso-arm" ]; then
-            echo -1 >"$d/tso-arm"
-        fi
+        for name in tso-arm tso-arm-i386; do
+            if [ -f "$d/$name" ]; then
+                echo -1 >"$d/$name"
+            fi
+        done
         rm -f "$conf"
-        echo "tso-arm: x86-64 programs started directly no longer run through tso-arm"
+        echo "tso-arm: x86 programs started directly no longer run through tso-arm"
         ;;
     *) die "binfmt: register, unregister, or nothing for the state" ;;
     esac
@@ -168,33 +179,70 @@ fex() {
     die "FEX with the tso-arm patches not found: run 'tso-arm install' (or set TSO_ARM_FEX)"
 }
 
+# What an ELF file is, read with od and awk (no binutils needed): its machine (x86-64, i386 or other), its kind
+# (static, pie, dynamic, or other) and the first 8 bytes of its GNU build ID in hex (- without one). The program
+# headers and the build ID note sit at the start of a file: its first KB is read (od is slow: 0.8 ms for it on a Pi 5),
+# the first 64 KB if they lie further.
+elfinfo() {
+    for lim in 1024 65536; do
+        r=$(od -An -v -tu1 -N $lim "$1" 2>/dev/null | LC_ALL=C awk -v last=$([ $lim = 1024 ] && echo 0 || echo 1) '
+        { for (i = 1; i <= NF; i++) b[n++] = $i + 0 }
+        function u(o, len,   v, k) { v = 0; for (k = len - 1; k >= 0; k--) v = v * 256 + b[o + k]; return v }
+        function out(m, k, id) { print m, k, id; done = 1 }
+        END {
+            if (n < 52 || b[0] != 127 || b[1] != 69 || b[2] != 76 || b[3] != 70 || b[5] != 1) { out("other", "other", "-"); exit }
+            c = b[4]; mach = u(18, 2); t = u(16, 2)
+            m = mach == 62 ? "x86-64" : mach == 3 ? "i386" : "other"
+            if (c == 2) { ph = u(32, 8); es = u(54, 2); pn = u(56, 2) }
+            else if (c == 1) { ph = u(28, 4); es = u(42, 2); pn = u(44, 2) }
+            else { out("other", "other", "-"); exit }
+            if (ph + es * pn > n) { if (last) out("other", "other", "-"); else print "more"; exit }
+            interp = 0; id = "-"
+            for (i = 0; i < pn; i++) {
+                o = ph + i * es; pt = u(o, 4)
+                if (pt == 3) interp = 1
+                if (pt != 4 || id != "-") continue
+                if (c == 2) { q = u(o + 8, 8); end = q + u(o + 32, 8) } else { q = u(o + 4, 4); end = q + u(o + 16, 4) }
+                if (end > n) { if (last) continue; print "more"; exit }
+                while (q + 12 <= end) {
+                    ns = u(q, 4); ds = u(q + 4, 4); nt = u(q + 8, 4)
+                    d = q + 12 + int((ns + 3) / 4) * 4
+                    if (nt == 3 && ns == 4 && b[q + 12] == 71 && b[q + 13] == 78 && b[q + 14] == 85 && ds > 0) {
+                        id = ""
+                        for (k = 0; k < ds && k < 8; k++) id = id sprintf("%02x", b[d + k])
+                        break
+                    }
+                    q = d + int((ds + 3) / 4) * 4
+                }
+            }
+            out(m, interp ? "dynamic" : t == 3 ? "pie" : t == 2 ? "static" : "other", id)
+        }')
+        [ "$r" = more ] || break
+    done
+    echo "${r:-other other -}"
+}
+
+# x86-64 | i386 | other: the program's machine
+machine() {
+    set -- $(elfinfo "$1")
+    echo "$1"
+}
+
 # static | pie | dynamic | other: what kind of program the file is
 kind() {
-    command -v readelf >/dev/null || die "readelf not found (binutils)"
-    h=$(LC_ALL=C readelf -h "$1" 2>/dev/null) || {
-        echo other
-        return
-    }
-    echo "$h" | grep -q 'Machine:.*X86-64' || {
-        echo other
-        return
-    }
-    if LC_ALL=C readelf -lW "$1" 2>/dev/null | grep -q 'INTERP'; then
-        echo dynamic
-    elif echo "$h" | grep -q 'Type:.*DYN'; then
-        echo pie
-    else
-        echo static
-    fi
+    set -- $(elfinfo "$1")
+    [ "$1" = other ] && echo other || echo "$2"
 }
 
 # the name the ahead-of-time library of a program is kept under: its file name and its build ID, or a hash of its
 # contents when it has none (the build ID saves reading a large program at every start; FEX checks every translated
-# function against the program's code before it uses it either way)
+# function against the program's code before it uses it either way). key FILE [ELFINFO]: what elfinfo said of the
+# file, when it was read already.
 key() {
     p=$(readlink -f "$1")
-    id=$(LC_ALL=C readelf -n "$p" 2>/dev/null | sed -n 's/^ *Build ID: *//p' | cut -c1-16)
-    if [ -z "$id" ]; then
+    i=${2:-$(elfinfo "$p")}
+    id=${i##* }
+    if [ "$id" = - ] || [ -z "$id" ]; then
         id=$(sha256sum "$p" | cut -c1-16)
     fi
     echo "$(basename "$p")-$id"
@@ -238,8 +286,18 @@ cmd_run() {
     prog=$1
     shift
     [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $prog"
-    k=$(kind "$prog")
-    [ "$k" = other ] && die "$prog is not an x86-64 Linux program"
+    info=$(elfinfo "$prog")
+    m=${info%% *}
+    k=${info#* }
+    k=${k%% *}
+    [ "$m" = other ] || [ "$k" = other ] && die "$prog is not an x86 Linux program (x86-64 or 32-bit x86)"
+    # 32-bit programs: the page protocol works on x86-64 programs; FEX orders every access of a 32-bit one itself
+    # (correct, as fast as --mode full), and 'learn' translates x86-64 code only
+    if [ "$m" = i386 ] && [ "$mode" = tso ]; then
+        mode=full
+        [ -n "$TSO_VIEWS_STATS" ] && echo "tso-arm: $(basename "$prog") is a 32-bit program: FEX orders all of its accesses (the page protocol is for x86-64 programs)" >&2
+        aot=/dev/null/none
+    fi
     if [ "$k" = dynamic ] && ! has_rootfs; then
         die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
     fi
@@ -252,7 +310,7 @@ cmd_run() {
             echo "tso-arm: FEX's server serves the root file system $r until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
         fi
     fi
-    lib=${aot:-"$CACHE/aot/$(key "$prog").so"}
+    lib=${aot:-"$CACHE/aot/$(key "$prog" "$info").so"}
     export FEX_DISABLETELEMETRY=${FEX_DISABLETELEMETRY:-1}
     case $mode in
     tso)
@@ -300,6 +358,8 @@ cmd_learn() {
     prog=$1
     shift
     [ -f "$prog" ] || prog=$(command -v "$prog" 2>/dev/null) || die "no program $prog"
+    [ "$(machine "$prog")" = i386 ] &&
+        die "$(basename "$prog") is a 32-bit program: 'learn' translates x86-64 code; 'tso-arm run' runs it with FEX ordering all of its accesses"
     case $(kind "$prog") in
     static | pie) ;;
     dynamic)
@@ -308,9 +368,9 @@ cmd_learn() {
         fi
         echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, and those of its shared libraries (for every program that uses them)"
         ;;
-    *) die "$prog is not an x86-64 Linux program" ;;
+    *) die "$prog is not an x86 Linux program" ;;
     esac
-    for t in python3 clang perf; do
+    for t in python3 clang perf readelf; do
         command -v $t >/dev/null || die "learn needs $t"
     done
     python3 -c 'import capstone' 2>/dev/null || die "learn needs the Python module capstone (pip install capstone)"

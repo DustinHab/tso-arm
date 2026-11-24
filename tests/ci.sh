@@ -4,11 +4,13 @@
 # stack), more threads than view slots, the litmus tests under the page protocol and with translated thread
 # functions, and a ring buffer that relies on x86 order. Outputs that need a reference are compared with FEX's own
 # full ordering. Exit status 1 on the first failure.
-#   tests/ci.sh          CC_X86 (default x86_64-linux-gnu-gcc), ITER (litmus iterations, default 200000)
+#   tests/ci.sh          CC_X86 (default x86_64-linux-gnu-gcc), CC_X86_32 (default i686-linux-gnu-gcc), ITER (litmus
+#                        iterations, default 200000)
 set -e
 cd "$(dirname "$0")/.."
 T=bin/tso-arm
 CC=${CC_X86:-x86_64-linux-gnu-gcc}
+CC32=${CC_X86_32:-i686-linux-gnu-gcc}
 N=${ITER:-200000}
 B=build/ci
 mkdir -p $B out/aot
@@ -46,8 +48,19 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
+    # 32-bit x86 programs (CC_X86_32, default i686-linux-gnu-gcc; skipped without one)
+    if command -v $CC32 >/dev/null; then
+        $CC32 -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
+        $CC32 -O2 -static -pthread -o $B/threads32 tests/threads.c
+    fi
 fi
 sh tools/board_check.sh | sed 's/^/      /'
+
+# what tso-arm reads of a program without binutils (machine, kind, build ID), against readelf
+if command -v readelf >/dev/null; then
+    out=$(last sh tests/elfinfo_check.sh $B) || fail "$out"
+    ok "$out"
+fi
 
 # struct fields and a stack shared between threads: the same output as FEX's full ordering
 for p in "fields 1000" "sharedstack 2000"; do
@@ -248,4 +261,18 @@ echo "      ring buffer without ordering, for comparison: $($T run --mode unorde
 # the same after a start with one thread: what was translated while the views slept does not run on with two threads
 out=$($T run $B/wake 20000000) || fail "ring buffer after one thread: $out"
 ok "$out"
+
+# 32-bit x86 programs: FEX orders all of their accesses (the page protocol is for x86-64 programs)
+if [ -x $B/mp32 ]; then
+    for v in mp vec rep lb; do
+        out=$(last $T run $B/mp32 $v $N) || fail "32-bit litmus $v: $out"
+        ok "32-bit litmus: $out"
+    done
+    echo "      32-bit vec without ordering, for comparison: $($T run --mode unordered $B/mp32 vec $N | tail -n 1 || true)"
+    out=$($T run $B/threads32 8 | tail -n 1)
+    echo "$out" | grep -q 'wrong 0' || fail "32-bit threads: $out"
+    ok "32-bit threads 8: $out"
+else
+    echo "      32-bit programs: not built (no $CC32)"
+fi
 echo "all tests passed"

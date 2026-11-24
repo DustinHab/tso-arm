@@ -11,7 +11,12 @@ bad() { say "$1" "$2  <- needed"; ok=0; }
 
 [ "$(uname -m)" = aarch64 ] && say "architecture" "aarch64" || bad "architecture" "$(uname -m)"
 ps=$(getconf PAGESIZE)
-[ "$ps" = 4096 ] && say "page size" "4 KB" || bad "page size" "$((ps / 1024)) KB (FEX and the views need a 4 KB-page kernel)"
+if [ "$ps" = 4096 ]; then
+    say "page size" "4 KB"
+else
+    bad "page size" "$((ps / 1024)) KB (FEX and the views need a 4 KB-page kernel)"
+    sh tools/pages_hint.sh | sed 's/^/    /'
+fi
 cfg=/boot/config-$(uname -r)
 va=$( (cat $cfg 2>/dev/null || zcat /proc/config.gz 2>/dev/null) | sed -n 's/^CONFIG_ARM64_VA_BITS=//p')
 say "virtual address bits" "${va:-unknown} (39 or more: 15 threads with views of their own, more share them in the fallback)"
@@ -37,7 +42,7 @@ if command -v clang >/dev/null; then
     rm -rf "$d"
 fi
 say "FEAT_LSE (atomics)" "$(has atomics)"
-command -v readelf >/dev/null && say "readelf" "found" || bad "readelf" "missing (binutils)"
+command -v readelf >/dev/null && say "readelf" "found (for 'learn')" || say "readelf" "missing (binutils): only 'learn' needs it"
 gv=$(getconf GNU_LIBC_VERSION 2>/dev/null | sed 's/^glibc //')
 case $gv in
 2.3[5-9]* | 2.[4-9]* | [3-9].*) say "glibc" "$gv" ;;

@@ -3,7 +3,8 @@
 [![CI](https://github.com/DustinHab/tso-arm/actions/workflows/ci.yml/badge.svg)](https://github.com/DustinHab/tso-arm/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/DustinHab/tso-arm)](https://github.com/DustinHab/tso-arm/releases)
 
-Run x86-64 Linux programs on 64-bit Arm with x86's memory order kept, at up to 90 % of native speed.
+Run x86-64 Linux programs on 64-bit Arm with x86's memory order kept, at up to 90 % of native speed; 32-bit x86
+programs run as well.
 
 Multithreaded x86 programs rely on x86's memory order: what one thread writes, the others see in the order it was
 written. Arm processors do not guarantee that. An x86 emulator on Arm therefore orders every memory access, and that
@@ -28,24 +29,24 @@ libraries translated ahead of time: 82 % of the host's own Arm builds, against 6
 ## Quick start
 
 On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS with the 4 KB
-kernel):
+kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and `tso-arm check` names the line that changes that):
 
 ```sh
 git clone https://github.com/DustinHab/tso-arm && cd tso-arm
 bin/tso-arm install                     # FEX with the tso-arm patches, prebuilt: a few seconds
 bin/tso-arm check                       # whether this machine can run it
 bin/tso-arm rootfs                      # once, for dynamically linked programs: x86-64 Ubuntu from FEX's server
-bin/tso-arm run ./program args...       # an x86-64 Linux program, x86 memory order kept
+bin/tso-arm run ./program args...       # an x86 Linux program, x86 memory order kept
 bin/tso-arm learn ./program args...     # optional: translate its hot functions ahead of time
 ```
 
 `install` also links the command into `~/.local/bin`, so with that on the `PATH` it is just `tso-arm`. With
-`sudo bin/tso-arm binfmt register`, x86-64 programs started directly (`./program`) run through tso-arm too, for the
+`sudo bin/tso-arm binfmt register`, x86 programs started directly (`./program`) run through tso-arm too, for the
 whole system and after a reboot; `binfmt unregister` takes that back.
 
-`run` needs `readelf` (binutils); `learn` needs `sudo apt install python3 python3-capstone clang linux-perf` as
-well (Ubuntu: `linux-tools-generic` for perf; it needs Capstone 5, and Ubuntu packages 4: `pip install --user
-capstone`). Without git, the [release package](https://github.com/DustinHab/tso-arm/releases) holds the same files
+`run` needs nothing beyond what every distribution has; `learn` needs `sudo apt install binutils python3
+python3-capstone clang linux-perf` (Ubuntu: `linux-tools-generic` for perf; it needs Capstone 5, and Ubuntu
+packages 4: `pip install --user capstone`). Without git, the [release package](https://github.com/DustinHab/tso-arm/releases) holds the same files
 and the prebuilt FEX: unpack it and run `bin/tso-arm install` in it. The prebuilt FEX needs glibc 2.35 or newer; on
 older systems, and with `install --source`, FEX is built from source (`git cmake ninja-build clang lld python3`,
 about 10 minutes on a Pi 5). `tso-arm uninstall` removes it again; `CHANGELOG.md` lists what each release changed.
@@ -267,8 +268,12 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 
 ## Where it runs
 
-- **64-bit Arm Linux with 4 KB pages.** FEX needs them, and the views protect memory per 4 KB page; on a kernel with
-  16 or 64 KB pages the views stay off and FEX orders everything itself.
+- **64-bit Arm Linux with 4 KB pages.** FEX needs them, and the views protect memory per 4 KB page. On a kernel with
+  16 or 64 KB pages `tso-arm check` says what to do: on a Raspberry Pi 5, one line in `config.txt` boots Raspberry
+  Pi OS's 4 KB-page kernel.
+- **32-bit x86 programs** run with FEX ordering every access itself (the page protocol is for x86-64 programs), as
+  fast as FEX's full TSO; `learn` translates x86-64 code only. The root file system `tso-arm rootfs` fetches has the
+  i386 libraries as well.
 - **FEAT_LRCPC** (`ldapr`, Cortex-A55/A75/A76 and later) makes ordered loads as cheap as plain ones. Older cores
   (Cortex-A53, A72) get `ldar` instead, which orders at least as strongly and costs more; both paths are tested.
 - **Threads:** a thread with views of its own needs two 16 GB windows of address space. On a 39-bit address space
@@ -298,14 +303,14 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 
 | | |
 |---|---|
-| `tso-arm run [--mode tso\|full\|unordered] [--aot LIB] PROGRAM [ARGS]` | run an x86-64 program (default `tso`: x86 order kept) |
+| `tso-arm run [--mode tso\|full\|unordered] [--aot LIB] PROGRAM [ARGS]` | run an x86-64 or 32-bit x86 program (default `tso`: x86 order kept) |
 | `tso-arm learn PROGRAM [ARGS]` | translate its hot functions ahead of time, check them, keep them if faster |
 | `tso-arm status [PROGRAM]`, `tso-arm forget PROGRAM` | what was learned, and dropping it |
 | `tso-arm check` | the machine's requirements |
 | `tso-arm install [--source\|--generic]` | FEX with the patches into `~/.local/opt/tso-arm`, prebuilt; `--source`: built for this core, `--generic`: built for any Armv8.0 core |
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
-| `tso-arm binfmt [register \| unregister]` | x86-64 programs started directly (`./program`) run through tso-arm; register and unregister need root |
+| `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) run through tso-arm; register and unregister need root |
 | `tso-arm version` | the version, and the FEX it uses |
 
 ## Layout
@@ -321,6 +326,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `bench/` | microbenchmarks of ordered accesses, workload and efficiency runs, Box64 |
 | `tools/` | board check, sync and run scripts for the test machine |
 | `docs/NOTES.md` | measurements, decisions and findings in order |
+| `docs/ROADMAP.md` | what is missing for everyday use, and what was done about it |
 
 ## Test machine
 

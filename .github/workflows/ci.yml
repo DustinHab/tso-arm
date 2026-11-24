@@ -17,7 +17,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q cmake ninja-build clang lld python3 python3-pip binutils \
-            gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+            gcc-x86-64-linux-gnu libc6-dev-amd64-cross gcc-i686-linux-gnu libc6-dev-i386-cross
           # Ubuntu 24.04 packages Capstone 4; the translator is written against 5
           python3 -m pip install --user --break-system-packages 'capstone>=5,<6'
 
@@ -45,6 +45,8 @@ jobs:
           bin/tso-arm binfmt
           ./build/ci/threads 8 | tee /tmp/direct.txt
           grep -q 'wrong 0' /tmp/direct.txt
+          ./build/ci/threads32 8 | tee /tmp/direct32.txt
+          grep -q 'wrong 0' /tmp/direct32.txt
           other=$(bin/tso-arm binfmt | grep -c 'another handler' || true)
           sudo bin/tso-arm binfmt unregister
           bin/tso-arm binfmt
