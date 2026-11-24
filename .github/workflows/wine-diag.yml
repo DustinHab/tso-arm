@@ -1,0 +1,60 @@
+name: Wine diagnosis
+
+# By hand: the steps of tests/winehq_check.sh one at a time, each with its own time limit, with the kernel's messages
+# and the machine's memory written into the log as they come (a Wine run hung the machine it ran on).
+on:
+  workflow_dispatch:
+    inputs:
+      modes:
+        description: ordering modes to run the program in, in this order
+        default: full tso
+      messages:
+        description: messages of the ring buffer
+        default: '2000000'
+
+jobs:
+  diag:
+    name: Wine, step by step
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 zstd squashfs-tools gcc-mingw-w64-x86-64
+      - name: FEX with the tso-arm patches (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+      - name: Build FEX
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: bin/tso-arm install --generic
+      - name: Windows program
+        run: x86_64-w64-mingw32-gcc -O2 -o spsc.exe tests/win/spsc.c
+      - name: Root file system
+        timeout-minutes: 15
+        run: bin/tso-arm rootfs 2>&1 | tail -n 5; ls ~/.local/share/fex-emu/RootFS/
+      - name: Wine
+        timeout-minutes: 10
+        run: bin/tso-arm wine install
+      - name: Prefix and program, with the kernel's messages and memory alongside
+        timeout-minutes: 30
+        run: |
+          sudo dmesg -n 7 || true
+          sudo dmesg -w --time-format iso | sed 's/^/kernel: /' &
+          ( while :; do echo "memory: $(date +%T) $(free -m | awk '/^Mem/ { print $3 " MB used, " $7 " MB available" }') load $(cut -d' ' -f1 /proc/loadavg)"; sleep 5; done ) &
+          export WINEPREFIX=$HOME/.wine-diag WINEDEBUG=err+all
+          w=$(bin/tso-arm wine | sed -n 's/^Wine .* in \(.*\)$/\1/p')/opt/wine-stable/bin/wineserver
+          echo "== wineboot, full ordering"
+          TSO_ARM_MODE=full timeout -k 10 600 bin/tso-arm wine wineboot --init 2>&1 | tail -n 15; echo "status $?"
+          TSO_ARM_MODE=full timeout -k 10 60 bin/tso-arm run $w -w; echo "server ended: $?"
+          ls $WINEPREFIX
+          for m in ${{ github.event.inputs.modes }}; do
+            echo "== spsc.exe, $m"
+            TSO_ARM_MODE=$m timeout -k 10 300 bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} 2>&1 | tail -n 6; echo "status $?"
+            TSO_ARM_MODE=full timeout -k 10 60 bin/tso-arm run $w -k; echo "server killed: $?"
+            ps -eo pid,etime,pcpu,args | grep -E 'FEX|wine' | grep -v grep | cut -c1-150 | head
+          done
