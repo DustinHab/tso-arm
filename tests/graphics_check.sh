@@ -40,7 +40,18 @@ check() {
         "exit status $st: $(printf '%s\n' "$out" | grep -v 'Unknown Vulkan' | tail -n 2 | tr '\n' ' ')"
 }
 check "x86 Mesa" FAIL FAIL FAIL $T run
-check "--gpu" FAIL info FAIL $T run --gpu
+# without a GPU (GitHub's runners) Zink passes over the host's CPU device (lavapipe) unless told to take it: then
+# OpenGL under --gpu draws with Zink on the host's llvmpipe (128 bits), which shows the path through the Vulkan thunk
+if ls /dev/dri/renderD* >/dev/null 2>&1; then
+    check "--gpu" FAIL info FAIL $T run --gpu
+else
+    check "--gpu (no GPU here: Zink on the host's CPU device)" FAIL info FAIL env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=zink $T run --gpu
+fi
+case $(EGL_PLATFORM=surfaceless timeout 120 env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=zink $T run --gpu $R/usr/bin/eglinfo -p surfaceless 2>&1 |
+    sed -n 's/^OpenGL \(core\|compatibility\) profile renderer: //p' | head -n 1) in
+*zink*) echo "ok:   --gpu: OpenGL through Zink and the Vulkan thunk" ;;
+*) echo "FAIL: --gpu: OpenGL did not go through Zink" && fail=1 ;;
+esac
 check "FEX's OpenGL thunk" info info info env TSO_ARM_THUNKS=1 FEX_THUNKCONFIG=$gl MESA_LOADER_DRIVER_OVERRIDE= $T run
 rm -f $gl
 exit $fail
