@@ -17,7 +17,7 @@ PREFIX=${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}
 VERSION=$(cat "$R/VERSION")
 RELEASE=https://github.com/DustinHab/tso-arm/releases/download/v$VERSION
 PACKAGE=tso-arm-fex-$VERSION-linux-arm64.tar.gz
-BASE=be66e03 # the FEX commit the patches apply to
+BASE=8e980598 # the FEX commit the patches apply to (2026-11-24)
 if [ -n "$TSO_ARM_FEX_REF" ]; then
     BASE=$TSO_ARM_FEX_REF
 fi

@@ -1,4 +1,4 @@
-From 5d4bf47d83d3d13fc279fccf0cf56002c84af342 Mon Sep 17 00:00:00 2001
+From 21c4feefb02687a75ce7515e21c81da0ddec5d0f Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 10:16:00 +0100
 Subject: [PATCH 1/2] tso-arm: stage 2: guest memory views with the page
@@ -57,7 +57,7 @@ index 61385d2c31c26205d07fb0946fddc97be47982a7..8786e6988be9e2926156b417bab2057e
    Interface/IR/Passes/x87StackOptimizationPass.cpp
    Utils/LongJump.cpp
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 9b91055bd084b0b15137eca8a2414faf1894afa7..dc854922615a9d1a3509965dd265c4a647f63ea7 100644
+index cc29b1f51a1ed47c96a829de0ef9fde09ad1477c..18f08b861e4b979c9b12b6317138519dccccb50b 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
 @@ -243,6 +243,16 @@ public:
@@ -77,7 +77,7 @@ index 9b91055bd084b0b15137eca8a2414faf1894afa7..dc854922615a9d1a3509965dd265c4a6
    void MarkMonoDetected() override {
      MonoDetected = true;
    }
-@@ -510,6 +520,12 @@ private:
+@@ -501,6 +511,12 @@ private:
      void* Data;
    };
    fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
@@ -593,7 +593,7 @@ index d7b716cab9c269c1ef4c77edf0281b3f258970c5..7c1260756b33e35465f5256e8a87b309
    // TMP1 = Length
    // TMP2 = Dest
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
-index 901a922872ca3e8ca0912f5ec91ce6da78797da9..3eb2fbb0c0b6a40dd9fd264d981fddc72ac26e07 100644
+index a19bf5de103979f371972b7d40715dafb90fbde9..b1eb827185b1ed5ee652c11bcf728a668149bc4a 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
 @@ -465,7 +465,7 @@ void OpDispatchBuilder::LEAVEOp(OpcodeArgs) {
@@ -605,7 +605,7 @@ index 901a922872ca3e8ca0912f5ec91ce6da78797da9..3eb2fbb0c0b6a40dd9fd264d981fddc7
    auto NewGPR = Pop(OperandSize, SP);
  
    // Store the new stack pointer
-@@ -3056,7 +3056,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
+@@ -3058,7 +3058,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
  
    const auto PushValue = [&](IR::OpSize Size, Ref Src) -> Ref {
      auto OldSP = LoadGPRRegister(X86State::REG_RSP);
@@ -614,7 +614,7 @@ index 901a922872ca3e8ca0912f5ec91ce6da78797da9..3eb2fbb0c0b6a40dd9fd264d981fddc7
  
      // Store the new stack pointer
      StoreGPRRegister(X86State::REG_RSP, NewSP);
-@@ -3336,7 +3336,7 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
+@@ -3338,7 +3338,7 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
  
      Ref Counter = LoadGPRRegister(X86State::REG_RCX);
  
@@ -623,7 +623,7 @@ index 901a922872ca3e8ca0912f5ec91ce6da78797da9..3eb2fbb0c0b6a40dd9fd264d981fddc7
      StoreGPRRegister(X86State::REG_RCX, Constant(0));
      StoreGPRRegister(X86State::REG_RDI, Result);
    }
-@@ -3370,7 +3370,7 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
+@@ -3372,7 +3372,7 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
  
      Ref Result_Src = _AllocateGPR(false);
      Ref Result_Dst = _AllocateGPR(false);
@@ -633,7 +633,7 @@ index 901a922872ca3e8ca0912f5ec91ce6da78797da9..3eb2fbb0c0b6a40dd9fd264d981fddc7
      if (DstSegment) {
        Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837a20ced1b 100644
+index 91fbb16455e3d0defa41e4f7b51f68d89a81a48a..50fdc64b835879ba23eba5aa8be502a65bedd96c 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 @@ -5,6 +5,7 @@
@@ -644,7 +644,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
  #include "Interface/IR/IR.h"
  #include "Interface/IR/IREmitter.h"
  #include "Interface/IR/RegisterAllocationData.h"
-@@ -1195,7 +1196,15 @@ public:
+@@ -1257,7 +1258,15 @@ public:
      _StoreContext(Size, Class, Value, Offset);
    }
  
@@ -661,7 +661,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
      // At block boundaries, fix up the carry flag.
      if (!SRAOnly) {
        RectifyCarryInvert(CFInvertedABI);
-@@ -1231,13 +1240,19 @@ public:
+@@ -1293,13 +1302,19 @@ public:
      // We have an SRA only mode that exists as a hack to make register caching
      // less aggressive. We should get rid of this once RA can take it.
      uint64_t Mask = ~0ULL;
@@ -683,7 +683,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
      }
  
      if (MMXOnly) {
-@@ -1294,8 +1309,8 @@ public:
+@@ -1356,8 +1371,8 @@ public:
      }
  
      RegCache.Written &= ~Mask;
@@ -694,7 +694,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
    }
  
    IR::OpSize GetGPROpSize() const {
-@@ -1601,7 +1616,9 @@ private:
+@@ -1663,7 +1678,9 @@ private:
  
    [[nodiscard]]
    static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
@@ -705,7 +705,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
    }
  
    AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
-@@ -2717,13 +2734,32 @@ private:
+@@ -2779,13 +2796,32 @@ private:
      return _StoreMemPairAutoTSO(RegClass::FPR, Size, A, Value1, Value2, Align);
    }
  
@@ -739,7 +739,7 @@ index 4477c7266c85e92cd7377b374b0fcbb7f8a44bfa..360d6053d99f131d9d30199ed66b0837
      Ref SP = _RMWHandle(LoadGPRRegister(X86State::REG_RSP));
      Ref Value = _AllocateGPR(false);
  
-@@ -2741,9 +2777,20 @@ private:
+@@ -2803,9 +2839,20 @@ private:
      return AlreadyExtended ? Value : _VMov(Size, Value);
    }
  
@@ -1489,10 +1489,10 @@ index 0f0a9c8edf8d0ceb9a2c5e0bdfa604bafed0e53c..26f579fef5962e87c7af2810748f1866
        }
  
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index 8aa448e2e68de002ba7e57da6888fcd024c79e39..ddec22912ee7cbae4205aa523b86a2f71a37b835 100644
+index bee26bdfcc7d464573dbce2c7bf5aee5ab848a08..af14fc4b92d25141a3a21c6ab9642c1c10eb7b85 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
-@@ -192,6 +192,27 @@ public:
+@@ -184,6 +184,27 @@ public:
  
    FEX_DEFAULT_VISIBILITY virtual void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) = 0;
  
@@ -1521,10 +1521,10 @@ index 8aa448e2e68de002ba7e57da6888fcd024c79e39..ddec22912ee7cbae4205aa523b86a2f7
  
    FEX_DEFAULT_VISIBILITY virtual void MarkMonoBackpatcherBlock(uint64_t BlockEntry) = 0;
 diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
-index 21120738bc67cfdeef805ec3b7f72c55ccdb4614..19ae82f261e8669140a5292a453dc06380287b7d 100644
+index 7c02605f5dce06299b5e24c396e5fd642d92a802..5129f9ea6564ed511a8be91ed5036586662224ef 100644
 --- a/FEXCore/include/FEXCore/Core/CoreState.h
 +++ b/FEXCore/include/FEXCore/Core/CoreState.h
-@@ -474,6 +474,9 @@ struct CpuStateFrame {
+@@ -471,6 +471,9 @@ struct CpuStateFrame {
  
    InternalThreadState* Thread;
  
@@ -1680,7 +1680,7 @@ index 715a8f13259539710c209aba5ef62dc880474c5b..66f67f2142ec0a0d8c7c8ed8154ebd73
    LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
    LinuxSyscalls/Utils/Threads.cpp
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index b4c7b24b3798e904046d75a9daff1e8adc172df3..da2b9712c3b0ada66f024f72942b59189b2f4179 100644
+index 345f4d834ea268ad27eca347f128a35798d22372..ec240a554428f7b2a9d9cfe1d6920a217fe553b3 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -1691,7 +1691,7 @@ index b4c7b24b3798e904046d75a9daff1e8adc172df3..da2b9712c3b0ada66f024f72942b5918
  
  #include <FEXCore/Core/Context.h>
  #include <FEXCore/Core/CoreState.h>
-@@ -993,9 +994,18 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1012,9 +1013,18 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
      }
  
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSIGBUSCount, 1);
@@ -1738,7 +1738,7 @@ index 9397c9eb4cd549948b5abf6d42b0845cf2b5cb0d..e0002c3ce91b7810352e84af571e8bdb
  
      if (Result != -1) {
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index 4ea460aca744f1b55cbf52dfc27c9af5a3724302..76c7e6be0d3b000c7b5551c70e33af75499dbdd8 100644
+index 068fee23e5b4bd1908fb607fb944c4e6d9c1821e..c4a0f7b955dbe9db3c2263d7cb3c18219fabb133 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -9,6 +9,7 @@ $end_info$
@@ -1762,7 +1762,7 @@ index 4ea460aca744f1b55cbf52dfc27c9af5a3724302..76c7e6be0d3b000c7b5551c70e33af75
    if (FEX::HLE::_SyscallHandler->Is64BitMode()) {
      if (flags & CLONE_SETTLS) {
        x64::SetThreadArea(NewThread->Thread->CurrentFrame, reinterpret_cast<void*>(args->args.tls));
-@@ -576,6 +583,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+@@ -584,6 +591,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
      // Save telemetry if we're exiting.
      FEX::HLE::_SyscallHandler->GetSignalDelegator()->SaveTelemetry();
      FEX::HLE::_SyscallHandler->TM.CleanupForExit();
@@ -3707,7 +3707,7 @@ index 0000000000000000000000000000000000000000..cf5fc2b380353abc14a4f11b6cdd33f6
 +};
 +} // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-index 69e10b3d2fe8450ad4e46a7667a31275393ba829..01b077ee4a24e19547c040332f25800f1f9285d7 100644
+index 8e7d466ed354a8a50e986b4a3b7052f5a018b9cc..99fd909d5efdab4c30094361657e97adcee7e7f3 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 @@ -5,6 +5,7 @@
@@ -3718,9 +3718,9 @@ index 69e10b3d2fe8450ad4e46a7667a31275393ba829..01b077ee4a24e19547c040332f25800f
  
  #include <FEXHeaderUtils/Syscalls.h>
  #include <FEXCore/Utils/Allocator.h>
-@@ -181,6 +182,18 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
-   ThreadStateObject->Thread = CTX->CreateThread(NewThreadState);
+@@ -182,6 +183,18 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
    auto Frame = ThreadStateObject->Thread->CurrentFrame;
+   Frame->Pointers.SynchronousExceptionHandler = reinterpret_cast<uintptr_t>(&FEX::HLE::SynchronousExceptionHandler);
  
 +  // tso-arm: every thread reaches guest memory through its own plain view
 +  if (auto* Views = TSOViewMemory::Get()) {
@@ -3737,7 +3737,7 @@ index 69e10b3d2fe8450ad4e46a7667a31275393ba829..01b077ee4a24e19547c040332f25800f
    // Allocate the call-ret stack with guard pages on both sides
    auto AllocBase =
      reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CALLRET_STACK_ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-@@ -292,6 +305,11 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
+@@ -293,6 +306,11 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
      FEXCore::Allocator::UninstallTLSData(Thread->Thread);
    }
  
