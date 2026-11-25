@@ -112,6 +112,14 @@ jobs:
               done
             done
             [ -f views-$n.log ] && { echo "views log: $(grep -c . views-$n.log) lines, $(grep -c 'fork:' views-$n.log) forks"; grep -E 'fork|not ours' views-$n.log | tail -n 8; }
+            if [ -f views-$n.log ]; then
+              # Windows' shared user data (0x7ffe0000, Wine's tick count and time, written by wineserver): how the views
+              # handle accesses to it, and the most frequent fault addresses
+              echo "views log lines on 0x7ffe0000: $(grep -c '0x7ffe0' views-$n.log)"
+              grep '0x7ffe0' views-$n.log | head -n 12 | cut -c1-200
+              grep -o 'fault [RW] at 0x[0-9a-f]*' views-$n.log | sort | uniq -c | sort -rn | head -n 12
+              grep -E 'mmap|alias|wake|Wake' views-$n.log | grep -i '7ffe' | head -n 6 | cut -c1-200
+            fi
             tail -n 4 spsc-$n.log
             killnew
           done
