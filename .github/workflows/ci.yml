@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # not for what changes only words or the diagnosis workflows run by hand
+    paths-ignore: ['docs/**', '**.md', '.github/workflows/*-diag.yml', '.github/workflows/profile.yml', '.github/ISSUE_TEMPLATE/**']
   pull_request:
   workflow_dispatch:
 
