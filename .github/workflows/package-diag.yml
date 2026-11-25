@@ -1,7 +1,7 @@
 name: Package diagnosis
 
-# By hand: a release run's packages, against the release before, on a runner of choice, with a program of tso-arm's
-# tests run several times in each, and how it ends.
+# By hand: a release run's packages, against the release before and against FEX without the tso-arm patches, on a
+# runner of choice, with 32-bit and 64-bit test programs, and how they end (FEX's own messages included).
 on:
   workflow_dispatch:
     inputs:
@@ -14,21 +14,22 @@ on:
       before:
         description: the release to compare with
         default: v0.4.4
-      program:
-        description: 'what to run: mp32 (litmus/mp32.c) or threads32 (tests/threads.c), and its arguments'
-        default: mp32 mp 200000
+      upstream:
+        description: 'yes: FEX without the patches as well (built here, at the commit the patches apply to)'
+        default: 'yes'
 
 jobs:
   diag:
     name: Packages of run ${{ github.event.inputs.release_run }} on ${{ github.event.inputs.runner }}
     runs-on: ${{ github.event.inputs.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc-i686-linux-gnu libc6-dev-i386-cross gcc-x86-64-linux-gnu libc6-dev-amd64-cross gdb
+          sudo apt-get install -y -q gcc-i686-linux-gnu libc6-dev-i386-cross gcc-x86-64-linux-gnu libc6-dev-amd64-cross gdb \
+            cmake ninja-build clang lld python3
       - name: The release packages
         env:
           GH_TOKEN: ${{ github.token }}
@@ -38,36 +39,42 @@ jobs:
           tar -xzf dist/*/tso-arm-[0-9]*-linux-arm64.tar.gz -C new
           gh release download ${{ github.event.inputs.before }} -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D oldpkg
           tar -xzf oldpkg/*.tar.gz -C old
-          ls new old
-      - name: The program
+      - name: FEX without the patches
+        if: github.event.inputs.upstream == 'yes'
+        run: |
+          base=$(sed -n 's/^BASE=\([0-9a-f]*\).*/\1/p' fex/install.sh)
+          git clone -q https://github.com/FEX-Emu/FEX.git up && cd up && git checkout -q $base && git submodule update -q --init --recursive
+          mkdir Build && cd Build
+          CC=clang CXX=clang++ cmake -G Ninja .. -DCMAKE_BUILD_TYPE=Release -DUSE_LINKER=lld -DENABLE_LTO=False \
+            -DBUILD_TESTING=False -DENABLE_ASSERTIONS=False -DBUILD_FEXCONFIG=False -DBUILD_THUNKS=False \
+            -DTUNE_CPU=none -DTUNE_ARCH=armv8-a >/dev/null
+          ninja FEX FEXServer >/dev/null && ls -la Bin/FEX
+      - name: The programs
         run: |
           mkdir -p build
+          printf 'int main(void) { return 42; }\n' >ret.c
+          i686-linux-gnu-gcc -O2 -static -o build/ret32 ret.c
+          x86_64-linux-gnu-gcc -O2 -static -o build/ret64 ret.c
           i686-linux-gnu-gcc -O2 -msse2 -static -pthread -o build/mp32 litmus/mp32.c
           i686-linux-gnu-gcc -O2 -static -pthread -o build/threads32 tests/threads.c
-          file build/mp32
-      - name: Each package, ten runs
+      - name: Each FEX, each program
         run: |
           set +e
           uname -a; getconf GNU_LIBC_VERSION; grep -m1 'Features' /proc/cpuinfo
           ulimit -c unlimited
           sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p >/dev/null
-          set -- ${{ github.event.inputs.program }}
-          prog=build/$1; shift
-          for p in new old; do
-            T=$(ls -d $p/tso-arm-*)/bin/tso-arm
-            echo "== $($T version | head -n 2 | tr '\n' ' ')"
-            for i in $(seq 6); do
-              $T run $prog "$@" >out.txt 2>&1; st=$?
-              echo "run $i: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-200)"
-            done
-            for q in threads32:8 mp32:mp:20000 mp32:vec:20000 mp32:rep:20000 mp32:lb:20000; do
-              $T run build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
-              echo "$q: exit $st: $(tail -n 2 out.txt | tr '\n' ' ' | cut -c1-160)"
+          for p in new old up; do
+            case $p in
+            up) F=$PWD/up/Build/Bin/FEX; [ -x "$F" ] || continue; echo "== FEX without the patches" ;;
+            *) F=$(ls -d $p/tso-arm-*)/fex/prebuilt/bin/FEX; echo "== $($(ls -d $p/tso-arm-*)/bin/tso-arm version | head -n 2 | tr '\n' ' ')" ;;
+            esac
+            for q in ret64 ret32 threads32:2 threads32:8 mp32:mp:20000 mp32:vec:20000; do
+              FEX_TSOENABLED=1 FEX_OUTPUTLOG=stderr $F build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
+              echo "$q: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-220)"
             done
           done
-          ls -la /tmp/core.* 2>/dev/null | head
           c=$(ls /tmp/core.* 2>/dev/null | head -n 1)
           if [ -n "$c" ]; then
-            F=$(ls -d new/tso-arm-*)/fex/prebuilt/bin/FEX
-            gdb -q -batch -ex 'bt 12' -ex 'info registers pc sp' -ex 'x/6i $pc-12' $F "$c" 2>&1 | tail -n 30
+            echo "== $c"
+            gdb -q -batch -ex 'bt 12' -ex 'info registers pc sp x0 x1' -ex 'x/6i $pc-12' $(ls -d new/tso-arm-*)/fex/prebuilt/bin/FEX "$c" 2>&1 | tail -n 30
           fi
