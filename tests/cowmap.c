@@ -57,6 +57,13 @@ int main(void) {
     waitpid(c, &st, 0);
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return bad("the child's write to its private mapping");
     if (p[2] != 0 || w[2] != 0) return bad("the child's write reached the parent's mapping or the file");
+    // the kernel writes into it first, for a system call (read from a pipe): the bytes arrive, the file keeps its own
+    int pfd[2];
+    const unsigned word = 0x5555;
+    if (pipe(pfd) != 0 || write(pfd[1], &word, sizeof(word)) != sizeof(word)) return 2;
+    if (read(pfd[0], (void *)&p[5 * PAGE / 4], sizeof(word)) != sizeof(word)) return bad("read into the private mapping failed");
+    if (p[5 * PAGE / 4] != 0x5555) return bad("read into the private mapping: the bytes did not arrive");
+    if (w[5 * PAGE / 4] != 0) return bad("read into the private mapping reached the file");
     // its own write: its own, the file keeps its bytes
     p[3] = 0x3333;
     if (p[3] != 0x3333) return bad("its own write is not seen");

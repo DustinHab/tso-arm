@@ -194,8 +194,9 @@ through it, as wineserver's sections) is the file itself, without the host's wri
 fault copies the whole range then (the kernel copies page by page; once written, the range no longer shows the
 file's later changes) and the write runs again. On GitHub's runner no explorer.exe is left under the page protocol
 now, as under full ordering, and `tso-arm wine` runs Wine under it (`TSO_ARM_MODE=full` for full ordering). Not
-covered: the kernel writing into such a mapping before the program has (a `read` into it fails with EFAULT then);
-mappings of files with a name are copied when they are made, as before.
+covered at first: the kernel writing into such a mapping before the program has (a `read` into it failed with
+EFAULT); since 0.4.6 such a call is made again once the range is copied, where an argument points into it (not a
+buffer named only through an `iovec`). Mappings of files with a name are copied when they are made, as before.
 
 ## 12. fork after the fallback
 

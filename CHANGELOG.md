@@ -7,6 +7,10 @@
   containers; a build without thunks; `tso-arm run` without `--gpu`): the page FEX makes for that entry was not
   executable in FEX's own tracking. A fault of FEX's own; `tests/vsyscall32.c`, and the release's checks build their
   32-bit test programs on Ubuntu 22.04 again.
+- A system call the kernel had to write into a copy-on-write mapping for (a `read` into a section Wine mapped,
+  before the program wrote it itself) came back with EFAULT: the range is copied and the call made again now (an
+  argument pointing into it; a buffer named only through an `iovec` is not looked at). `tests/cowmap.c` reads from a
+  pipe into such a mapping.
 
 ## 0.4.5 (2026-11-25)
 
