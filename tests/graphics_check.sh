@@ -1,8 +1,8 @@
 #!/bin/sh
 # Graphics of x86 programs from the root file system 'tso-arm rootfs' fetched, with the x86 Mesa of the root file
 # system and with --gpu (Vulkan through FEX's thunk to the host's library, OpenGL through the x86 Mesa's Zink onto it):
-# OpenGL without a window (eglinfo, EGL surfaceless), and on the X server in DISPLAY (CI: Xvfb) glxinfo and glxgears
-# (OpenGL through GLX) and vkcube (Vulkan through XCB). The renderer says which one drew: llvmpipe with 256-bit
+# OpenGL and Vulkan without a window (eglinfo with EGL surfaceless, vulkaninfo --summary, tests/vkproc.c), and on the X
+# server in DISPLAY (CI: Xvfb) glxinfo and glxgears (OpenGL through GLX) and vkcube (Vulkan through XCB). The renderer says which one drew: llvmpipe with 256-bit
 # vectors is the x86 Mesa (AVX2), with 128 the host's on Arm, "zink" OpenGL on Vulkan. Zink's window path needs DRI3,
 # which Xvfb has not, so OpenGL in a window under --gpu is for information there; FEX's own OpenGL thunk as well.
 #   tests/graphics_check.sh [ROOTFS]     exit status 1 if a required check fails
@@ -20,6 +20,13 @@ say() { # REQUIRED NAME WHAT RESULT-OR-EMPTY ERROR
         [ "$1" = FAIL ] && fail=1
     fi
 }
+# Vulkan as vulkaninfo starts it, with a debug messenger chained into vkCreateInstance (tests/vkproc.c), where an
+# x86-64 compiler is at hand
+vkproc=
+if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
+    vkproc=$(mktemp -d)/vkproc
+    x86_64-linux-gnu-gcc -O2 -o $vkproc tests/vkproc.c -ldl || vkproc=
+fi
 # check NAME REQ-EGL REQ-GLX REQ-VK RUN-ARGS...
 check() {
     name=$1 regl=$2 rglx=$3 rvk=$4
@@ -27,6 +34,17 @@ check() {
     out=$(EGL_PLATFORM=surfaceless timeout 120 "$@" $R/usr/bin/eglinfo -p surfaceless 2>&1)
     say $regl "$name" "eglinfo, no window" "$(printf '%s\n' "$out" | sed -n 's/^OpenGL \(core\|compatibility\) profile renderer: //p' | head -n 1)" \
         "$(printf '%s\n' "$out" | grep -v '^ ' | tail -n 2 | tr '\n' ' ')"
+    # Vulkan without a window: vulkaninfo, and the messenger's function, which the host must not call as its own
+    st=0
+    out=$(timeout 120 "$@" $R/usr/bin/vulkaninfo --summary 2>&1) || st=$?
+    say $rvk "$name" "vulkaninfo --summary" "$([ $st = 0 ] && printf '%s\n' "$out" | sed -n 's/^[[:space:]]*deviceName[[:space:]]*= //p' | tr '\n' ';')" \
+        "exit status $st: $(printf '%s\n' "$out" | grep -v 'Unknown Vulkan' | tail -n 2 | tr '\n' ' ')"
+    if [ -n "$vkproc" ]; then
+        st=0
+        out=$(timeout 120 "$@" $vkproc 2>&1) || st=$?
+        say $rvk "$name" "Vulkan with a debug messenger in vkCreateInstance" "$([ $st = 0 ] && printf '%s\n' "$out" | sed -n 's/^vkproc: \(.* devices through .*\)/\1/p')" \
+            "exit status $st: $(printf '%s\n' "$out" | grep -v 'Unknown Vulkan' | tail -n 2 | tr '\n' ' ')"
+    fi
     [ -n "$DISPLAY" ] || return 0
     out=$(timeout 120 "$@" $R/usr/bin/glxinfo -B 2>&1)
     say $rglx "$name" glxinfo "$(printf '%s\n' "$out" | sed -n 's/^OpenGL renderer string: //p')" "$(printf '%s\n' "$out" | tail -n 2 | tr '\n' ' ')"

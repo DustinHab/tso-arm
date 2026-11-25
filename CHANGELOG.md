@@ -11,6 +11,11 @@
   before the program wrote it itself) came back with EFAULT: the range is copied and the call made again now (an
   argument pointing into it; a buffer named only through an `iovec` is not looked at). `tests/cowmap.c` reads from a
   pipe into such a mapping.
+- `--gpu`: vulkaninfo stopped with SIGILL, and so did every program that chains a debug messenger into
+  `vkCreateInstance` (validation set-ups, engines in debug builds): FEX's Vulkan thunk handed the program's x86
+  function to the host's loader, which called it as Arm code. Such structures (debug messengers and reports, a device
+  memory report, a list of drivers to load) are taken out of the chain for the call now and put back after it. A
+  fault of FEX's own; `tests/vkproc.c`, and the graphics check runs vulkaninfo and it with and without `--gpu`.
 
 ## 0.4.5 (2026-11-25)
 

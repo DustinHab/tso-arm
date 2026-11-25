@@ -1,4 +1,4 @@
-From 2dc8ce94d30085d1284a07cf718e6b4c91db5f71 Mon Sep 17 00:00:00 2001
+From be362077c74699ebb1d608655e2a255e8302ea39 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -47,7 +47,8 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 43 files changed, 3732 insertions(+), 234 deletions(-)
+ ThunkLibs/libvulkan/Host.cpp                  |   60 +-
+ 44 files changed, 3778 insertions(+), 248 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -6035,6 +6036,96 @@ index 553518ea2450b61181b4fed572c7e6f0e5a86eea..f6f8c7d4b9f858001034ee7447cfa7d5
    LinkAddressToFunction((uintptr_t)func, It->second);
    return func;
  }
+diff --git a/ThunkLibs/libvulkan/Host.cpp b/ThunkLibs/libvulkan/Host.cpp
+index 592248e8cc4df6d4624dc71232014b91fc2cd29d..cab065860da79112bf69145650f4adc83f4be5e1 100644
+--- a/ThunkLibs/libvulkan/Host.cpp
++++ b/ThunkLibs/libvulkan/Host.cpp
+@@ -16,6 +16,7 @@ $end_info$
+ 
+ #include <cassert>
+ #include <cstring>
++#include <initializer_list>
+ #include <mutex>
+ #include <span>
+ #include <string_view>
+@@ -135,32 +136,63 @@ DummyVkDebugReportCallback(VkDebugReportFlagsEXT, VkDebugReportObjectTypeEXT, ui
+   return VK_FALSE;
+ }
+ 
+-static VkResult FEXFN_IMPL(vkCreateInstance)(const VkInstanceCreateInfo* a_0, const VkAllocationCallbacks* a_1, guest_layout<VkInstance*> a_2) {
+-  const VkInstanceCreateInfo* vk_struct_base = a_0;
+-  for (const VkBaseInStructure* vk_struct = reinterpret_cast<const VkBaseInStructure*>(vk_struct_base); vk_struct->pNext;
+-       vk_struct = vk_struct->pNext) {
+-    // Override guest callbacks used for VK_EXT_debug_report
+-    if (reinterpret_cast<const VkBaseInStructure*>(vk_struct->pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT) {
+-      // Overwrite the pNext pointer, ignoring its const-qualifier
+-      const_cast<VkBaseInStructure*>(vk_struct)->pNext = vk_struct->pNext->pNext;
+-
+-      // If we copied over a nullptr for pNext then early exit
+-      if (!vk_struct->pNext) {
+-        break;
+-      }
++// tso-arm: structures in a pNext chain that hand the host a guest function to call: the host's loader or driver would
++// call it as its own (x86 code run as Arm code, SIGILL). vulkaninfo chains a debug messenger into vkCreateInstance, and
++// the loader called it from vkEnumeratePhysicalDevices on. Such structures are taken out of the chain for the call and
++// put back after it, so that the application's structures are as they were (on 64-bit the chain is its own memory);
++// what the host made of them (a messenger for the instance's lifetime) is not made. The functions that create
++// messengers on their own (vkCreateDebugReportCallbackEXT, vkCreateDebugUtilsMessengerEXT) put a host function in.
++namespace {
++struct UnlinkedNext {
++  VkBaseInStructure* Prev;
++  const VkBaseInStructure* Removed;
++};
++
++std::vector<UnlinkedNext> UnlinkGuestCallbacks(const void* Head, std::initializer_list<VkStructureType> Types) {
++  std::vector<UnlinkedNext> Unlinked;
++  auto Prev = reinterpret_cast<VkBaseInStructure*>(const_cast<void*>(Head));
++  while (Prev->pNext) {
++    const auto Next = Prev->pNext;
++    bool Remove = false;
++    for (auto Type : Types) {
++      Remove |= Next->sType == Type;
+     }
++    if (Remove) {
++      Unlinked.push_back({Prev, Next});
++      Prev->pNext = Next->pNext;
++    } else {
++      Prev = const_cast<VkBaseInStructure*>(Next);
++    }
++  }
++  return Unlinked;
++}
++
++void RelinkGuestCallbacks(const std::vector<UnlinkedNext>& Unlinked) {
++  for (auto It = Unlinked.rbegin(); It != Unlinked.rend(); ++It) {
++    It->Prev->pNext = It->Removed;
+   }
++}
++} // namespace
++
++static VkResult FEXFN_IMPL(vkCreateInstance)(const VkInstanceCreateInfo* a_0, const VkAllocationCallbacks* a_1, guest_layout<VkInstance*> a_2) {
++  const auto Unlinked = UnlinkGuestCallbacks(a_0, {VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT,
++                                                   VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
++                                                   VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG});
+ 
+   VkInstance out;
+-  auto ret = LDR_PTR(vkCreateInstance)(vk_struct_base, nullptr, &out);
++  auto ret = LDR_PTR(vkCreateInstance)(a_0, nullptr, &out);
++  RelinkGuestCallbacks(Unlinked);
+   *a_2.get_pointer() = to_guest(to_host_layout(out));
+   return ret;
+ }
+ 
+ static VkResult FEXFN_IMPL(vkCreateDevice)(VkPhysicalDevice a_0, const VkDeviceCreateInfo* a_1, const VkAllocationCallbacks* a_2,
+                                            guest_layout<VkDevice*> a_3) {
++  // tso-arm: a device memory report hands the driver a guest function (see UnlinkGuestCallbacks)
++  const auto Unlinked = UnlinkGuestCallbacks(a_1, {VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT});
+   VkDevice out;
+   auto ret = LDR_PTR(vkCreateDevice)(a_0, a_1, nullptr, &out);
++  RelinkGuestCallbacks(Unlinked);
+   *a_3.get_pointer() = to_guest(to_host_layout(out));
+ 
+   // Reload device-specific function pointers used in custom implementations.
 -- 
 2.53.0
 
