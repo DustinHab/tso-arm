@@ -1,4 +1,4 @@
-From 7521517b7262a23f26c9b42eafede671661afa90 Mon Sep 17 00:00:00 2001
+From f44273f06a66271e400c0fa61df2ea214fdeed97 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -27,7 +27,8 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Common/Config.cpp                      |   28 +-
  Source/Common/FDUtils.h                       |   32 +
  Source/Common/FEXServerClient.cpp             |   42 +-
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |   17 +
+ Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  107 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
  .../LinuxSyscalls/FileManagement.h            |    1 +
@@ -44,7 +45,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 40 files changed, 3325 insertions(+), 222 deletions(-)
+ 41 files changed, 3426 insertions(+), 223 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -1147,8 +1148,31 @@ index 0680323785932da0c45f60bbf37fdc92a612c950..baa1a0e986fe2df7d17f4fbf3b18cb7e
  }
  
  /**  @} */
+diff --git a/Source/Tools/FEXInterpreter/CMakeLists.txt b/Source/Tools/FEXInterpreter/CMakeLists.txt
+index 9e15947ae184fa0c8b7d295f6255ce9c0cce30ed..4491df685c4f025dec5ffcb7434de5acc119211b 100644
+--- a/Source/Tools/FEXInterpreter/CMakeLists.txt
++++ b/Source/Tools/FEXInterpreter/CMakeLists.txt
+@@ -31,6 +31,18 @@ install(TARGETS FEX RUNTIME
+     DESTINATION bin
+     COMPONENT Runtime)
+ 
++# tso-arm: the same, linked statically as a position-independent executable, for binfmt_misc's F flag (containers);
++# built on its own ('ninja FEX-static'), where the C and C++ libraries are there to link statically
++add_executable(FEX-static EXCLUDE_FROM_ALL
++  FEXInterpreter.cpp
++  AOT/AOTGenerator.cpp)
++target_compile_definitions(FEX-static PRIVATE ${DEFINES} TSO_ARM_STATIC=1)
++target_include_directories(FEX-static PRIVATE ${CMAKE_BINARY_DIR}/generated)
++target_link_libraries(FEX-static PRIVATE ${LIBS})
++target_compile_options(FEX-static PRIVATE ${FEX_TUNE_COMPILE_FLAGS})
++target_link_options(FEX-static PRIVATE -static-pie)
++LinkerGC(FEX-static)
++
+ if (ARCHITECTURE_arm64)
+   if (NOT USE_LEGACY_BINFMTMISC)
+     # Just restart the systemd service
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b914c97204dfaadc24771b96fc9bc4163bc..93696358a26f55bf091256eb503a663167254ddf 100644
+index bed03b914c97204dfaadc24771b96fc9bc4163bc..91e84a3d9ecb2e83dbfb2d0d73167db83b0d8140 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -22,6 +22,7 @@ $end_info$
@@ -1167,7 +1191,15 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..93696358a26f55bf091256eb503a6631
  #include <FEXCore/Utils/Allocator.h>
  #include <FEXCore/Utils/FileLoading.h>
  #include <FEXCore/Utils/LogManager.h>
-@@ -162,6 +164,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
+@@ -49,6 +51,7 @@ $end_info$
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
++#include <climits>
+ #include <cstring>
+ #include <elf.h>
+ #include <fcntl.h>
+@@ -162,6 +165,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
  
  fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
    if (Is64Bit) {
@@ -1176,7 +1208,118 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..93696358a26f55bf091256eb503a6631
      return {};
    }
  
-@@ -535,6 +539,16 @@ int main(int argc, char** argv, char** const envp) {
+@@ -382,7 +387,82 @@ static int StealFEXFDFromEnv(const char* Env) {
+   return FEXFD;
+ }
+ 
+-int main(int argc, char** argv, char** const envp) {
++#ifdef TSO_ARM_STATIC
++// tso-arm: the statically linked FEX that 'tso-arm binfmt register' registers with binfmt_misc's F flag. The kernel
++// opened this file once, at registration, and starts x86 programs through it in every mount namespace, a container's
++// as well, whose own files have neither the host's Arm libraries (a FEX linked against them would not start there)
++// nor a FEXServer. Where the host's installation is in reach (the script beside this file, and a shell of the host's
++// own architecture to run it), a program runs as 'tso-arm run' runs it: with its root file system, its profile and
++// the libraries translated ahead of time for it. Elsewhere, in a container, FEX runs it itself, on the container's
++// own files, with tso-arm's settings (TSO_ARM_MODE: tso, full or unordered).
++namespace TSOArm {
++static bool Container {};
++
++// The file starts with an ELF header of a 64-bit Arm machine
++static bool IsArm64Elf(const char* Path) {
++  unsigned char Header[20] {};
++  const int FD = open(Path, O_RDONLY | O_CLOEXEC);
++  if (FD == -1) {
++    return false;
++  }
++  const bool Read = read(FD, Header, sizeof(Header)) == sizeof(Header);
++  close(FD);
++  return Read && memcmp(Header, ELFMAG, SELFMAG) == 0 && Header[EI_CLASS] == ELFCLASS64 && Header[18] == EM_AARCH64 && Header[19] == 0;
++}
++
++static char** Start(char** argv) {
++  char Script[PATH_MAX];
++  const ssize_t Length = readlink("/proc/self/exe", Script, sizeof(Script));
++  constexpr char Name[] = "tso-arm-binfmt";
++  // TSO_ARM_HANDOVER: set for the script, which takes it away; still set here, the script did not run on the host
++  if (Length > 0 && size_t(Length) + sizeof(Name) < sizeof(Script) && !getenv("TSO_ARM_HANDOVER")) {
++    Script[Length] = 0;
++    if (char* Slash = strrchr(Script, '/')) {
++      memcpy(Slash + 1, Name, sizeof(Name));
++      if (access(Script, X_OK) == 0 && IsArm64Elf("/bin/sh")) {
++        setenv("TSO_ARM_HANDOVER", "1", 1);
++        // binfmt_misc's P flag put the program's own argv[0] after its path; the script takes the path alone
++        int First = 1;
++        if (getauxval(AT_FLAGS) & 1 /* AT_FLAGS_PRESERVE_ARGV0 */) {
++          if (argv[1] && argv[2]) {
++            argv[2] = argv[1];
++            First = 2;
++          }
++        }
++        argv[First - 1] = Script;
++        execv(Script, argv + First - 1);
++      }
++    }
++  }
++  Container = true;
++  unsetenv("TSO_ARM_HANDOVER");
++  // what 'tso-arm run' sets, unless set already
++  setenv("FEX_MAXINST", "150", 0);
++  setenv("FEX_DISABLETELEMETRY", "1", 0);
++  const char* Mode = getenv("TSO_ARM_MODE");
++  if (!Mode || !strcmp(Mode, "tso") || !*Mode) {
++    setenv("TSO_VIEWS", "1", 0);
++    setenv("FEX_VECTORTSOENABLED", "1", 0);
++    setenv("FEX_MEMCPYSETTSOENABLED", "1", 0);
++  } else if (!strcmp(Mode, "full")) {
++    setenv("FEX_TSOENABLED", "1", 0);
++    setenv("FEX_VECTORTSOENABLED", "1", 0);
++    setenv("FEX_MEMCPYSETTSOENABLED", "1", 0);
++  } else if (!strcmp(Mode, "unordered")) {
++    setenv("FEX_TSOENABLED", "0", 0);
++  }
++  return environ;
++}
++} // namespace TSOArm
++#endif
++
++int main(int argc, char** argv, char** const envp_) {
++#ifdef TSO_ARM_STATIC
++  char** const envp = TSOArm::Start(argv);
++  (void)envp_;
++#else
++  char** const envp = envp_;
++#endif
+   auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
+   FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
+ 
+@@ -439,7 +519,12 @@ int main(int argc, char** argv, char** const envp) {
+ 
+   // Ensure FEXServer is setup before config options try to pull CONFIG_ROOTFS
+   auto SelfPath = FEX::GetSelfPath();
++#ifdef TSO_ARM_STATIC
++  // tso-arm: in a container, without a server (whose root file system there is the container's own)
++  if (!TSOArm::Container && !FEXServerClient::SetupClient(SelfPath.value_or(argv[0]))) {
++#else
+   if (!FEXServerClient::SetupClient(SelfPath.value_or(argv[0]))) {
++#endif
+     LogMan::Msg::EFmt("FEXServerClient: Failure to setup client");
+     return -1;
+   }
+@@ -492,6 +577,13 @@ int main(int argc, char** argv, char** const envp) {
+ 
+   ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
++#ifdef TSO_ARM_STATIC
++  // tso-arm: FEX linked statically does not set up a 32-bit guest's address space yet (it crashed in rpmalloc)
++  if (TSOArm::Container && Loader.ELFWasLoaded() && !Loader.Is64BitMode()) {
++    fextl::fmt::print(stderr, "tso-arm: 32-bit x86 programs do not run in containers yet ({})\n", Program.ProgramPath);
++    return 1;
++  }
++#endif
+ 
+   if (!Loader.ELFWasLoaded()) {
+     // Loader couldn't load this program for some reason
+@@ -535,6 +627,16 @@ int main(int argc, char** argv, char** const envp) {
      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
    }
  
@@ -1193,7 +1336,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..93696358a26f55bf091256eb503a6631
    // Setup Thread handlers, so FEXCore can create threads.
    auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
  
-@@ -617,6 +631,9 @@ int main(int argc, char** argv, char** const envp) {
+@@ -617,6 +719,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  

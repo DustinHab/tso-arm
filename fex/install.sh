@@ -44,6 +44,10 @@ patches() { cat "$R"/fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16;
 finish() {
     say "FEX installed to $PREFIX ($1)"
     sh "$R/tools/pages_hint.sh" | sed 's/^/tso-arm install: /' >&2 || true
+    # the statically linked FEX hands programs on the host on to the script beside it (bin/tso-arm-binfmt)
+    if [ -x "$PREFIX/bin/FEX-static" ]; then
+        ln -sfn "$R/bin/tso-arm-binfmt" "$PREFIX/bin/tso-arm-binfmt"
+    fi
     mkdir -p "$HOME/.local/bin"
     ln -sf "$R/bin/tso-arm" "$HOME/.local/bin/tso-arm"
     case ":$PATH:" in
@@ -167,6 +171,13 @@ nice -n 10 ninja >"$B/build.log" 2>&1 || {
     exit 1
 }
 ninja install >/dev/null
+# the same FEX linked statically, which binfmt_misc can start in containers ('tso-arm binfmt register'); it needs the
+# static C and C++ libraries (libc6-dev, libstdc++-dev), which not every system has
+if nice -n 10 ninja FEX-static >>"$B/build.log" 2>&1; then
+    cp Bin/FEX-static "$PREFIX/bin/FEX-static"
+else
+    say "no statically linked FEX for containers (log in $B/build.log); everything else works without it"
+fi
 case $tune in
 *none*) built="from source, for any Armv8.0 core" ;;
 *) built="from source, for this core" ;;

@@ -1,4 +1,7 @@
 #!/bin/sh
-# The interpreter the kernel starts an x86-64 program through once 'tso-arm binfmt register' has registered it with
-# binfmt_misc: the program's path and its arguments go to 'tso-arm run', x86 order kept.
+# The interpreter the kernel starts an x86 program through once 'tso-arm binfmt register' has registered it with
+# binfmt_misc: the program's path and its arguments go to 'tso-arm run', x86 order kept. Registered itself, or (for
+# containers) started by the statically linked FEX the kernel starts, which hands programs on the host on to it and
+# marks that with TSO_ARM_HANDOVER: still set there, this script did not run (a container that sees the host's files).
+unset TSO_ARM_HANDOVER
 exec "$(dirname "$(readlink -f "$0")")/tso-arm" run "$@"

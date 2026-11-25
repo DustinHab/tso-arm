@@ -174,6 +174,11 @@ cmd_binfmt() {
             what=$(echo "$what" | tr - ' ')
             if [ -f "$d/$name" ]; then
                 echo "$what programs started directly run through tso-arm ($(head -n 1 "$d/$name"), $(sed -n 's/^interpreter //p' "$d/$name"))"
+                if grep -q '^flags:.*F' "$d/$name"; then
+                    [ $name = tso-arm ] && echo "$what programs in containers run through tso-arm as well (docker run --platform linux/amd64)"
+                else
+                    [ $name = tso-arm ] && echo "$what programs in containers do not run through tso-arm (no statically linked FEX was registered)"
+                fi
             else
                 echo "$what programs started directly do not run through tso-arm ('sudo $REPO/bin/tso-arm binfmt register')"
             fi
@@ -190,12 +195,23 @@ cmd_binfmt() {
         [ "$(id -u)" = 0 ] || die "binfmt register changes the system and needs root: sudo $REPO/bin/tso-arm binfmt register"
         # an installation by tools/get.sh is registered by its link to the version in use, which updates change
         interp=$REPO/bin/tso-arm-binfmt
+        flags=""
         inst=$(installed_dir) && interp=$inst/current/bin/tso-arm-binfmt
+        # containers: the statically linked FEX beside the FEX in use, with the F flag (the kernel opens it now and
+        # starts it in every mount namespace) and P (the program's own argv[0] kept); it hands programs on the host
+        # on to the script beside it, which binfmt_misc started before
+        if F=$(fex 2>/dev/null) && [ -x "$(dirname "$F")/FEX-static" ] && [ -e "$(dirname "$F")/tso-arm-binfmt" ]; then
+            interp=$(dirname "$F")/FEX-static
+            flags=PF
+            if [ -n "$inst" ]; then
+                case $interp in "$REPO"/*) interp=$inst/current${interp#"$REPO"} ;; esac
+            fi
+        fi
         mkdir -p "$(dirname "$conf")"
         : >"$conf"
         printf '%s\n' "$BINFMT_ENTRIES" | while read -r name magic what; do
             # the kernel reads the \x escapes itself; the line goes to it as written
-            line=":$name:M::$magic:$BINFMT_MASK:$interp:"
+            line=":$name:M::$magic:$BINFMT_MASK:$interp:$flags"
             if [ -f "$d/$name" ]; then
                 echo -1 >"$d/$name"
             fi
@@ -203,6 +219,9 @@ cmd_binfmt() {
             printf '%s\n' "$line" >>"$conf"
         done
         echo "tso-arm: x86-64 and 32-bit x86 programs started directly run through $interp now, and after a reboot ($conf)"
+        if [ -n "$flags" ]; then
+            echo "tso-arm: x86-64 programs in containers as well (docker run --platform linux/amd64 IMAGE)"
+        fi
         ;;
     unregister)
         [ "$(id -u)" = 0 ] || die "binfmt unregister changes the system and needs root: sudo $REPO/bin/tso-arm binfmt unregister"

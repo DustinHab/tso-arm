@@ -38,11 +38,13 @@ jobs:
       - name: Correctness tests
         run: sh tests/ci.sh
 
-      - name: Started directly (binfmt_misc)
+      - name: Started directly (binfmt_misc), and in x86-64 containers
         run: |
           bin/tso-arm binfmt
           sudo bin/tso-arm binfmt register
           bin/tso-arm binfmt
+          grep -q '^flags: PF' /proc/sys/fs/binfmt_misc/tso-arm
+          sh tests/container_check.sh
           ./build/ci/threads 8 | tee /tmp/direct.txt
           grep -q 'wrong 0' /tmp/direct.txt
           ./build/ci/threads32 8 | tee /tmp/direct32.txt
@@ -63,11 +65,12 @@ jobs:
           v=$(cat VERSION)
           sudo TSO_ARM_TARBALL=$PWD/dist/tso-arm-$v-linux-arm64.tar.gz sh tools/get.sh
           test "$(readlink /opt/tso-arm/current)" = "$v"
-          grep -q /opt/tso-arm/current/bin/tso-arm-binfmt /proc/sys/fs/binfmt_misc/tso-arm
-          grep -q /opt/tso-arm/current/bin/tso-arm-binfmt /proc/sys/fs/binfmt_misc/tso-arm-i386
+          grep -q /opt/tso-arm/current/fex/prebuilt/bin/FEX-static /proc/sys/fs/binfmt_misc/tso-arm
+          grep -q /opt/tso-arm/current/fex/prebuilt/bin/FEX-static /proc/sys/fs/binfmt_misc/tso-arm-i386
           tso-arm version
           ./build/ci/threads 8 | grep 'wrong 0'
           ./build/ci/threads32 8 | grep 'wrong 0'
+          docker run --rm --platform linux/amd64 -v $PWD/build/ci:/ci:ro ubuntu:24.04 /ci/threads 8 | grep 'wrong 0'
           # an update to a newer package: the link moves, the version before stays
           t=$(mktemp -d) && tar -xzf dist/tso-arm-$v-linux-arm64.tar.gz -C $t
           mv $t/tso-arm-$v $t/tso-arm-99.0.0 && echo 99.0.0 > $t/tso-arm-99.0.0/VERSION

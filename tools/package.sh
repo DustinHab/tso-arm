@@ -27,6 +27,9 @@ trap 'rm -rf "$t"' EXIT
 F=$t/tso-arm-fex-$V
 mkdir -p "$F/licenses"
 cp -R "$P/bin" "$P/share" "$F/"
+# the script the statically linked FEX hands programs on the host on to: its link points into the checkout FEX was
+# installed from; 'tso-arm install' links it anew, and the full package has it relative (below)
+rm -f "$F/bin/tso-arm-binfmt"
 # the thunks' host libraries (FEX's own libFEXCore.so is linked into its programs)
 if [ -d "$P/lib/fex-emu" ]; then
     mkdir -p "$F/lib"
@@ -48,6 +51,9 @@ pack() { tar -C "$t" --owner=0 --group=0 --numeric-owner -czf "$O/$1.tar.gz" "$2
 pack "tso-arm-fex-$V-linux-arm64" "tso-arm-fex-$V"
 git -C "$R" archive --format=tar --prefix="tso-arm-$V/" HEAD | tar -x -C "$t"
 cp -R "$F" "$t/tso-arm-$V/fex/prebuilt"
+if [ -x "$F/bin/FEX-static" ]; then
+    ln -s ../../../bin/tso-arm-binfmt "$t/tso-arm-$V/fex/prebuilt/bin/tso-arm-binfmt"
+fi
 pack "tso-arm-$V-linux-arm64" "tso-arm-$V"
 cd "$O"
 sha256sum tso-arm-*"$V"-linux-arm64.tar.gz >SHA256SUMS
