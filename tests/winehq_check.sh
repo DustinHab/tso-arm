@@ -36,7 +36,7 @@ for m in tso full unordered; do
     log=/tmp/winehq-$$-$m.log
     TSO_ARM_MODE=$m WINEDEBUG=err+all timeout 900 $T wine "$exe" $n >$log 2>&1 </dev/null || st=$?
     ms=$((($(date +%s%N) - s) / 1000000))
-    all=$(cat $log)
+    all=$(tr -d '\r' <$log) # a Windows program's lines end in CR LF
     rm -f $log
     out=$(printf '%s\n' "$all" | grep '^spsc:' | tail -n 1)
     sleep 3
