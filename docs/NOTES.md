@@ -2817,3 +2817,43 @@ one thread that is the waiting thread itself: from within the callback its initi
 Wine's tick count and time, in memory wineserver writes) fault once per instruction that makes them and escalate, as
 the protocol does for memory shared with another process (`fault R view 1 slot 1 guest 0x7ffe03e8: 0xff/0 -> 0xff/0
 escalate`, 7,384 lines of the log on that page). Not found yet: what user32's callback does differently there.
+
+**The cause: Wine's session memory.** Wine's own warnings (`warn+winstation`) named it: `Session object id doesn't
+match expected id`, then `Failed to get shared session object for window class` and `failed to create desktop window`.
+wineserver keeps the session's objects (window classes, desktops) in a file it grows and writes; every Wine process
+maps it, and on Linux on purpose as a private mapping with read and write rights, made read-only afterwards (Wine's
+`map_file_into_view`: changes to the file are visible in a private mapping on Linux, "so we take advantage of it").
+The views copied a writable private file mapping into shared memory of their own when it was made: the process went
+on reading the session as it was at that moment, and every object wineserver added later read wrong. explorer.exe
+got no desktop, started another explorer.exe for one, and ended in the recursion above.
+
+Now a writable private mapping of a file without a name (`st_nlink` 0: deleted, or a memfd, as wineserver's sections
+and shared memory generally are) is the file itself, mapped shared, without the host's write right (`CopyOnWrite`,
+also FileBacked and ForkShared): it reads the file as it is. Its first write faults, at the guest's address or
+through a view, and the fault copies the whole range (`Unshare`, which reads it through `process_vm_readv` so that a
+page past the file's end stays zero instead of raising SIGBUS in FEX) and runs the write again; `mprotect` keeps the
+write right from the host while the range is still the file, range by range. Mappings of named files (libraries, a
+program's data) are copied when they are made, as before: the kernel writing into a copy-on-write range for a system
+call (a `read` into it before the program wrote it) would get EFAULT instead of copying.
+
+Two more faults of the same family came up on the way, each with a test: a read-only private file mapping past the
+file's end was zeros of the views' own (since section 45), which never showed what was written there after the file
+grew; now the whole mapping comes from the file, and a page wholly past the end raises SIGBUS when read, as natively
+(`tests/filegrow.c`: tso read 0 past the old end, now all seen). And a `MAP_FIXED` mapping over memory another
+thread had read left that thread's views on the old memory (the views map guest memory again, they do not follow
+it): now every view that mapped the old memory holds the reservation again, as after `munmap`
+(`tests/fixedover.c`). `tests/cowmap.c` checks copy-on-write: what another mapping writes is seen until the process
+writes, its own writes and a forked child's stay theirs, the file keeps its bytes; `tests/sharedmap.c` maps a file
+another process grows and writes, the way Wine maps the session, with one and with two threads.
+
+On GitHub's runner no explorer.exe is left under the page protocol now (as under full ordering), and on the Pi the
+ring buffer of 20 million messages runs in 5.5 s under the page protocol against 8.9 s under full ordering, none
+wrong: `tso-arm wine` runs Wine under the page protocol (`TSO_ARM_MODE=full` gives it full ordering), and
+`tests/winehq_check.sh` fails when explorer.exe processes are left.
+
+**32-bit programs on Ubuntu 22.04.** The release's checks, which now build 32-bit test programs on the runner, found
+every statically linked i386 program crashing at start-up on Ubuntu 22.04 (the guest reads address 0), with 0.4.4 as
+with 0.4.5, with FEX without the patches and with FEX linked statically alike; a program without a C library runs.
+The same programs built with Ubuntu 24.04's i386 C library run everywhere, and dynamically linked ones take the
+root file system's. So it is glibc 2.35's i386 start-up under FEX (roadmap item 13); the release's checks build
+their 32-bit programs on Ubuntu 24.04.
