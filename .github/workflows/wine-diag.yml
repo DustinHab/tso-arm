@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       modes:
-        description: 'runs, in this order: a mode, or MODE:VAR=VALUE,VAR=VALUE for one with settings of its own'
+        description: 'runs, in this order: a mode, or MODE:VAR=VALUE@VAR=VALUE for one with settings of its own'
         default: full tso
       messages:
         description: messages of the ring buffer
@@ -63,7 +63,7 @@ jobs:
             n=$((n + 1))
             m=${r%%:*}
             vars=""
-            case $r in *:*) vars=$(echo "${r#*:}" | tr ',' ' ') ;; esac
+            case $r in *:*) vars=$(echo "${r#*:}" | tr '@' ' ') ;; esac
             echo "== spsc.exe, $m ${vars:-}"
             s=$(date +%s)
             st=""
