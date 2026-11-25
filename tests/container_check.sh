@@ -59,7 +59,11 @@ print(\"python threads:\", n[0])
 [ "$out" = "python threads: 400000" ] && ok "apt-get install python3, then $out ($(($(date +%s) - s)) s)" ||
     bad "apt-get and python3: $out"
 
-# a 32-bit program (FEX orders every access of it itself)
-out=$(run "$img" /ci/threads32 8 | tail -n 1)
-echo "$out" | grep -q 'wrong 0' && ok "32-bit threads 8: $out" || bad "32-bit threads 8: $out"
+# a 32-bit program (FEX orders every access of it itself), where tests/ci.sh built one (a 32-bit cross compiler)
+if [ -x "$B/threads32" ]; then
+    out=$(run "$img" /ci/threads32 8 | tail -n 1)
+    echo "$out" | grep -q 'wrong 0' && ok "32-bit threads 8: $out" || bad "32-bit threads 8: $out"
+else
+    echo "      no 32-bit test program in $B (gcc-i686-linux-gnu): not tried"
+fi
 exit $fail
