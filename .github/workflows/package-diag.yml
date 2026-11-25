@@ -1,11 +1,11 @@
-name: Release diagnosis
+name: Package diagnosis
 
 # By hand: a release run's packages, against the release before, on a runner of choice, with a program of tso-arm's
 # tests run several times in each, and how it ends.
 on:
   workflow_dispatch:
     inputs:
-      run:
+      release_run:
         description: the release workflow's run whose packages to take
         required: true
       runner:
@@ -20,7 +20,7 @@ on:
 
 jobs:
   diag:
-    name: Packages of run ${{ github.event.inputs.run }} on ${{ github.event.inputs.runner }}
+    name: Packages of run ${{ github.event.inputs.release_run }} on ${{ github.event.inputs.runner }}
     runs-on: ${{ github.event.inputs.runner }}
     timeout-minutes: 40
     steps:
@@ -34,7 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p new old
-          gh run download ${{ github.event.inputs.run }} -D dist
+          gh run download ${{ github.event.inputs.release_run }} -D dist
           tar -xzf dist/*/tso-arm-[0-9]*-linux-arm64.tar.gz -C new
           gh release download ${{ github.event.inputs.before }} -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D oldpkg
           tar -xzf oldpkg/*.tar.gz -C old
