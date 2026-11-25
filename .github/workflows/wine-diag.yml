@@ -122,6 +122,11 @@ jobs:
             fi
             tail -n 4 spsc-$n.log
             # Wine's own traces, where the run asked for them (WINEDEBUG=+process,+loaddll): what was started and loaded
-            grep -aE 'trace:process:|trace:loaddll:' spsc-$n.log | grep -aE 'NtCreateUserProcess|exec_process|uxtheme|explorer|comctl32|Loaded .*\.(dll|exe)' | head -n 60 | cut -c1-220
+            grep -aE 'trace:process:|trace:loaddll:' spsc-$n.log | grep -aE 'NtCreateUserProcess|exec_process|uxtheme|explorer|comctl32|Loaded .*\.(dll|exe)' | head -n 30 | cut -c1-220
+            # the explorer processes' own lines (one thread each: its Windows thread id), the last of each
+            for tid in $(grep -a 'NtCreateUserProcess .*explorer.exe" pid' spsc-$n.log | sed -n 's/.* tid \([0-9a-f]*\) .*/\1/p' | head -n 4); do
+              echo "-- explorer.exe, thread $tid: $(grep -ac "^$tid:" spsc-$n.log) lines, the last ones:"
+              grep -a "^$tid:" spsc-$n.log | tail -n 25 | cut -c1-200
+            done
             killnew
           done
