@@ -45,7 +45,7 @@ prebuilt anew, now with FEX's thunks.
   threads wrote after the fork (the page protocol copies the child's memory after the fork, and a thread writes its
   own pages without a fault): a lock another thread took just after the fork came out taken in the child, which
   waited for it forever. The other threads' writes now wait while the child copies.
-  `tests/forksnap.c`: 49 of 50 children saw memory from after the fork, now none.
+  `tests/forksnap.c`: 49 of 50 children saw memory from after the fork, now none in 16,000 forks on GitHub's N2.
 - `TSO_ARM_MODE` sets the ordering mode for programs started without `--mode` (started directly, through `tso-arm
   wine`).
 - Fixed in FEX: a prebuilt FEX unpacked elsewhere than the prefix it was built for did not find its own data
