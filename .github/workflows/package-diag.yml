@@ -56,6 +56,11 @@ jobs:
           mkdir -p build
           printf 'int main(void) { return 42; }\n' >ret.c
           i686-linux-gnu-gcc -O2 -static -o build/ret32 ret.c
+          # without a C library: exit(42) through int 0x80
+          printf '.globl _start\n_start:\n  mov $1, %%eax\n  mov $42, %%ebx\n  int $0x80\n' >raw.S
+          i686-linux-gnu-gcc -nostdlib -static -o build/raw32 raw.S
+          i686-linux-gnu-gcc -O2 -static -no-pie -fno-pie -o build/ret32nopie ret.c
+          file build/ret32 build/raw32 build/ret32nopie; i686-linux-gnu-gcc --version | head -n 1
           x86_64-linux-gnu-gcc -O2 -static -o build/ret64 ret.c
           i686-linux-gnu-gcc -O2 -msse2 -static -pthread -o build/mp32 litmus/mp32.c
           i686-linux-gnu-gcc -O2 -static -pthread -o build/threads32 tests/threads.c
@@ -72,7 +77,7 @@ jobs:
             up) F=$PWD/up/Build/Bin/FEX; [ -x "$F" ] || continue; echo "== FEX without the patches" ;;
             *) F=$(ls -d $p/tso-arm-*)/fex/prebuilt/bin/FEX; echo "== $($(ls -d $p/tso-arm-*)/bin/tso-arm version | head -n 2 | tr '\n' ' ')" ;;
             esac
-            for q in ret64 ret32 threads32:2 threads32:8 mp32:mp:20000 mp32:vec:20000; do
+            for q in ret64 raw32 ret32 ret32nopie threads32:2 mp32:mp:20000; do
               FEX_TSOENABLED=1 FEX_OUTPUTLOG=stderr $F build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
               echo "$q: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-220)"
             done
@@ -80,7 +85,7 @@ jobs:
           # the statically linked FEX (its own C library, not the host's), as in a container
           S=$(ls -d new/tso-arm-*)/fex/prebuilt/bin/FEX-static
           echo "== statically linked FEX of the new package"
-          for q in ret64 ret32 threads32:2 mp32:mp:20000; do
+          for q in ret64 raw32 ret32 ret32nopie threads32:2; do
             TSO_ARM_HANDOVER=1 FEX_OUTPUTLOG=stderr $S build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
             echo "$q: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-220)"
           done
