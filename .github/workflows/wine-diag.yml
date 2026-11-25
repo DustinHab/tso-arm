@@ -89,11 +89,20 @@ jobs:
                 # its neighbours, whose file names tell the library (the views show its data as /dev/zero)
                 sudo cat /proc/$q/maps | while read -r range rest; do lo=$((0x${range%-*})); [ $lo -ge $((a - 0x4000000)) ] && [ $lo -le $((a + 0x100000)) ] && echo "      $range $rest"; done | tail -n 14
                 if [ -f strace-$n.txt ]; then
-                  tids="$q $(grep "^$q " strace-$n.txt | sed -n 's/.*clone3\{0,1\}(.*) = \([0-9][0-9]*\)$/\1/p' | tr '\n' ' ')"
+                  # the process's threads: those created with CLONE_THREAD by it or by its threads (a call strace
+                  # splits into "unfinished" and "resumed" has its flags in the first line)
+                  tids=$(awk -v q=$q '
+                    { pid = $1 }
+                    /clone3?\(/ { call[pid] = $0 }
+                    / = [0-9]+$/ && (/clone3?\(/ || /<\.\.\. clone3? resumed>/) { if (call[pid] ~ /CLONE_THREAD/) creator[$NF] = pid }
+                    END {
+                      member[q] = 1
+                      do { more = 0; for (t in creator) if (!(t in member) && (creator[t] in member)) { member[t] = 1; more = 1 } } while (more)
+                      for (t in member) printf "%s ", t
+                    }' strace-$n.txt)
                   echo "   its threads in strace: $tids"
-                  for tid in $tids; do grep "^$tid " strace-$n.txt | tail -n 12 | sed 's/^/      /'; done
-                  echo "   the word in strace:"
-                  grep "$(printf '%#x' $((a)))" strace-$n.txt | grep -E "^($(echo $tids | tr ' ' '|')) " | tail -n 20 | sed 's/^/      /'
+                  echo "   their calls (without FEX's waits for a fork's copy), the last 70:"
+                  grep -E "^($(echo $tids | sed 's/ *$//' | tr ' ' '|')) " strace-$n.txt | grep -v 'FUTEX_WAIT, 0, {tv_sec=0, tv_nsec=20000000}\|<... futex resumed>) *= -1 ETIMEDOUT' | tail -n 70 | sed 's/^/      /'
                 fi
               fi
               sudo cat /proc/$q/status | grep -E '^(SigBlk|SigPnd|ShdPnd|Threads)'
