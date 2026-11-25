@@ -58,7 +58,7 @@ jobs:
           for m in ${{ github.event.inputs.modes }}; do
             echo "== spsc.exe, $m"
             s=$(date +%s)
-            TSO_ARM_MODE=$m bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$m.log 2>&1 </dev/null &
+            TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$m.log bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$m.log 2>&1 </dev/null &
             p=$!
             for i in $(seq 120); do kill -0 $p 2>/dev/null || break; sleep 1; done
             echo "program: $(kill -0 $p 2>/dev/null && echo 'still running' || echo ended) after $(( $(date +%s) - s )) s: $(grep '^spsc' spsc-$m.log)"
@@ -68,12 +68,15 @@ jobs:
             done
             mine | sort -k6 | awk '{ print $2, $4, $6 }' | sort | uniq -c | sort -rn | head -n 12
             for q in $(mine | awk '$6 == "explorer.exe" { print $1 }' | head -n 2); do
-              echo "-- explorer.exe $q, threads:"
+              pp=$(awk '{print $4}' /proc/$q/stat)
+              echo "-- explorer.exe $q, parent $pp ($(tr '\0' ' ' </proc/$pp/cmdline 2>/dev/null | cut -c1-80)), syscall $(sudo cat /proc/$q/syscall), cpu $(awk '{print $14 + $15}' /proc/$q/stat) ticks, threads:"
+              sudo cat /proc/$q/status | grep -E '^(SigBlk|SigPnd|ShdPnd|Threads)'
               for t in /proc/$q/task/*; do
                 echo "   $(basename $t) $(awk '{print $3}' $t/stat) $(cat $t/wchan) syscall $(cut -d' ' -f1 $t/syscall 2>/dev/null)"
                 sudo cat $t/stack 2>/dev/null | head -n 5 | sed 's/^/      /'
               done
             done
+            [ -f views-$m.log ] && { echo "views log: $(grep -c . views-$m.log) lines, $(grep -c 'fork:' views-$m.log) forks"; grep -E 'fork|not ours' views-$m.log | tail -n 8; }
             tail -n 4 spsc-$m.log
             killnew
           done
