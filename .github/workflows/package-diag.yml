@@ -64,6 +64,12 @@ jobs:
           x86_64-linux-gnu-gcc -O2 -static -o build/ret64 ret.c
           i686-linux-gnu-gcc -O2 -msse2 -static -pthread -o build/mp32 litmus/mp32.c
           i686-linux-gnu-gcc -O2 -static -pthread -o build/threads32 tests/threads.c
+      # the programs, to run them elsewhere (built with this runner's C library)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: programs-${{ github.event.inputs.runner || 'ubuntu-22.04-arm' }}
+          retention-days: 7
+          path: build/
       - name: Each FEX, each program
         run: |
           set +e
