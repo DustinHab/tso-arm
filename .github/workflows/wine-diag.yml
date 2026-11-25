@@ -46,28 +46,34 @@ jobs:
           set +e
           sudo dmesg -n 7
           sudo dmesg -w --time-format iso | sed 's/^/kernel: /' &
-          ( while :; do echo "memory: $(date +%T) $(free -m | awk '/^Mem/ { print $3 " MB used, " $7 " MB available" }') load $(cut -d' ' -f1 /proc/loadavg)"; sleep 10; done ) &
           export WINEPREFIX=$HOME/.wine-diag WINEDEBUG=err+all
           w=$(bin/tso-arm wine | sed -n 's/^Wine .* in \(.*\)$/\1/p')/opt/wine-stable/bin/wineserver
+          mine() { ps -u "$(id -u)" -o pid=,stat=,etime=,wchan:24=,rss=,comm= | grep -v -E ' (ps|grep|sed|bash|sh|sleep|sudo|dmesg|Runner|node|systemd|sd-pam|dbus|awk|head|cut|sort|uniq|wc|tail)$'; }
+          before=$(ps -u "$(id -u)" -o pid= | tr -d ' ' | sort -n)
+          killnew() { for p in $(ps -u "$(id -u)" -o pid= | tr -d ' ' | sort -n); do echo "$before" | grep -qx "$p" || kill -9 "$p" 2>/dev/null; done; sleep 2; }
           echo "== wineboot, full ordering"
-          TSO_ARM_MODE=full timeout -k 10 600 bin/tso-arm wine wineboot --init >wb.log 2>&1; echo "status $?"; tail -n 5 wb.log
+          TSO_ARM_MODE=full timeout -k 10 600 bin/tso-arm wine wineboot --init >wb.log 2>&1; echo "status $?"; tail -n 3 wb.log
           TSO_ARM_MODE=full timeout -k 10 60 bin/tso-arm run $w -w; echo "server ended: $?"
+          killnew
           for m in ${{ github.event.inputs.modes }}; do
             echo "== spsc.exe, $m"
-            TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$m.log bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$m.log 2>&1 </dev/null &
+            s=$(date +%s)
+            TSO_ARM_MODE=$m bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$m.log 2>&1 </dev/null &
             p=$!
-            for i in $(seq 90); do kill -0 $p 2>/dev/null || break; sleep 1; done
-            if kill -0 $p 2>/dev/null; then
-              echo "still running after 90 s; threads of the FEX processes:"
-              for q in $(pgrep -f 'bin/FEX'); do
-                echo "-- $q: $(tr '\0' ' ' </proc/$q/cmdline | cut -c1-120)"
-                for t in /proc/$q/task/*; do
-                  echo "   $(basename $t) $(awk '{print $3}' $t/stat) $(cat $t/wchan) syscall $(cut -d' ' -f1 $t/syscall 2>/dev/null)"
-                  sudo cat $t/stack 2>/dev/null | head -n 6 | sed 's/^/      /'
-                done
+            for i in $(seq 120); do kill -0 $p 2>/dev/null || break; sleep 1; done
+            echo "program: $(kill -0 $p 2>/dev/null && echo 'still running' || echo ended) after $(( $(date +%s) - s )) s: $(grep '^spsc' spsc-$m.log)"
+            for t in 10 30 60; do
+              sleep $(( t == 10 ? 10 : 20 + (t == 60 ? 10 : 0) ))
+              echo "after +$t s: $(mine | wc -l) processes, explorer.exe $(mine | grep -c explorer), $(free -m | awk '/^Mem/ { print $3 " MB used" }')"
+            done
+            mine | sort -k6 | awk '{ print $2, $4, $6 }' | sort | uniq -c | sort -rn | head -n 12
+            for q in $(mine | awk '$6 == "explorer.exe" { print $1 }' | head -n 2); do
+              echo "-- explorer.exe $q, threads:"
+              for t in /proc/$q/task/*; do
+                echo "   $(basename $t) $(awk '{print $3}' $t/stat) $(cat $t/wchan) syscall $(cut -d' ' -f1 $t/syscall 2>/dev/null)"
+                sudo cat $t/stack 2>/dev/null | head -n 5 | sed 's/^/      /'
               done
-              grep -c . views-$m.log; grep 'not ours\|deadlock\|timed out\|lock' views-$m.log | tail -n 20
-            fi
-            tail -n 6 spsc-$m.log
-            pkill -9 -f 'bin/FEX'; sleep 2; pkill -9 -f FEXServer; sleep 1
+            done
+            tail -n 4 spsc-$m.log
+            killnew
           done
