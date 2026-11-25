@@ -1,12 +1,12 @@
 name: Fork diagnosis
 
-# By hand: tests/forksnap.c many times under the page protocol on GitHub's Arm runner, with core dumps kept and
-# FEX's and the views' messages, to find a crash seen once in the release check.
+# By hand: tests/forksnap.c many times under the page protocol on GitHub's Arm runner, as tso-arm runs it (profile,
+# fallback) and with the page protocol throughout (no fallback, no profile), with FEX's messages.
 on:
   workflow_dispatch:
     inputs:
       runs:
-        description: runs of forksnap
+        description: runs of forksnap per setting
         default: '40'
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross gdb
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
@@ -33,15 +33,18 @@ jobs:
         run: |
           set +e
           x86_64-linux-gnu-gcc -O2 -static -pthread -o forksnap tests/forksnap.c
-          ulimit -c unlimited
-          sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p >/dev/null
-          ok=0
-          for i in $(seq ${{ github.event.inputs.runs }}); do
-            out=$(TSO_VIEWS_LOG=/tmp/views-$i.log timeout 120 bin/tso-arm run ./forksnap 50 2>/tmp/err-$i.log | tail -n 1); st=$?
-            case $out in "forksnap: 50 forks, 0 children"*) ok=$((ok + 1)); rm -f /tmp/views-$i.log ;; *)
-              echo "run $i: status $st: $out"; tail -n 5 /tmp/err-$i.log
-              grep -E 'not ours|keeps faulting|fork' /tmp/views-$i.log | tail -n 12 ;;
-            esac
+          for setting in default throughout; do
+            rm -rf ~/.cache/tso-arm
+            env=""
+            [ $setting = throughout ] && env="TSO_VIEWS_BUDGET=0 TSO_VIEWS_PROFILE=none"
+            ok=0
+            for i in $(seq ${{ github.event.inputs.runs }}); do
+              out=$(env $env FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr timeout 120 bin/tso-arm run ./forksnap 50 2>/tmp/err.log | tail -n 1); st=$?
+              fb=$(grep -c 'full ordering after' /tmp/err.log)
+              case $out in "forksnap: 50 forks, 0 children"*) ok=$((ok + 1)) ;; *)
+                echo "$setting run $i: status $st, fallback lines $fb: $out"; grep -v '^I tso-arm: views on' /tmp/err.log | tail -n 4 ;;
+              esac
+              [ "$fb" -gt 0 ] && echo "$setting run $i: fell back ($(grep -m1 'full ordering after' /tmp/err.log))"
+            done
+            echo "$setting: $ok of ${{ github.event.inputs.runs }} runs right"
           done
-          echo "forksnap: $ok of ${{ github.event.inputs.runs }} runs right"
-          ls -la /tmp/core.* 2>/dev/null | head
