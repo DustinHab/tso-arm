@@ -32,9 +32,16 @@ fail=0
 for m in tso full unordered; do
     s=$(date +%s%N)
     st=0
-    all=$(TSO_ARM_MODE=$m WINEDEBUG=err+all timeout 900 $T wine "$exe" $n 2>&1) || st=$?
+    # into a file, not a pipe: Wine's processes left behind (under the page protocol) would hold a pipe open
+    log=/tmp/winehq-$$-$m.log
+    TSO_ARM_MODE=$m WINEDEBUG=err+all timeout 900 $T wine "$exe" $n >$log 2>&1 </dev/null || st=$?
     ms=$((($(date +%s%N) - s) / 1000000))
+    all=$(cat $log)
+    rm -f $log
     out=$(printf '%s\n' "$all" | grep '^spsc:' | tail -n 1)
+    sleep 3
+    left=$(pgrep -u "$(id -u)" -c -f '\.exe' || true)
+    [ "${left:-0}" -gt 0 ] && echo "      $m: $left Windows processes still there 3 s after the program (wineserver -k ends them)"
     TSO_ARM_MODE=full timeout 120 $T run $w -k >/dev/null 2>&1
     if [ $m = unordered ]; then
         echo "      without ordering, for comparison: ${out:-exit status $st} ($ms ms)"
