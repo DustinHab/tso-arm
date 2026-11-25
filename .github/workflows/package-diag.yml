@@ -18,7 +18,7 @@ on:
         default: v0.4.4
       upstream:
         description: 'yes: FEX without the patches as well (built here, at the commit the patches apply to)'
-        default: 'yes'
+        default: 'no'
 
 jobs:
   diag:
@@ -42,7 +42,7 @@ jobs:
           gh release download ${{ github.event.inputs.before || 'v0.4.4' }} -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D oldpkg
           tar -xzf oldpkg/*.tar.gz -C old
       - name: FEX without the patches
-        if: github.event.inputs.upstream != 'no'
+        if: github.event.inputs.upstream == 'yes'
         run: |
           base=$(sed -n 's/^BASE=\([0-9a-f]*\).*/\1/p' fex/install.sh)
           git clone -q https://github.com/FEX-Emu/FEX.git up && cd up && git checkout -q $base && git submodule update -q --init --recursive
@@ -74,6 +74,13 @@ jobs:
               FEX_TSOENABLED=1 FEX_OUTPUTLOG=stderr $F build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
               echo "$q: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-220)"
             done
+          done
+          # the statically linked FEX (its own C library, not the host's), as in a container
+          S=$(ls -d new/tso-arm-*)/fex/prebuilt/bin/FEX-static
+          echo "== statically linked FEX of the new package"
+          for q in ret64 ret32 threads32:2 mp32:mp:20000; do
+            TSO_ARM_HANDOVER=1 FEX_OUTPUTLOG=stderr $S build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
+            echo "$q: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-220)"
           done
           c=$(ls /tmp/core.* 2>/dev/null | head -n 1)
           if [ -n "$c" ]; then
