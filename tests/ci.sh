@@ -47,6 +47,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/segload tests/segload.c
     $CC -O2 -static -pthread -o $B/forksnap tests/forksnap.c
     $CC -O2 -static -pthread -o $B/forkeintr tests/forkeintr.c
+    $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/preempt tests/preempt.c
     $CC -O2 -static -o $B/sigspin tests/sigspin.c
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
@@ -130,7 +131,7 @@ done
 # what Wine does and the views took wrongly (notes section 58): memory mapped with PROT_WRITE or PROT_EXEC alone,
 # which x86 makes readable, segment register loads, whose descriptor FEX reads from its own memory, and a fork while
 # another thread writes, whose child must see memory as it was at the fork
-for p in writeonly segload forksnap; do
+for p in writeonly segload forksnap filegrow; do
     for m in tso full unordered; do
         out=$(last $T run --mode $m $B/$p) || fail "$p, $m: $out"
         ok "$m: $out"
