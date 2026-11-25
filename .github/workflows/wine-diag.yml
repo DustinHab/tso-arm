@@ -11,6 +11,9 @@ on:
       messages:
         description: messages of the ring buffer
         default: '2000000'
+      strace:
+        description: 'yes: each run under strace (futex, clone, execve, exit), and the calls of the waiting processes shown'
+        default: 'no'
 
 jobs:
   diag:
@@ -22,7 +25,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 zstd squashfs-tools gcc-mingw-w64-x86-64
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 zstd squashfs-tools gcc-mingw-w64-x86-64 strace
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
@@ -63,7 +66,9 @@ jobs:
             case $r in *:*) vars=$(echo "${r#*:}" | tr ',' ' ') ;; esac
             echo "== spsc.exe, $m ${vars:-}"
             s=$(date +%s)
-            env $vars TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$n.log bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$n.log 2>&1 </dev/null &
+            st=""
+            [ "${{ github.event.inputs.strace }}" = yes ] && st="strace -f -qq -s 64 -o $PWD/strace-$n.txt -e trace=futex,clone,clone3,execve,exit,exit_group,tgkill,kill,set_robust_list"
+            env $vars TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$n.log $st bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$n.log 2>&1 </dev/null &
             p=$!
             for i in $(seq 120); do kill -0 $p 2>/dev/null || break; sleep 1; done
             echo "program: $(kill -0 $p 2>/dev/null && echo 'still running' || echo ended) after $(( $(date +%s) - s )) s: $(grep '^spsc' spsc-$n.log)"
@@ -81,6 +86,15 @@ jobs:
               if [ -n "$a" ]; then
                 sudo cat /proc/$q/maps | while read -r range rest; do [ $((a)) -ge $((0x${range%-*})) ] && [ $((a)) -lt $((0x${range#*-})) ] && echo "   in: $range $rest"; done
                 echo "   value: $(sudo dd if=/proc/$q/mem bs=1 count=4 skip=$((a)) iflag=skip_bytes 2>/dev/null | od -An -tx4)"
+                # its neighbours, whose file names tell the library (the views show its data as /dev/zero)
+                sudo cat /proc/$q/maps | while read -r range rest; do lo=$((0x${range%-*})); [ $lo -ge $((a - 0x4000000)) ] && [ $lo -le $((a + 0x100000)) ] && echo "      $range $rest"; done | tail -n 14
+                if [ -f strace-$n.txt ]; then
+                  tids="$q $(grep "^$q " strace-$n.txt | sed -n 's/.*clone3\{0,1\}(.*) = \([0-9][0-9]*\)$/\1/p' | tr '\n' ' ')"
+                  echo "   its threads in strace: $tids"
+                  for tid in $tids; do grep "^$tid " strace-$n.txt | tail -n 12 | sed 's/^/      /'; done
+                  echo "   the word in strace:"
+                  grep "$(printf '%#x' $((a)))" strace-$n.txt | grep -E "^($(echo $tids | tr ' ' '|')) " | tail -n 20 | sed 's/^/      /'
+                fi
               fi
               sudo cat /proc/$q/status | grep -E '^(SigBlk|SigPnd|ShdPnd|Threads)'
               for t in /proc/$q/task/*; do

@@ -2734,3 +2734,70 @@ run). What they wait for: orphaned (their parent is init: Wine starts its explor
 `futex(0x3f4691d60, FUTEX_WAIT_PRIVATE, 1)` without a time limit, a word in the guest's memory near its C library;
 0.44 s of CPU each, no signal pending or blocked; the views' log has 143 forks for the run. Under full ordering none
 is left. Until that is found, `tso-arm wine` runs Wine with full ordering (`TSO_ARM_MODE=tso` tries the page protocol).
+
+## 59. FEX's newest commit, containers, and forks after the fallback (2026-11-25)
+
+**FEX 8e980598.** The patches were made on be66e03 (2026-11-16); FEX's main branch had 44 commits more. Stage 2
+applied with a three-way merge; stage 3 conflicted in `SignalDelegator.cpp`, where FEX had moved its synchronous
+faults (`ud2`, `int3`, faults the translated code raises itself) out of the dispatcher's own blocks into the
+frontend (`SynchronousExceptionHandler`, which raises the host fault from C++), right where the patch put its helper
+for the host signal stack. Both kept; FEX's signal-mask helper went, which the patches no longer used. The commit the
+patches apply to is named once, in `fex/install.sh`, and read by `build_views.sh` and `export_views.sh`. CI, the
+compatibility and the Wine workflows passed on it at once; on the Pi the full check (litmus, threads up to 64, the
+three workloads) passed and the efficiency is 85 % (pigz 90, xz 89, zstd 77 %), as before within the noise.
+
+**Containers.** `docker run --platform linux/amd64` starts a container's programs through binfmt_misc. Docker's own
+images register QEMU with the `F` flag: the kernel opens the interpreter at registration and starts it in any mount
+namespace. FEX could not be that interpreter: it is linked against the host's Arm libraries (its dynamic loader is not
+in an x86 container) and does not start without FEXServer (an abstract socket, per network namespace, and a
+program the container does not have). Now FEX's program is linked a second time, statically, as a position-independent
+executable (`FEX-static`, a CMake target of its own built after FEX; a static executable at the usual address
+0x400000 would sit where x86 programs load), and `tso-arm binfmt register` registers it with the flags `PF` (P: the
+program's own argv[0] kept). Started by the kernel it first looks for the host's installation: the script
+`tso-arm-binfmt` beside it (a link the installation puts there) and a shell of the host's architecture to run it
+(`/bin/sh` an Arm ELF file). On the host it hands the program on to the script and so to `tso-arm run` (root file
+system, profile, libraries translated ahead of time) with the argv[0] that P added taken out again; the script takes
+`TSO_ARM_HANDOVER` away, and if it is still set, the script did not run. In a container FEX runs the program itself:
+no server, the container's own `/` as the root file system, `tso-arm run`'s settings (`FEX_MAXINST=150`, the mode
+from `TSO_ARM_MODE`); for a 32-bit program the views go (`TSO_VIEWS` unset after the ELF file is read), as `tso-arm
+run` has it. Under sudo `binfmt register` takes the static FEX from the home directory of the user who called it.
+Not the C flag: the kernel would start the interpreter with a setuid program's rights, and on the host it hands
+programs to a shell script that reads the caller's environment.
+
+`tests/container_check.sh` in CI, Ubuntu 24.04's image: `uname -m`, the threads test linked statically and against
+the container's C library, fork with threads, signals, 32-bit threads, and `apt-get install python3` with Python's
+threads afterwards; a container started after the installation for every user as well.
+
+**A fault of FEX's own allocator.** The static FEX crashed at once with a 32-bit program on the Pi, and with every
+program on GitHub's runner: rpmalloc's heap pointer for the main thread was 0 at FEX's first allocation. A hardware
+watchpoint on it never fired (the kernel cleared it, not a store); a catchpoint on the memory system calls with the
+address in range found `madvise(0x204a6d000, 0x5350aea000, MADV_DONTNEED)` from `OSAllocator_64Bit::MakeRegionActive`
+(`InitializeVMARegionUsed`), ending at 0x5555557000 for a region that ends at 0x5555556000. The allocator manages
+FEX's own memory above a 32-bit program's 4 GB, and above 47 bits on a 48-bit host; it clears the rest of each
+region it takes into use, from the tracking bits on, which start a page into the region (after the `LiveVMARegion`),
+for a length counted from the region's start: one page past its end. That page is the first of whatever follows the
+region; a statically linked C library keeps the main thread's TLS in the brk heap, which followed. In FEX as built
+before, the page was a library's first page or the stack's lowest, read-only or unused, mostly without harm. The
+patch clears up to the region's end.
+
+**fork after the fallback.** The Wine diagnosis, now with runs of their own settings, gave the same picture in every
+variant: orphaned single-thread `explorer.exe` processes in `futex(0x3f4691d60, FUTEX_WAIT_PRIVATE, 1)`, the word in
+guest memory (a `/dev/zero (deleted)` shared mapping: the views' memory) with the value 1; without exact signals the
+same (27), with the views awake from the start more (45), and without profiles many more (238, and the runner's
+memory full). Profiles have programs that fell back to full ordering start without views at all, with private memory
+the kernel copies on write at a fork. Without them, programs fall back at run time and keep the views' shared memory,
+and `FreezeForFork`, which takes the other threads' write rights from their views while the child copies, does
+nothing there: after the fallback their translated code writes guest memory directly. `forksnap` with one view slot
+(the second thread has none: fallback) and no profile: 49 of 50 children saw memory from after the fork.
+
+Now such a fork holds the other threads: each gets FEX's own signal (the one for pausing, with a reason of its own)
+and waits in the handler, after it has counted itself in, until the child has its copy; the fork goes on once all are
+there, or after 50 ms (a thread that waits with its signals blocked for a lock the fork holds writes nothing). The
+list of threads is taken with `try_lock`, as a thread may hold it while waiting for the code invalidation lock the
+fork holds. The signal interrupts system calls: a thread in `poll`, `nanosleep` or `read` came back with EINTR, 150
+times in 50 forks (`tests/forkeintr.c`), which the program never asked for. The signal's handler now has `SA_RESTART`,
+and a call that the kernel does not make again after a handler (poll, nanosleep, epoll_wait) is made again by FEX's
+system call handler when the hold came during it and no signal of the guest's waits for delivery; sigreturn, whose
+result is the interrupted code's RAX, never. `forksnap` and `forkeintr` after a forced fallback in `tests/ci.sh`:
+0 of 50, 0 interrupted. A fork with the views copies the parent's writable memory either way: 57 ms for forksnap's
+64 MB on the Pi, held or not.
