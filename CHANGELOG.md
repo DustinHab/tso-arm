@@ -34,7 +34,9 @@ prebuilt anew, now with FEX's thunks.
   with SIGILL through the Vulkan thunk (in every ordering mode), 32-bit programs have no Vulkan thunk.
 - Windows programs: `tso-arm wine PROGRAM.exe` runs them through WineHQ's Wine 11 for Ubuntu 24.04, fetched on first
   use (checked against WineHQ's package index). A ring buffer between two Win32 threads: 20 million messages, all
-  right with x86 order kept, 351,869 wrong without ordering. The Wine workflow runs it on GitHub's Arm runner.
+  right with x86 order kept, 351,869 wrong without ordering. The Wine workflow runs it on GitHub's Arm runner. Wine runs
+  with FEX's full ordering by default for now: under the page protocol some of its processes (explorer.exe started
+  without a display) are left waiting on a lock of the guest's C library (`TSO_ARM_MODE=tso` tries it).
 - Fixed in FEX, found with Wine: memory mapped with `PROT_WRITE` or `PROT_EXEC` alone is readable on x86, and the
   page protocol took reads of it for faults of the program's own (wineserver stopped at its start); a segment
   register load (`mov %eax, %ds`) read the descriptor from FEX's own table through the views (every Windows program

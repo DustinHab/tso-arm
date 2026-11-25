@@ -285,7 +285,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   i386 libraries as well.
 - **Windows programs** through `tso-arm wine` (WineHQ's Wine 11, fetched on first use; notes section 58): a ring
   buffer between two Win32 threads gets all of 20 million messages right with x86 order kept, some 350,000 wrong
-  without ordering. **AppImages** run unpacked (they find no `fusermount` in the root file system).
+  without ordering; with FEX's full ordering by default for now (under the page protocol some of Wine's processes
+  are left waiting). **AppImages** run unpacked (they find no `fusermount` in the root file system).
 - **Graphics:** x86 programs draw with the x86 Mesa of the root file system, which has no driver for the GPUs of many
   Arm boards. `--gpu` sends Vulkan through FEX's thunk to the host's driver and puts OpenGL on it through Zink: on
   the Pi 5 an x86-64 program's OpenGL reports `zink Vulkan 1.3(V3D 7.1.10.2)`. Off unless asked for (FEX's thunks

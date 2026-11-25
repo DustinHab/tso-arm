@@ -14,10 +14,11 @@ done.
 | 4 | GPU acceleration for x86 programs (FEX's thunks) | when asked for (0.4.4); FEX's thunks are incomplete |
 | 5 | Installing for every user, in one line, and updating | done (0.4.4) |
 | 6 | Containers: `docker run --platform linux/amd64` | open |
-| 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine`, two faults fixed |
+| 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine` (full ordering for now), three faults fixed |
 | 8 | The page protocol for 32-bit programs | open |
-| 9 | A guide for users: what runs, what to do when something does not | `tso-arm report` (0.4.4); guide open |
+| 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | open |
+| 11 | The page protocol for Wine: explorer.exe children left waiting on a lock of the guest's C library | open |
 
 ## 1. 32-bit x86 programs
 

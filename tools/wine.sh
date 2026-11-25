@@ -102,6 +102,10 @@ install)
     [ -x "$D/current/opt/wine-stable/bin/wine" ] || install_wine
     # Windows programs open windows; Wine's own debug channels stay quiet unless WINEDEBUG says otherwise
     export WINEDEBUG=${WINEDEBUG:--all}
+    # Full ordering unless TSO_ARM_MODE says otherwise: under the page protocol Wine's programs run right, but some of
+    # its processes (explorer.exe children started without a display) are left waiting on a lock of the guest's C
+    # library for ever, and they pile up (notes section 58); under full ordering none is left
+    export TSO_ARM_MODE=${TSO_ARM_MODE:-full}
     exec "$R/bin/tso-arm" run "$D/current/opt/wine-stable/bin/wine" "$@"
     ;;
 esac

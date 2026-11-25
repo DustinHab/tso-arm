@@ -2728,3 +2728,9 @@ child has its copy, or when the fork failed: their writes fault and wait for the
 holds until then. `forksnap` 0 of 50; a fork with a thread running costs 3.4 to 3.6 ms instead of 3.15 ms. Not
 covered: a process in the fallback (its translated code writes guest memory directly), and the kernel writing into
 guest memory for another thread's system call while the child copies.
+
+The `explorer.exe` processes are left waiting with the fork fixed as well (the diagnosis after it: 22 left after one
+run). What they wait for: orphaned (their parent is init: Wine starts its explorer detached), one thread each,
+`futex(0x3f4691d60, FUTEX_WAIT_PRIVATE, 1)` without a time limit, a word in the guest's memory near its C library;
+0.44 s of CPU each, no signal pending or blocked; the views' log has 143 forks for the run. Under full ordering none
+is left. Until that is found, `tso-arm wine` runs Wine with full ordering (`TSO_ARM_MODE=tso` tries the page protocol).
