@@ -7,7 +7,12 @@
   beside FEX and in the release package, with binfmt_misc's `F` flag: the kernel starts it in a container as well,
   where it runs the program itself, without FEX's server and on the container's own files; on the host it hands
   programs on to `tso-arm run` as before. `tests/container_check.sh` in CI (Ubuntu 24.04's image: its own programs,
-  tso-arm's test programs, `apt-get install python3`). 32-bit programs do not run in containers yet.
+  tso-arm's test programs, 64-bit and 32-bit, `apt-get install python3`).
+- A fault of FEX's own, found by the statically linked FEX: its allocator for FEX's memory above a 32-bit program's
+  4 GB (and above 47 bits on a host with 48-bit addresses) threw away the first page of whatever mapping followed each
+  region it took into use (`madvise(MADV_DONTNEED)` one page too long). In the statically linked FEX that page held
+  the main thread's thread-local storage, and FEX crashed at once; in FEX as built before it hit a page of a library
+  or the stack, mostly without harm.
 - FEX: the patches on FEX 8e980598 (2026-11-24), 44 commits newer than be66e03; FEX moved its synchronous faults
   into its frontend meanwhile.
 - `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead

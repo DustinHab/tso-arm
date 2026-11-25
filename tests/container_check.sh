@@ -59,7 +59,7 @@ print(\"python threads:\", n[0])
 [ "$out" = "python threads: 400000" ] && ok "apt-get install python3, then $out ($(($(date +%s) - s)) s)" ||
     bad "apt-get and python3: $out"
 
-# 32-bit programs: not in containers yet, and said so
-out=$(run "$img" /ci/threads32 2 | tail -n 1)
-echo "$out" | grep -q 'do not run in containers yet' && ok "32-bit: refused with a message" || bad "32-bit: $out"
+# a 32-bit program (FEX orders every access of it itself)
+out=$(run "$img" /ci/threads32 8 | tail -n 1)
+echo "$out" | grep -q 'wrong 0' && ok "32-bit threads 8: $out" || bad "32-bit threads 8: $out"
 exit $fail

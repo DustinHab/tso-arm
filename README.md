@@ -291,7 +291,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Containers:** `docker run --platform linux/amd64 IMAGE` runs x86-64 images once `binfmt register` (the
   installation for every user does it) has registered a statically linked FEX with binfmt_misc's `F` flag: in a
   container it runs the program itself, without FEX's server and on the container's own files, with x86 order kept;
-  on the host it hands programs on to `tso-arm run`. 32-bit programs do not run in containers yet.
+  on the host it hands programs on to `tso-arm run`. 32-bit programs run in containers too.
 - **Graphics:** x86 programs draw with the x86 Mesa of the root file system, which has no driver for the GPUs of many
   Arm boards. `--gpu` sends Vulkan through FEX's thunk to the host's driver and puts OpenGL on it through Zink: on
   the Pi 5 an x86-64 program's OpenGL reports `zink Vulkan 1.3(V3D 7.1.10.2)`. Off unless asked for (FEX's thunks

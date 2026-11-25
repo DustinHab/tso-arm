@@ -1,4 +1,4 @@
-From f44273f06a66271e400c0fa61df2ea214fdeed97 Mon Sep 17 00:00:00 2001
+From 30d2aa0b8ffc2dbfb52efaaaadeebbb1e67a9ed5 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -19,6 +19,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Interface/IR/IREmitter.h       |   15 +
  .../Interface/IR/Passes/GuestViewPass.cpp     |   49 +-
  .../IR/Passes/RegisterAllocationPass.cpp      |    2 +-
+ .../Source/Utils/Allocator/64BitAllocator.cpp |   12 +-
  FEXCore/Source/Utils/AllocatorHooks.cpp       |   41 +
  FEXCore/include/FEXCore/Core/Context.h        |   10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
@@ -28,7 +29,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Common/FDUtils.h                       |   32 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  107 +-
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  106 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
  .../LinuxSyscalls/FileManagement.h            |    1 +
@@ -45,7 +46,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 41 files changed, 3426 insertions(+), 223 deletions(-)
+ 42 files changed, 3435 insertions(+), 225 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -727,6 +728,29 @@ index 26f579fef5962e87c7af2810748f1866108afa87..d286793ec508d522767ab248ae0f79ad
            LastNode = nullptr;
          }
          continue;
+diff --git a/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp b/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
+index b136ec50dbb6e4b3570fafa26cc0aec9fdeb02c8..1723483aa049bb289e3dcd321d74cb4e63e566c1 100644
+--- a/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
++++ b/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
+@@ -124,8 +124,16 @@ private:
+       // Use madvise to set the full tracking region to zero.
+       // This ensures unused pages are zero, while not having the backing pages consuming memory.
+       auto* MemoryAsBytes = reinterpret_cast<uint8_t*>(Region->UsedPages.Memory);
+-      const auto TrackingRegionSize = Region->SlabInfo->RegionSize - ManagedSize;
+-      ::madvise(MemoryAsBytes + ManagedSize, TrackingRegionSize, MADV_DONTNEED);
++      // tso-arm: up to the region's end. The tracking bits start a page into the region, after the LiveVMARegion: a
++      // length of RegionSize - ManagedSize from there went a page past the end, into the start of whatever mapping
++      // follows the region, and threw its contents away (a statically linked FEX: the main thread's TLS, which its
++      // C library puts in the brk heap; rpmalloc's thread heap pointer there became 0, and FEX crashed at its first
++      // allocation with a 32-bit guest, or with any on a 48-bit host).
++      const auto RegionEnd = Region->SlabInfo->Base + Region->SlabInfo->RegionSize;
++      const auto TrackingBegin = reinterpret_cast<uintptr_t>(MemoryAsBytes + ManagedSize);
++      if (RegionEnd > TrackingBegin) {
++        ::madvise(MemoryAsBytes + ManagedSize, RegionEnd - TrackingBegin, MADV_DONTNEED);
++      }
+ 
+       // Use madvise to claim WILLNEED on the beginning pages for initial state tracking.
+       // Improves performance of the following MemClear by not doing a page level fault dance for data necessary to track >170TB of used pages.
 diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
 index 63f84a824c25858ec175b0bad99823cb85628225..55ac344d163faec286be9024f023d96459b0cdaf 100644
 --- a/FEXCore/Source/Utils/AllocatorHooks.cpp
@@ -1172,7 +1196,7 @@ index 9e15947ae184fa0c8b7d295f6255ce9c0cce30ed..4491df685c4f025dec5ffcb7434de5ac
    if (NOT USE_LEGACY_BINFMTMISC)
      # Just restart the systemd service
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b914c97204dfaadc24771b96fc9bc4163bc..91e84a3d9ecb2e83dbfb2d0d73167db83b0d8140 100644
+index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924f605d30b 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -22,6 +22,7 @@ $end_info$
@@ -1305,21 +1329,20 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..91e84a3d9ecb2e83dbfb2d0d73167db8
      LogMan::Msg::EFmt("FEXServerClient: Failure to setup client");
      return -1;
    }
-@@ -492,6 +577,13 @@ int main(int argc, char** argv, char** const envp) {
+@@ -492,6 +577,12 @@ int main(int argc, char** argv, char** const envp) {
  
    ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
    FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
 +#ifdef TSO_ARM_STATIC
-+  // tso-arm: FEX linked statically does not set up a 32-bit guest's address space yet (it crashed in rpmalloc)
++  // tso-arm: the views are for 64-bit programs; FEX orders every access of a 32-bit one itself, as 'tso-arm run' has it
 +  if (TSOArm::Container && Loader.ELFWasLoaded() && !Loader.Is64BitMode()) {
-+    fextl::fmt::print(stderr, "tso-arm: 32-bit x86 programs do not run in containers yet ({})\n", Program.ProgramPath);
-+    return 1;
++    unsetenv("TSO_VIEWS");
 +  }
 +#endif
  
    if (!Loader.ELFWasLoaded()) {
      // Loader couldn't load this program for some reason
-@@ -535,6 +627,16 @@ int main(int argc, char** argv, char** const envp) {
+@@ -535,6 +626,16 @@ int main(int argc, char** argv, char** const envp) {
      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
    }
  
@@ -1336,7 +1359,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..91e84a3d9ecb2e83dbfb2d0d73167db8
    // Setup Thread handlers, so FEXCore can create threads.
    auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
  
-@@ -617,6 +719,9 @@ int main(int argc, char** argv, char** const envp) {
+@@ -617,6 +718,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  

@@ -120,9 +120,9 @@ docker run --rm --platform linux/amd64 ubuntu:24.04 uname -m     # x86_64
 
 Docker and Podman start a container's programs through the kernel, which hands x86 ones to tso-arm's statically
 linked FEX: it needs nothing of the computer's own files inside the container, and it keeps x86's memory order as
-`tso-arm run` does (`-e TSO_ARM_MODE=full` or `unordered` picks another mode). `tso-arm binfmt` says whether
-containers are covered. Not yet in containers: 32-bit programs (`linux/386` images, i386 programs in an x86-64
-image), `--gpu`, and what `learn` translated. If QEMU was registered for x86 programs as well (Docker Desktop's
+`tso-arm run` does (`-e TSO_ARM_MODE=full` or `unordered` picks another mode), 32-bit programs as well. `tso-arm
+binfmt` says whether containers are covered. Not in containers: `--gpu`, and what `learn` translated (both need the
+computer's own files). If QEMU was registered for x86 programs as well (Docker Desktop's
 `binfmt` image, `qemu-user-static`), the one registered last is used: `tso-arm binfmt` names it, and `sudo tso-arm
 binfmt register` puts tso-arm last again.
 
