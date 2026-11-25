@@ -29,7 +29,7 @@ libraries translated ahead of time: 82 % of the host's own Arm builds, against 6
 ## Quick start
 
 [docs/GUIDE.md](docs/GUIDE.md) is the guide for using it: installing, programs with libraries, AppImages, graphics,
-Windows programs, what to do when a program does not run.
+Windows programs, containers, what to do when a program does not run.
 
 On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS with the 4 KB
 kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and `tso-arm check` names the line that changes that):
@@ -45,7 +45,8 @@ The first line installs the newest release with FEX prebuilt (a few seconds, not
 `~/.local/share/tso-arm` and the command into `~/.local/bin`; `tso-arm update` brings it up to date later, `tso-arm
 uninstall` removes it. With `| sudo sh` instead it installs for every user: into `/opt/tso-arm`, the command into
 `/usr/local/bin`, and x86 programs started directly (`./program`, a double click) run through tso-arm, after a reboot
-as well; `sudo tso-arm rootfs` then fetches one root file system for all users.
+as well, x86-64 containers too (`docker run --platform linux/amd64 IMAGE`); `sudo tso-arm rootfs` then fetches one
+root file system for all users.
 
 From a git checkout instead: `git clone https://github.com/DustinHab/tso-arm && tso-arm/bin/tso-arm install`
 (FEX prebuilt where the release has one for exactly these patches, otherwise built from source), and `sudo
@@ -287,6 +288,10 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   buffer between two Win32 threads gets all of 20 million messages right with x86 order kept, some 350,000 wrong
   without ordering; with FEX's full ordering by default for now (under the page protocol some of Wine's processes
   are left waiting). **AppImages** run unpacked (they find no `fusermount` in the root file system).
+- **Containers:** `docker run --platform linux/amd64 IMAGE` runs x86-64 images once `binfmt register` (the
+  installation for every user does it) has registered a statically linked FEX with binfmt_misc's `F` flag: in a
+  container it runs the program itself, without FEX's server and on the container's own files, with x86 order kept;
+  on the host it hands programs on to `tso-arm run`. 32-bit programs do not run in containers yet.
 - **Graphics:** x86 programs draw with the x86 Mesa of the root file system, which has no driver for the GPUs of many
   Arm boards. `--gpu` sends Vulkan through FEX's thunk to the host's driver and puts OpenGL on it through Zink: on
   the Pi 5 an x86-64 program's OpenGL reports `zink Vulkan 1.3(V3D 7.1.10.2)`. Off unless asked for (FEX's thunks
@@ -328,7 +333,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm update` | the newest release, for an installation by `tools/get.sh` (`sudo` for one for every user) |
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
-| `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) run through tso-arm; register and unregister need root |
+| `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) and x86-64 containers run through tso-arm; register and unregister need root |
 | `tso-arm version` | the version, and the FEX it uses |
 | `tso-arm report [PROGRAM [ARGS]]` | what a bug report needs, as one block to paste |
 

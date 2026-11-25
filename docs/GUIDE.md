@@ -110,6 +110,22 @@ one that passes data between two threads without locks, 20 million messages, all
 hundred thousand wrong without ordering. `tso-arm wine` keeps that order with FEX's full ordering for now
 (`TSO_ARM_MODE=tso` tries the page protocol, which still leaves some of Wine's processes waiting).
 
+## Containers
+
+With the installation for every user (or `sudo tso-arm binfmt register`), x86-64 container images run as well:
+
+```sh
+docker run --rm --platform linux/amd64 ubuntu:24.04 uname -m     # x86_64
+```
+
+Docker and Podman start a container's programs through the kernel, which hands x86 ones to tso-arm's statically
+linked FEX: it needs nothing of the computer's own files inside the container, and it keeps x86's memory order as
+`tso-arm run` does (`-e TSO_ARM_MODE=full` or `unordered` picks another mode). `tso-arm binfmt` says whether
+containers are covered. Not yet in containers: 32-bit programs (`linux/386` images, i386 programs in an x86-64
+image), `--gpu`, and what `learn` translated. If QEMU was registered for x86 programs as well (Docker Desktop's
+`binfmt` image, `qemu-user-static`), the one registered last is used: `tso-arm binfmt` names it, and `sudo tso-arm
+binfmt register` puts tso-arm last again.
+
 ## Keeping it up to date
 
 ```sh

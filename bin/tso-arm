@@ -200,7 +200,12 @@ cmd_binfmt() {
         # containers: the statically linked FEX beside the FEX in use, with the F flag (the kernel opens it now and
         # starts it in every mount namespace) and P (the program's own argv[0] kept); it hands programs on the host
         # on to the script beside it, which binfmt_misc started before
-        if F=$(fex 2>/dev/null) && [ -x "$(dirname "$F")/FEX-static" ] && [ -e "$(dirname "$F")/tso-arm-binfmt" ]; then
+        # (under sudo the FEX tso-arm install put into the home directory of the user who called it)
+        F=$(fex 2>/dev/null) || {
+            h=$([ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" | cut -d: -f6)
+            F=${h:+$h/.local/opt/tso-arm/bin/FEX}
+        }
+        if [ -n "$F" ] && [ -x "$(dirname "$F")/FEX-static" ] && [ -e "$(dirname "$F")/tso-arm-binfmt" ]; then
             interp=$(dirname "$F")/FEX-static
             flags=PF
             if [ -n "$inst" ]; then

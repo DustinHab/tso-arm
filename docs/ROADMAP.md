@@ -13,11 +13,11 @@ done.
 | 3 | Raspberry Pi OS on a Pi 5 boots a 16 KB-page kernel | done (0.4.4) |
 | 4 | GPU acceleration for x86 programs (FEX's thunks) | when asked for (0.4.4); FEX's thunks are incomplete |
 | 5 | Installing for every user, in one line, and updating | done (0.4.4) |
-| 6 | Containers: `docker run --platform linux/amd64` | open |
+| 6 | Containers: `docker run --platform linux/amd64` | done (0.4.5) for x86-64 programs; 32-bit ones not yet |
 | 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine` (full ordering for now), three faults fixed |
 | 8 | The page protocol for 32-bit programs | open |
 | 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
-| 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | open |
+| 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
 | 11 | The page protocol for Wine: explorer.exe children left waiting on a lock of the guest's C library | open |
 
 ## 1. 32-bit x86 programs
@@ -98,9 +98,21 @@ loader of its own: FEX is dynamically linked against the host's libraries.
 
 Looked at: FEX's build has no static variant, and FEX will not start without its server (FEXServer, which it starts
 from its own path when none answers on its socket); inside a container both the server's socket (an abstract one,
-per network namespace) and the libraries the server and FEX link are missing. A container needs FEX and FEXServer
-linked statically (or the host's Arm libraries mounted in), and FEX's root file system set to the container's own
-`/`. Not started.
+per network namespace) and the libraries the server and FEX link are missing.
+
+Done: FEX's program linked statically as well, as a position-independent executable (`FEX-static`, built beside
+FEX; static-pie, since a static executable at x86's usual address would sit where x86 programs load), in the
+release package and in every build from source where the static C and C++ libraries are there. `tso-arm binfmt
+register` registers it with the `F` and `P` flags (the program's own `argv[0]` kept). Started by the kernel, it looks
+for the host's installation: where the script beside it is in reach, and a shell of the host's own architecture to
+run it, it hands the program on to `tso-arm run`, as before; elsewhere, in a container, it runs the program itself,
+without the server, on the container's own files (no root file system), with tso-arm's settings (`TSO_ARM_MODE`).
+`tests/container_check.sh` in CI: `uname -m` in Ubuntu 24.04's image, the threads test linked statically and against
+the container's own C library, fork with threads, signals, and `apt-get install python3` with Python's threads
+afterwards; and a container started after the installation for every user.
+
+Open: 32-bit programs in containers. The statically linked FEX crashes setting up a 32-bit guest's address space
+(rpmalloc's thread heap is empty after FEX moves its allocations above 4 GB); it refuses them with a message.
 
 ## 7. Wider tests
 
@@ -137,6 +149,11 @@ how it ends in each ordering mode into one block; the issue template asks for it
 
 ## 10. FEX's newest commit
 
-The patches are made on FEX be66e03 (2026-11-16) and applied to it in every build. FEX's main branch has moved on
-since: stage 2 still applies with a three-way merge, stage 3 conflicts in `SignalDelegator.cpp`. The weekly
-`upstream.yml` run against FEX's main fails until the patches are rebased.
+The patches were made on FEX be66e03 (2026-11-16). FEX's main branch had moved on by 44 commits: stage 2 applied
+with a three-way merge, stage 3 conflicted in `SignalDelegator.cpp`, where FEX moved its synchronous faults (`ud2`,
+`int3`, a fault the translated code raises itself) from the dispatcher's own blocks into the frontend
+(`SynchronousExceptionHandler`), next to tso-arm's helper for the host signal stack.
+
+Done: the patches on FEX 8e980598 (2026-11-24), the conflict merged (both kept; FEX's helper for signal masks went,
+which the patches no longer used), and the commit the patches apply to named in one place (`fex/install.sh`), which
+`build_views.sh` and `export_views.sh` read. CI, the compatibility and the Wine workflows pass on it.

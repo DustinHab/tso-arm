@@ -2,6 +2,14 @@
 
 ## 0.4.5 (not released yet)
 
+- x86-64 containers: `docker run --platform linux/amd64 IMAGE` runs x86-64 images with x86 order kept, once `tso-arm
+  binfmt register` has run (the installation for every user does it). It registers a statically linked FEX, built
+  beside FEX and in the release package, with binfmt_misc's `F` flag: the kernel starts it in a container as well,
+  where it runs the program itself, without FEX's server and on the container's own files; on the host it hands
+  programs on to `tso-arm run` as before. `tests/container_check.sh` in CI (Ubuntu 24.04's image: its own programs,
+  tso-arm's test programs, `apt-get install python3`). 32-bit programs do not run in containers yet.
+- FEX: the patches on FEX 8e980598 (2026-11-24), 44 commits newer than be66e03; FEX moved its synchronous faults
+  into its frontend meanwhile.
 - `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead
   of "not installed yet" after the one-line installation.
 

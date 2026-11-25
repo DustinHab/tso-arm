@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       modes:
-        description: ordering modes to run the program in, in this order
+        description: 'runs, in this order: a mode, or MODE:VAR=VALUE,VAR=VALUE for one with settings of its own'
         default: full tso
       messages:
         description: messages of the ring buffer
@@ -55,13 +55,18 @@ jobs:
           TSO_ARM_MODE=full timeout -k 10 600 bin/tso-arm wine wineboot --init >wb.log 2>&1; echo "status $?"; tail -n 3 wb.log
           TSO_ARM_MODE=full timeout -k 10 60 bin/tso-arm run $w -w; echo "server ended: $?"
           killnew
-          for m in ${{ github.event.inputs.modes }}; do
-            echo "== spsc.exe, $m"
+          n=0
+          for r in ${{ github.event.inputs.modes }}; do
+            n=$((n + 1))
+            m=${r%%:*}
+            vars=""
+            case $r in *:*) vars=$(echo "${r#*:}" | tr ',' ' ') ;; esac
+            echo "== spsc.exe, $m ${vars:-}"
             s=$(date +%s)
-            TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$m.log bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$m.log 2>&1 </dev/null &
+            env $vars TSO_ARM_MODE=$m TSO_VIEWS_LOG=$PWD/views-$n.log bin/tso-arm wine ./spsc.exe ${{ github.event.inputs.messages }} >spsc-$n.log 2>&1 </dev/null &
             p=$!
             for i in $(seq 120); do kill -0 $p 2>/dev/null || break; sleep 1; done
-            echo "program: $(kill -0 $p 2>/dev/null && echo 'still running' || echo ended) after $(( $(date +%s) - s )) s: $(grep '^spsc' spsc-$m.log)"
+            echo "program: $(kill -0 $p 2>/dev/null && echo 'still running' || echo ended) after $(( $(date +%s) - s )) s: $(grep '^spsc' spsc-$n.log)"
             for t in 10 30 60; do
               sleep $(( t == 10 ? 10 : 20 + (t == 60 ? 10 : 0) ))
               echo "after +$t s: $(mine | wc -l) processes, explorer.exe $(mine | grep -c explorer), $(free -m | awk '/^Mem/ { print $3 " MB used" }')"
@@ -70,13 +75,20 @@ jobs:
             for q in $(mine | awk '$6 == "explorer.exe" { print $1 }' | head -n 2); do
               pp=$(awk '{print $4}' /proc/$q/stat)
               echo "-- explorer.exe $q, parent $pp ($(tr '\0' ' ' </proc/$pp/cmdline 2>/dev/null | cut -c1-80)), syscall $(sudo cat /proc/$q/syscall), cpu $(awk '{print $14 + $15}' /proc/$q/stat) ticks, threads:"
+              echo "   its command line: $(tr '\0' ' ' </proc/$q/cmdline | cut -c1-160)"
+              # the futex word it waits on (the system call's first argument): the mapping it lies in, and its value
+              a=$(sudo cat /proc/$q/syscall | awk '$1 == 98 { print $2 }')
+              if [ -n "$a" ]; then
+                sudo cat /proc/$q/maps | while read -r range rest; do [ $((a)) -ge $((0x${range%-*})) ] && [ $((a)) -lt $((0x${range#*-})) ] && echo "   in: $range $rest"; done
+                echo "   value: $(sudo dd if=/proc/$q/mem bs=1 count=4 skip=$((a)) iflag=skip_bytes 2>/dev/null | od -An -tx4)"
+              fi
               sudo cat /proc/$q/status | grep -E '^(SigBlk|SigPnd|ShdPnd|Threads)'
               for t in /proc/$q/task/*; do
                 echo "   $(basename $t) $(awk '{print $3}' $t/stat) $(cat $t/wchan) syscall $(cut -d' ' -f1 $t/syscall 2>/dev/null)"
                 sudo cat $t/stack 2>/dev/null | head -n 5 | sed 's/^/      /'
               done
             done
-            [ -f views-$m.log ] && { echo "views log: $(grep -c . views-$m.log) lines, $(grep -c 'fork:' views-$m.log) forks"; grep -E 'fork|not ours' views-$m.log | tail -n 8; }
-            tail -n 4 spsc-$m.log
+            [ -f views-$n.log ] && { echo "views log: $(grep -c . views-$n.log) lines, $(grep -c 'fork:' views-$n.log) forks"; grep -E 'fork|not ours' views-$n.log | tail -n 8; }
+            tail -n 4 spsc-$n.log
             killnew
           done
