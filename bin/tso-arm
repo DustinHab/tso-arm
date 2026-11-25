@@ -454,8 +454,8 @@ cmd_run() {
 # host's own Vulkan library and with it to the GPU's driver (the x86 Mesa of a root file system has no driver for the
 # GPUs of many Arm boards and draws with the CPU), and its OpenGL goes through the x86 Mesa's Zink (OpenGL on Vulkan)
 # onto that. FEX's own OpenGL thunk stopped with an X error and a core dump on an X server in CI (glxinfo, glxgears),
-# so it is not selected. Off unless asked for, as in FEX: x86-64 Vulkan reaches the Pi 5's V3D and vkcube runs, but
-# vulkaninfo stops with SIGILL in every ordering mode, and 32-bit programs have no Vulkan thunk. The directories are
+# so it is not selected. Off unless asked for, as in FEX: x86-64 Vulkan reaches the Pi 5's V3D and vkcube and
+# vulkaninfo run, but FEX's thunks are incomplete, and 32-bit programs have no Vulkan thunk. The directories are
 # given here because a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection
 # (fex/thunks.json: Vulkan), MESA_LOADER_DRIVER_OVERRIDE another OpenGL driver.
 thunks() {

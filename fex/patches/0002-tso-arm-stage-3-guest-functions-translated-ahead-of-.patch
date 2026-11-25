@@ -1,4 +1,4 @@
-From be362077c74699ebb1d608655e2a255e8302ea39 Mon Sep 17 00:00:00 2001
+From 18769d80762365533052a018c78f1138d839aac3 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -46,9 +46,9 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |   37 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
- ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
+ ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   60 +-
- 44 files changed, 3778 insertions(+), 248 deletions(-)
+ 44 files changed, 3786 insertions(+), 249 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -6024,10 +6024,33 @@ index 16a89ce706bb4b42cfc7cb8eab98243235cc7d21..609c9b26431f3918d6efe4a144937af1
 +void AOTOrderAll();
  } // namespace FEX::HLE
 diff --git a/ThunkLibs/libvulkan/Guest.cpp b/ThunkLibs/libvulkan/Guest.cpp
-index 553518ea2450b61181b4fed572c7e6f0e5a86eea..f6f8c7d4b9f858001034ee7447cfa7d55c1d5465 100644
+index 553518ea2450b61181b4fed572c7e6f0e5a86eea..e18f381a7e0fb8ea5dd04c22628d59c74bbe1354 100644
 --- a/ThunkLibs/libvulkan/Guest.cpp
 +++ b/ThunkLibs/libvulkan/Guest.cpp
-@@ -58,7 +58,7 @@ static PFN_vkVoidFunction MakeGuestCallable(const char* origin, PFN_vkVoidFuncti
+@@ -15,6 +15,7 @@ $end_info$
+ #include "common/Guest.h"
+ 
+ #include <cstdio>
++#include <cstdlib>
+ #include <dlfcn.h>
+ #include <functional>
+ #include <string_view>
+@@ -50,7 +51,13 @@ static void FatalError(void* raw_args) {
+ static PFN_vkVoidFunction MakeGuestCallable(const char* origin, PFN_vkVoidFunction func, const char* name) {
+   auto It = HostPtrInvokers.find(name);
+   if (It == HostPtrInvokers.end()) {
+-    fprintf(stderr, "%s: Unknown Vulkan function at address %p: %s\n", origin, func, name);
++    // tso-arm: such a function is a null pointer for the application, which is what the specification answers for
++    // one the implementation lacks; Vulkan programs look up every function they know of (vulkaninfo, DXVK), and a
++    // line for each read like an error. TSO_ARM_VULKAN_UNKNOWN=1 prints them.
++    static const bool Say = getenv("TSO_ARM_VULKAN_UNKNOWN") && getenv("TSO_ARM_VULKAN_UNKNOWN")[0] == '1';
++    if (Say) {
++      fprintf(stderr, "%s: Unknown Vulkan function at address %p: %s\n", origin, func, name);
++    }
+     if (stub_unknown_functions) {
+       const auto StubHostPtrInvoker = CallHostFunction<FatalError, void>;
+       LinkAddressToFunction((uintptr_t)func, reinterpret_cast<uintptr_t>(StubHostPtrInvoker));
+@@ -58,7 +65,7 @@ static PFN_vkVoidFunction MakeGuestCallable(const char* origin, PFN_vkVoidFuncti
      }
      return nullptr;
    }

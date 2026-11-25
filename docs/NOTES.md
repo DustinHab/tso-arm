@@ -2857,3 +2857,39 @@ with 0.4.5, with FEX without the patches and with FEX linked statically alike; a
 The same programs built with Ubuntu 24.04's i386 C library run everywhere, and dynamically linked ones take the
 root file system's. So it is glibc 2.35's i386 start-up under FEX (roadmap item 13); the release's checks build
 their 32-bit programs on Ubuntu 24.04.
+
+## 60. After 0.4.5: the AT_SYSINFO page, EFAULT in copy-on-write ranges, vulkaninfo (2026-11-26)
+
+**i386 programs of glibc 2.35 and older** (roadmap item 13). They crashed at their first system call, also under
+FEX without the patches. glibc up to 2.35 makes every i386 system call through the entry AT_SYSINFO names (`call
+*%gs:0x10`). Where FEX has no VDSO to take that from (linked statically, a build without its thunks, `tso-arm run`
+without `--gpu`), it maps a page of its own with `int 0x80; ret`, readable and writable through its own mmap, and
+then makes it read-only and executable on the host alone. FEX's tracking of guest mappings kept the page as not
+executable, and FEX does not translate code it knows so: the guest ended at the call. The page is mapped executable
+for the guest now and writable on the host only while the code goes in. `tests/vsyscall32.c` calls through
+AT_SYSINFO; the release's checks build their 32-bit programs on Ubuntu 22.04 again.
+
+**EFAULT in a copy-on-write range.** A writable private mapping of a file without a name is the file itself until
+its first write (section 59). The kernel writing into it for a system call (a `read` into a section Wine mapped,
+before the program wrote it) cannot take the views' fault and returned EFAULT. Now a system call that comes back with
+EFAULT is made again once, after the copy-on-write range an argument points into is copied (`UnshareCopyOnWriteAt`);
+a buffer named only through an `iovec` is not looked at. `tests/cowmap.c` reads from a pipe into such a mapping.
+
+**vulkaninfo under `--gpu`.** It stopped with SIGILL in every ordering mode, at the host's own
+`vkEnumeratePhysicalDevices` (`libvulkan.so.1` of the host, its first instruction, `bti`/`paciasp` bytes, which FEX
+decodes as `pop ds`, invalid in 64-bit mode). That looked like FEX translating the host function as guest code
+because the trampoline linked to its address had not taken. It had: the return address on the guest stack lay in the
+guest thunk's invoker for that function, past its call into the host. The SIGILL came from the host: `si_addr` was an
+address in vulkaninfo's own code, its debug messenger's function, which vulkaninfo chains into `vkCreateInstance`
+(`VkDebugUtilsMessengerCreateInfoEXT`). The thunk passes a 64-bit program's structures to the host as they are, and
+the host's loader called that x86 function as Arm code for its first warning; FEX delivered the host's SIGILL to the
+guest with the last guest address it had entered, the trampoline's. FEX's thunk took only the older
+`VkDebugReportCallbackCreateInfoEXT` out of the chain. Now every structure that hands the host a guest function
+(both kinds of debug messenger, a device memory report, a list of drivers for the loader to load) is unlinked for the
+call and linked back after it, so that the program's structures are as it made them; the messengers the program
+creates with their own functions got a host function from FEX before already. `tests/vkproc.c` chains a messenger for
+every severity: under FEX without the fix SIGILL at once, through the root file system's x86 loader 104 messages; the
+graphics check runs it and `vulkaninfo --summary` with and without `--gpu`. On the way: the guest thunk printed a
+line for every function the program looked up that FEX has no signature for (`vkCmdDispatchGraphAMDX` and nine more
+for vulkaninfo); the program gets a null pointer for those, as the specification has it for a function the
+implementation lacks, and the lines only where `TSO_ARM_VULKAN_UNKNOWN=1` asks for them.

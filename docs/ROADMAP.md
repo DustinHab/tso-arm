@@ -72,11 +72,18 @@ the build machine). `tests/gpu_info.c` on the Pi 5:
 | x86-64, `--gpu` | V3D 7.1.10.2 (the host's driver) | 185 ms |
 | 32-bit, `--gpu` | llvmpipe: FEX has no 32-bit Vulkan thunk | 587 ms |
 
-Why not by default: Ubuntu's `vulkaninfo` stops with SIGILL through FEX's Vulkan thunk in every ordering mode when
-its output goes to a file (to a terminal it finishes), FEX's EGL thunk lacks `eglGetConfigs` and `eglQueryString`
-(FEX's database has no entry for it), and OpenGL through GLX could not be tried on the Pi without an X server. FEX
-leaves its thunks off by default for the same reason. Open: a program with a window under Xvfb in CI with and without
-`--gpu`, and where `vulkaninfo` stops.
+Why not by default: FEX's EGL thunk lacks `eglGetConfigs` and `eglQueryString` (FEX's database has no entry for it),
+and OpenGL through GLX could not be tried on the Pi without an X server. FEX leaves its thunks off by default for the
+same reason. A program with a window runs under Xvfb in CI with and without `--gpu` (item 7).
+
+Where `vulkaninfo` stopped (found and fixed for 0.4.6): it chains a debug messenger into `vkCreateInstance`, whose
+function is the program's own x86 code. FEX's Vulkan thunk passed the chain to the host's loader as it was, and the
+loader called that function for its first warning as Arm code: SIGILL, reported at the last guest address FEX had
+entered (the trampoline of `vkEnumeratePhysicalDevices`, which looked like a link that had not taken). The thunk took
+only the older debug report structure out of such chains. Now every structure that hands the host a guest function
+(debug messengers and reports, a device memory report, a list of drivers to load) is taken out for the call and put
+back after it; `tests/vkproc.c` chains a messenger for every severity, and the graphics check runs it and `vulkaninfo
+--summary` with and without `--gpu`. A fault of FEX's own.
 
 ## 5. Installing for every user, and updating
 

@@ -16,6 +16,9 @@
   function to the host's loader, which called it as Arm code. Such structures (debug messengers and reports, a device
   memory report, a list of drivers to load) are taken out of the chain for the call now and put back after it. A
   fault of FEX's own; `tests/vkproc.c`, and the graphics check runs vulkaninfo and it with and without `--gpu`.
+- `--gpu`: no line on the terminal any more for each Vulkan function a program looks up that FEX's thunk has no
+  signature for (vulkaninfo had ten, DXVK more); the program gets a null pointer for it, as before.
+  `TSO_ARM_VULKAN_UNKNOWN=1` prints them.
 
 ## 0.4.5 (2026-11-25)
 
