@@ -68,7 +68,8 @@ done
 [ -z "$missing" ] && say "to build FEX from source" "all found" ||
     say "to build FEX from source" "missing:$missing (only without the prebuilt FEX)"
 fex=""
-for f in "$TSO_ARM_FEX" "${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
+# where 'tso-arm run' looks, in its order: the prebuilt FEX of a release package (fex/prebuilt) among them
+for f in "$TSO_ARM_FEX" "${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}/bin/FEX" "$PWD/fex/prebuilt/bin/FEX" "$HOME/opt/fex-views/bin/FEX"; do
     if [ -n "$f" ] && [ -x "$f" ]; then
         fex=$f
         break

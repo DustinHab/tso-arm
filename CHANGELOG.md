@@ -1,5 +1,10 @@
 # Changes
 
+
+## 0.4.5 (not released yet)
+
+- `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead
+  of "not installed yet" after the one-line installation.
 ## 0.4.4 (2026-11-25)
 
 What people run on an Arm computer beyond command-line x86-64 programs: 32-bit programs, AppImages, Windows programs
