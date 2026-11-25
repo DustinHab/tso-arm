@@ -18,8 +18,9 @@ done.
 | 8 | The page protocol for 32-bit programs | open |
 | 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
-| 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | open, narrowed down |
+| 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | open: cause found (item 11) |
 | 12 | fork after the views fell back to full ordering | done (0.4.5) |
+| 13 | Statically linked i386 programs of glibc 2.35 (Ubuntu 22.04's) crash at start-up under FEX | open (FEX's own) |
 
 ## 1. 32-bit x86 programs
 
@@ -176,8 +177,18 @@ the Windows side (`KeUserModeCallback`). The explorer process has one thread thr
 starting processes) and then waits on that `pthread_once` with the value 1, "in progress": its own initialization
 called `NtUserCreateWindowEx` again from within the callback and waits for itself. Under full ordering it does not.
 On the way, a fault of the views' own was found and fixed: a fork after the fallback to full ordering gave the child
-memory written after the fork (item 12); the explorer processes are left waiting with that fixed as well. Next: what
-user32's callback does differently under the views (Wine's own traces of the explorer process under both orderings).
+memory written after the fork (item 12); the explorer processes are left waiting with that fixed as well.
+
+The cause (Wine's own traces, `warn+winstation`): `Session object id doesn't match expected id`, and so `Failed to get
+shared session object for window class` and `failed to create desktop window`, after which the explorer starts
+another explorer and ends in the recursion above. wineserver writes the session's objects into a file it grows; every
+Wine process maps that file, on Linux on purpose as a private mapping with read and write rights (Wine relies on Linux
+showing the file's later changes in a private mapping not written to). The views copy a writable private file
+mapping when it is made: the process kept what the file held then, and every object wineserver added later read
+wrong. Two smaller faults of the same kind were found and fixed on the way (0.4.5): a read-only private mapping past
+the file's end was zeros of its own (`tests/filegrow.c`), and a `MAP_FIXED` mapping over memory another thread's views
+mapped left those views on the old memory. Next: a writable private file mapping as the file itself until it is
+written, copied at the first write (a fault), as the kernel does page by page.
 
 ## 12. fork after the fallback
 
@@ -186,3 +197,12 @@ taking their views' write rights; after a fallback to full ordering their transl
 directly, past the views. Done (0.4.5): such a fork holds the other threads with FEX's own signal until the child has
 its copy, and a system call that signal interrupted is made again (no EINTR for the program). `tests/forksnap.c`
 and `tests/forkeintr.c` after a forced fallback in `tests/ci.sh`.
+
+## 13. Statically linked i386 programs of glibc 2.35
+
+Found by the release's checks, which build their 32-bit test programs on the runner: on Ubuntu 22.04 every statically
+linked i386 program crashed at start-up (the guest reads address 0), under FEX without the patches as well, and with
+FEX linked statically too; a program without a C library (`exit` through `int 0x80`) runs there. The same programs
+built with Ubuntu 24.04's cross C library (glibc 2.39) run, and dynamically linked 32-bit programs take the C library
+of the root file system (Ubuntu 24.04's). So it is glibc 2.35's i386 start-up code under FEX, not the host. Open; the
+release's checks build their 32-bit programs on Ubuntu 24.04.

@@ -1,4 +1,4 @@
-From 5aa0846f25f441ebc8070f4459b2cf389ae580d7 Mon Sep 17 00:00:00 2001
+From f2760ebfa722c88d7dc19e99a512be2ba5da515c Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -39,14 +39,14 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/Syscalls/Thread.cpp         |   70 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  192 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1137 +++++++++++++++--
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  166 ++-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1209 +++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  176 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |   92 +-
  .../LinuxSyscalls/ThreadManager.h             |   37 +-
- Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++++
+ Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 42 files changed, 3602 insertions(+), 230 deletions(-)
+ 42 files changed, 3682 insertions(+), 232 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -2896,7 +2896,7 @@ index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba5
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af69de9887e 100644
+index 76be33d737559e72474c8c50006170f43d983c57..888d9ca297429c65007ecea298234936ad3ad538 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -30,8 +30,15 @@ $end_info$
@@ -3440,10 +3440,10 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 -      AliasNone(Addr, Length, OrderedViewBase(S));
 +    if (!SlotUsed[S] || (!Eager && S != 0 && S != Slot)) {
 +      continue;
-     }
++    }
 +    if (S != 0) {
 +      AliasNone(Addr, Length, SlotBase(S));
-+    }
+     }
 +    AliasNone(Addr, Length, OrderedViewBase(S));
 +    Mask |= uint16_t(1U << S);
    }
@@ -3542,9 +3542,12 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    End = std::min(End, Window);
    if (Addr >= End) {
      return;
-@@ -478,15 +807,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+@@ -476,17 +805,18 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+     if (S >= E) {
+       continue;
      }
-     const int GP = It->second.Prot;
+-    const int GP = It->second.Prot;
++    const int GP = HostProt(It->second);
      for (int Sl = 0; Sl < Slots; ++Sl) {
 -      if (!SlotUsed[Sl]) {
 +      // only views that map the range: the others hold the reservation, which must stay without rights
@@ -3584,7 +3587,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
        // A view may hold less than O (a right given lazily and not used yet), never more
        if (O != N && ((O & ~N) != 0 || Sl == FaultSlot)) {
          Protect(ViewBase(Sl, Ord) + (Page << PageShift), 1ULL << PageShift, N);
-@@ -521,6 +852,41 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
+@@ -521,6 +852,48 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
  // ---------------------------------------------------------------------------------------------------------------
  // Guest memory management
  
@@ -3602,6 +3605,13 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 +    return 0;
 +  }
 +  return Length;
++}
++
++// A regular file without a name (deleted, or a memfd): memory shared with another process through it, not a program's
++// or a library's file
++static bool Unlinked(int Fd) {
++  struct stat St;
++  return Fd >= 0 && ::fstat(Fd, &St) == 0 && S_ISREG(St.st_mode) && St.st_nlink == 0;
 +}
 +
 +// Copies what can be read of [Src, Src + Length) to Dst: pages of a file mapping past the file's end (SIGBUS when
@@ -3626,11 +3636,12 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
  int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags, int Fd, off_t Offset, int Slot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mmap %#lx+%#lx prot %d flags %#x fd %d slot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot, Flags, Fd, Slot);
-@@ -556,15 +922,25 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -556,15 +929,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
  
      void* R = MAP_FAILED;
      Kind K = Kind::Private;
 +    uint64_t FileLength = 0; // of a private file mapping: the part mapped from the file itself
++    bool Lazy = false;       // a writable private file mapping that stays the file until its first write
      if (Anon && !Shared) {
        R = ::mmap(reinterpret_cast<void*>(A), L, Prot, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
      } else if (Anon) {
@@ -3644,18 +3655,23 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 +      // within the file, the file itself, shared: every view and every process reads the same pages, nothing is
 +      // copied, and it becomes a copy of its own before it gets writable (ForkShared, Unshare). Past the file's end
 +      // and in a writable one: a copy of the file in shared memory, zeros past its end.
-+      FileLength = (Prot & PROT_WRITE) ? 0 : BytesWithinFile(Fd, Offset, L);
-+      R = ::mmap(reinterpret_cast<void*>(A), L, FileLength ? Prot : PROT_READ | PROT_WRITE, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-+      if (R != MAP_FAILED && FileLength && ::mmap(R, FileLength, Prot, MAP_SHARED | MAP_FIXED, Fd, Offset) == MAP_FAILED) {
++      // A writable one of a file nobody names (Unlinked): the file as well, copied at its first write
++      Lazy = (Prot & PROT_WRITE) && Unlinked(Fd);
++      FileLength = (!(Prot & PROT_WRITE) || Lazy) ? BytesWithinFile(Fd, Offset, L) : 0;
++      Lazy = Lazy && FileLength;
++      const int FileProt = Lazy ? (Prot & ~PROT_WRITE) : Prot;
++      R = ::mmap(reinterpret_cast<void*>(A), L, FileLength ? FileProt : PROT_READ | PROT_WRITE, F | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++      if (R != MAP_FAILED && FileLength && ::mmap(R, FileLength, FileProt, MAP_SHARED | MAP_FIXED, Fd, Offset) == MAP_FAILED) {
 +        // A file system mounted noexec, say: copied
 +        FileLength = 0;
++        Lazy = false;
 +        ::mprotect(R, L, PROT_READ | PROT_WRITE);
 +      }
 +      if (R != MAP_FAILED && !FileLength) {
          uint64_t Done = 0;
          while (Done < Length) {
            const auto N = ::pread(Fd, static_cast<char*>(R) + Done, Length - Done, Offset + Done);
-@@ -583,17 +959,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -583,17 +972,41 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
      if (R == MAP_FAILED) {
        if (errno == EEXIST && !Fixed && !NoReplace) {
          // Something unknown to us lives there: remember it as taken and try the next gap
@@ -3668,11 +3684,21 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
  
 -    Insert(A, A + L, Prot, K);
 -    AliasAll(A, L);
++    // A mapping over memory the guest had there (MAP_FIXED): every view that mapped the old memory holds the
++    // reservation again, and gets the new mapping at its thread's first access to it. Left so, another thread's view
++    // went on showing that thread the old memory (the views map the guest's memory again, they do not follow it).
++    if (Fixed && !NoReplace) {
++      if (const uint16_t Old = AliasedIn(A, L)) {
++        ReserveEverywhere(A, L, Old);
++      }
++    }
++
 +    if (FileLength) {
 +      // Two ranges: each view mapping (mremap) takes one mapping of the host's
 +      Insert(A, A + FileLength, Prot, K, AliasNew(A, FileLength, Slot));
 +      Ranges[A].FileBacked = true;
 +      Ranges[A].ForkShared = true;
++      Ranges[A].CopyOnWrite = Lazy;
 +      if (FileLength < L) {
 +        Insert(A + FileLength, A + L, Prot, K, AliasNew(A + FileLength, L - FileLength, Slot));
 +      }
@@ -3690,7 +3716,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      return A;
    }
    return -ENOMEM;
-@@ -606,7 +996,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
+@@ -606,7 +1019,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
    if (::munmap(reinterpret_cast<void*>(Addr), L) == -1) {
      return -errno;
    }
@@ -3699,18 +3725,30 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    Erase(Addr, Addr + L);
    SetState(Addr, Addr + L, 0);
    return 0;
-@@ -616,6 +1006,10 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -616,7 +1029,21 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mprotect %#lx+%#lx prot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot);
    const uint64_t L = PageUp(Length);
+-  if (::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
 +  if (Prot & PROT_WRITE) {
 +    // Writes would reach the forked process that still maps it
 +    UnshareForkShared(Addr, L);
 +  }
-   if (::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
++  bool Cow = false;
++  {
++    auto C = Ranges.lower_bound(Addr);
++    if (C != Ranges.begin() && std::prev(C)->second.End > Addr) {
++      --C;
++    }
++    for (; C != Ranges.end() && C->first < Addr + L; ++C) {
++      Cow |= C->second.CopyOnWrite;
++    }
++  }
++  if (!Cow && ::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
      return -errno;
    }
-@@ -628,11 +1022,14 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+ 
+@@ -628,11 +1055,17 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    }
    for (; It != Ranges.end() && It->first < Addr + L; ++It) {
      const uint64_t S = std::max(It->first, Addr);
@@ -3723,18 +3761,24 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    }
    for (auto& [S, R] : Pieces) {
 -    Insert(S, R.End, R.Prot, R.K);
++    if (Cow && ::mprotect(reinterpret_cast<void*>(S), R.End - S, HostProt(R)) == -1) {
++      return -errno;
++    }
 +    Erase(S, R.End);
 +    Ranges[S] = R;
    }
    Apply(Addr, Addr + L);
    return 0;
-@@ -652,13 +1049,12 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -652,13 +1085,15 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
    const Range Src = *SrcP;
  
    auto Place = [&](uint64_t T, uint64_t Len, Kind K) {
 -    Insert(T, T + Len, Src.Prot, K);
 -    AliasAll(T, Len);
 +    Insert(T, T + Len, Src.Prot, K, AliasNew(T, Len, Slot));
++    Ranges[T].FileBacked = Src.FileBacked;
++    Ranges[T].ForkShared = Src.ForkShared;
++    Ranges[T].CopyOnWrite = Src.CopyOnWrite;
      SetState(T, T + Len, K == Kind::Private ? Mine : SharedRW);
      Apply(T, T + Len);
    };
@@ -3744,7 +3788,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      Erase(A, A + Len);
      SetState(A, A + Len, 0);
    };
-@@ -674,6 +1070,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -674,6 +1109,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
        return -errno;
      }
      Place(T, NewL, Kind::SharedAnon);
@@ -3754,7 +3798,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      return T;
    }
  
-@@ -693,8 +1092,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -693,8 +1131,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
      if (!(Flags & MREMAP_FIXED) && IsFree(Old + OldL, NewL - OldL)) {
        auto R = ::mmap(reinterpret_cast<void*>(Old + OldL), NewL - OldL, Src.Prot, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
        if (R != MAP_FAILED) {
@@ -3764,7 +3808,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
          SetState(Old + OldL, Old + NewL, Mine);
          Apply(Old + OldL, Old + NewL);
          return Old;
-@@ -747,6 +1145,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -747,6 +1184,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      return ::madvise(reinterpret_cast<void*>(Addr), Length, Advice) == -1 ? -errno : 0;
    }
    const uint64_t End = Addr + PageUp(Length);
@@ -3774,7 +3818,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    auto It = Ranges.upper_bound(Addr);
    if (It != Ranges.begin()) {
      --It;
-@@ -757,7 +1158,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -757,7 +1197,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      if (S >= E) {
        continue;
      }
@@ -3783,7 +3827,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      if (::madvise(reinterpret_cast<void*>(S), E - S, A) == -1) {
        return -errno;
      }
-@@ -773,6 +1174,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -773,6 +1213,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    std::lock_guard lk(Mutex);
@@ -3794,7 +3838,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    int S = 1;
    for (; S < Slots; ++S) {
      if (SlotUsable[S] && !SlotUsed[S]) {
-@@ -783,10 +1188,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -783,10 +1227,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    SlotUsed[S] = true;
@@ -3816,7 +3860,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      }
    }
  
-@@ -844,17 +1256,420 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -844,17 +1295,421 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
    const int S = Base / Window;
    const uint16_t Bit = uint16_t(1U << S);
    VLOG("tso-arm: detach slot %d\n", S);
@@ -4061,6 +4105,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 +  }
 +  R.ForkShared = false;
 +  R.FileBacked = false;
++  R.CopyOnWrite = false;
 +  Apply(Start, End);
 +  return Bytes;
 +}
@@ -4073,7 +4118,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 +    --It;
 +  }
 +  for (; It != Ranges.end() && It->first < End; ++It) {
-+    if (!It->second.ForkShared || It->second.End <= Addr || (!Files && It->second.FileBacked)) {
++    if (!It->second.ForkShared || It->second.End <= Addr || (!Files && It->second.FileBacked) || It->second.CopyOnWrite) {
 +      continue;
 +    }
 +    if (Unshare(It->first, It->second, Swap) < 0) {
@@ -4241,7 +4286,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1677,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1717,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -4250,7 +4295,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -878,6 +1693,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -878,6 +1733,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    ProfileChanged = true;
  }
  
@@ -4283,7 +4328,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +1741,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +1781,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -4299,7 +4344,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,11 +1758,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,11 +1798,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -4325,7 +4370,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    Apply(First << PageShift, Last << PageShift);
    ChunkShares[Chunk] = 0;
    Count.Collapsed += Moved;
-@@ -920,10 +1783,11 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -920,22 +1823,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
  }
  
  TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
@@ -4339,7 +4384,25 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
      }
      return Fault::NotOurs;
    };
-@@ -933,9 +1797,32 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
++  // The first write to a copy-on-write range (the guest may write it, the host does not let it yet), at the guest's
++  // own address (the views asleep, the fallback, FEX's own code): copied now, the write runs again
++  if (Write && FaultAddress < Window) {
++    std::lock_guard lk(Mutex);
++    uint64_t RStart {};
++    Range* RM = FindMutable(FaultAddress, &RStart);
++    if (RM && RM->CopyOnWrite && (RM->Prot & PROT_WRITE)) {
++      SwapPages Swap;
++      if (Unshare(RStart, *RM, Swap) >= 0) {
++        if (Log) {
++          fprintf(LogFile(), "tso-arm: copy-on-write %#lx-%#lx copied at its first write\n", (unsigned long)RStart, (unsigned long)RM->End);
++        }
++        return Fault::Retry;
++      }
++    }
++  }
+   if (Stage1() || FaultAddress < Window) {
+     return NotOurs("not a view address");
+   }
    const int View = FaultAddress / Window;
    const bool Ordered = View >= Slots;
    if (View >= 2 * Slots || Slot == 0 || (Ordered ? View - Slots : View) != Slot) {
@@ -4372,7 +4435,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,8 +1833,32 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,8 +1889,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -4395,6 +4458,18 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
 +    return Fault::Retry;
 +  }
 +
++  // The first write to a copy-on-write range, through this thread's view: copied now, the write runs again
++  if (Write && RM->CopyOnWrite) {
++    SwapPages Swap;
++    if (Unshare(RStart, *RM, Swap) >= 0) {
++      if (Log) {
++        fprintf(LogFile(), "tso-arm: copy-on-write %#lx-%#lx copied at its first write\n", (unsigned long)RStart, (unsigned long)RM->End);
++      }
++      LastFault = 0;
++      return Fault::Retry;
++    }
++  }
++
    // The same address faulting over and over means the protocol is stuck: hand it to the normal fault path
    // (an atomic reported as a read first becomes shared read-only, then faults again as a write and is upgraded)
 +  if (const uint32_t E = ForkEpoch.load(std::memory_order_relaxed); E != LastFaultEpoch) {
@@ -4405,7 +4480,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    if (LastFault == FaultAddress) {
      if (++LastFaultCount > 64) {
        LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
-@@ -963,6 +1874,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -963,6 +1942,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -4422,7 +4497,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -1050,7 +1971,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1050,7 +2039,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
  
    if (Log) {
@@ -4431,7 +4506,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
              (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
              Result == Fault::Escalate ? "escalate" : "retry");
    }
-@@ -1058,17 +1979,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1058,17 +2047,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    // Budget: a program that keeps the protocol busy (more than TSO_VIEWS_BUDGET faults per second over the last
    // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
    // faults while a program starts up and its threads first touch their data.
@@ -4467,7 +4542,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
        }
        return Result;
      }
-@@ -1088,6 +2026,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +2094,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -4475,16 +4550,16 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
        }
        return Result;
      }
-@@ -1096,12 +2035,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +2103,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;
 -    Protect(FaultAddress & ~PageMask, 1ULL << PageShift, ViewProt(St, Mask, Slot, Ordered, GP));
 +    AtSite S(SiteStale);
-+    Protect(FaultAddress & ~PageMask, 1ULL << PageShift, ViewProt(St, Mask, Slot, Ordered, PageProt(Page, GP)));
++    Protect(FaultAddress & ~PageMask, 1ULL << PageShift, ViewProt(St, Mask, Slot, Ordered, PageProt(Page, HostProt(*R))));
    } else {
 -    ApplyPage(Page, St, Mask, GP, Slot);
-+    ApplyPage(Page, St, Mask, GP, Slot, R->Aliased);
++    ApplyPage(Page, St, Mask, HostProt(*R), Slot, R->Aliased);
    }
    if (Result == Fault::Escalate) {
      ++Count.Escalations;
@@ -4495,7 +4570,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..ecfa57494728af363bc0b7e4076f6af6
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d6b0ede28 100644
+index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..be07ab1a36e6c58ab66364c712cb51f28f4a144a 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 @@ -5,10 +5,12 @@
@@ -4628,7 +4703,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
    // Counts an access completed in the handler (true) or an instruction repeated as a single-instruction block
    static void NoteAccess(bool Emulated);
    // Counts a thread sent back to the dispatcher from a trapped instruction start
-@@ -80,27 +153,58 @@ private:
+@@ -80,27 +153,68 @@ private:
      uint64_t End;
      int Prot;
      Kind K;
@@ -4642,7 +4717,17 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
 +    // A private file mapping the guest cannot write, mapped from the file itself (shared, like the page cache it
 +    // reads), not copied: ForkShared as well, so it becomes a copy of its own before it gets writable
 +    bool FileBacked {};
++    // A writable private mapping of a file nobody names any more (memory another process shares through it: Wine's
++    // sections, which wineserver writes, mapped private and writable by every Wine process on purpose): FileBacked as
++    // well, the file itself, the guest's write right kept from the host, until the first write copies the range
++    // (Unshare, from a write fault in HandleFault). Until then it reads the file as it is, as a private mapping
++    // natively does: the views copied it at once, and Wine never saw what wineserver added later.
++    bool CopyOnWrite {};
    };
++  // The protection the host gives a range: the guest's, without the write right while it is CopyOnWrite
++  static int HostProt(const Range& R) {
++    return R.CopyOnWrite ? (R.Prot & ~PROT_WRITE) : R.Prot;
++  }
  
    bool Init();
 +  // Moves the private range at Start into shared memory of its own with the same contents, at its address and in
@@ -4694,7 +4779,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
    static void Reserve(uint64_t Base, uint64_t Length);
    static uint64_t ViewBase(int Slot, bool Ordered);
  
-@@ -108,13 +212,35 @@ private:
+@@ -108,13 +222,35 @@ private:
    std::map<uint64_t, Range> Ranges; // guest mappings by start address, split where the protection differs
    bool SlotUsed[FEXCore::TSOViews::Slots] {};
    bool SlotUsable[FEXCore::TSOViews::Slots] {};
@@ -4732,7 +4817,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
    uint8_t QuickAllowed {2}; // TSO_VIEWS_STRIKES: quick changes of hands in a row that still migrate
  
    // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
-@@ -124,6 +250,12 @@ private:
+@@ -124,6 +260,12 @@ private:
    void SaveProfile();
    std::string ProfilePath;
    std::vector<std::pair<uint64_t, uint64_t>> Escalations; // recorded and loaded, for the profile
@@ -4745,7 +4830,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
    bool ProfileLoaded {};
    bool ProfileChanged {};
    uint64_t FaultsSeen {};
-@@ -134,6 +266,7 @@ private:
+@@ -134,6 +276,7 @@ private:
    uint64_t WindowSize {1000};         // TSO_VIEWS_WINDOW: faults per rate measurement
    uint64_t Budget {};
    std::atomic<bool> FallbackRequest {false};
@@ -4753,7 +4838,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
  
  public:
    // True once after the fallback started: the caller then throws away all translated code
-@@ -146,6 +279,11 @@ private:
+@@ -146,6 +289,11 @@ private:
    uint8_t* Owner {};    // page states, one byte per guest page
    uint8_t* ChunkShares {}; // per chunk: private pages shared since the last collapse (nullptr: no chunks)
    uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page

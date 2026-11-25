@@ -68,8 +68,13 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q clang lld python3 python3-pip binutils gcc-x86-64-linux-gnu libc6-dev-amd64-cross \
-            gcc-i686-linux-gnu libc6-dev-i386-cross
+          sudo apt-get install -y -q clang lld python3 python3-pip binutils gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          # 32-bit test programs where the cross C library is 2.39 (Ubuntu 24.04): a statically linked i386 program
+          # of glibc 2.35 (Ubuntu 22.04's) crashes in its start-up code under FEX, without the patches as well
+          # (docs/ROADMAP.md, item 13); one without a C library runs there
+          if [ "${{ matrix.runner }}" = ubuntu-24.04-arm ]; then
+            sudo apt-get install -y -q gcc-i686-linux-gnu libc6-dev-i386-cross
+          fi
           python3 -m pip install --user 'capstone>=5,<6' ||
             python3 -m pip install --user --break-system-packages 'capstone>=5,<6'
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"

@@ -26,6 +26,9 @@ $CC -O2 -static -pthread -o build/ci/segload tests/segload.c
 $CC -O2 -static -pthread -o build/ci/forksnap tests/forksnap.c
 $CC -O2 -static -pthread -o build/ci/forkeintr tests/forkeintr.c
 $CC -O2 -static -pthread -o build/ci/filegrow tests/filegrow.c
+$CC -O2 -static -pthread -o build/ci/fixedover tests/fixedover.c
+$CC -O2 -static -pthread -o build/ci/cowmap tests/cowmap.c
+$CC -O2 -static -pthread -o build/ci/sharedmap tests/sharedmap.c
 $CC -O2 -static -pthread -o build/ci/preempt tests/preempt.c
 $CC -O2 -static -o build/ci/sigspin tests/sigspin.c
 $CC -O2 -static -pthread -o build/ci/sigsync tests/sigsync.c
