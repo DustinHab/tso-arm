@@ -1,4 +1,4 @@
-From 2ab8f7634cb73482f295bff4c907b7cdde10a3a6 Mon Sep 17 00:00:00 2001
+From 857d00fa9fadaa6e694a92c91f6683c7dba5d168 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -37,14 +37,14 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/Syscalls/Thread.cpp         |   58 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  192 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1100 +++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1112 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  166 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |   19 +-
  .../LinuxSyscalls/ThreadManager.h             |   14 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 40 files changed, 3313 insertions(+), 222 deletions(-)
+ 40 files changed, 3325 insertions(+), 222 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index dc854922615a9d1a3509965dd265c4a647f63ea7..53dce36b9f6bca912b62906aa80161a7535233b3 100644
@@ -2673,7 +2673,7 @@ index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba5
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2a2f483fe 100644
+index 76be33d737559e72474c8c50006170f43d983c57..2f3d1649a12fcf235d80f445f7567c7c85ad0e90 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -30,8 +30,14 @@ $end_info$
@@ -2730,8 +2730,14 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
        // A view keeping rights it must lose would break the protocol silently
        LogMan::Msg::EFmt("tso-arm: mprotect({:#x}, {:#x}, {}) failed: {}", Addr, Length, Prot, strerror(errno));
        abort();
-@@ -79,35 +114,64 @@ namespace {
+@@ -77,37 +112,70 @@ namespace {
+ 
+   thread_local uint64_t LastFault;
    thread_local int LastFaultCount;
++  // Counted up whenever the views come back from a fork's freeze (TSOViewMemory::ThawAfterFork): a thread whose last
++  // faults were before it starts counting repeats anew
++  std::atomic<uint32_t> ForkEpoch {0};
++  thread_local uint32_t LastFaultEpoch;
  
    bool LogOn() {
 -    static const bool On = Knob("TSO_VIEWS_LOG");
@@ -2804,7 +2810,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    }
  } // namespace
  
-@@ -128,6 +192,15 @@ TSOViewMemory* TSOViewMemory::Get() {
+@@ -128,6 +196,15 @@ TSOViewMemory* TSOViewMemory::Get() {
  }
  
  bool TSOViewMemory::Init() {
@@ -2820,7 +2826,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    auto T = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    if (T == MAP_FAILED) {
      return false;
-@@ -138,6 +211,11 @@ bool TSOViewMemory::Init() {
+@@ -138,6 +215,11 @@ bool TSOViewMemory::Init() {
      return false;
    }
    ROMask = static_cast<uint16_t*>(M);
@@ -2832,7 +2838,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    auto L = ::mmap(nullptr, Pages * sizeof(uint32_t), PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    auto Q = ::mmap(nullptr, Pages, PROT_READ | PROT_WRITE, ReserveFlags, -1, 0);
    if (L == MAP_FAILED || Q == MAP_FAILED) {
-@@ -145,9 +223,20 @@ bool TSOViewMemory::Init() {
+@@ -145,9 +227,20 @@ bool TSOViewMemory::Init() {
    }
    LastChange = static_cast<uint32_t*>(L);
    Quick = static_cast<uint8_t*>(Q);
@@ -2856,7 +2862,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    if (const char* E = getenv("TSO_VIEWS_QUICK")) {
      QuickUs = uint32_t(strtoul(E, nullptr, 10));
    }
-@@ -162,9 +251,18 @@ bool TSOViewMemory::Init() {
+@@ -162,9 +255,18 @@ bool TSOViewMemory::Init() {
      ChunkShares = static_cast<uint8_t*>(C);
    }
  
@@ -2877,7 +2883,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      if (!ReserveAt(SlotBase(S))) {
        continue;
      }
-@@ -182,7 +280,7 @@ bool TSOViewMemory::Init() {
+@@ -182,7 +284,7 @@ bool TSOViewMemory::Init() {
      }
      SlotUsed[0] = true;
    }
@@ -2886,7 +2892,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      PrintStats = true;
      atexit(DumpStats);
    }
-@@ -198,12 +296,32 @@ bool TSOViewMemory::Init() {
+@@ -198,12 +300,32 @@ bool TSOViewMemory::Init() {
    if (const char* W = getenv("TSO_VIEWS_WINDOW")) {
      WindowSize = std::max<uint64_t>(strtoull(W, nullptr, 10), 1);
    }
@@ -2919,7 +2925,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  void TSOViewMemory::NoteAccess(bool Emulated) {
    __atomic_fetch_add(Emulated ? &Count.Emulated : &Count.Repeated, 1, __ATOMIC_RELAXED);
  }
-@@ -242,52 +360,65 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
+@@ -242,52 +364,65 @@ void TSOViewMemory::LoadProfile(FEXCore::Context::Context* CTX) {
    if (Env && !strcmp(Env, "none")) {
      return;
    }
@@ -3010,7 +3016,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      // Nothing is translated yet: no code to throw away
      EnterFallback(0, false);
    }
-@@ -304,22 +435,114 @@ void TSOViewMemory::SaveProfile() {
+@@ -304,22 +439,114 @@ void TSOViewMemory::SaveProfile() {
    if (ProfilePath.empty() || !ProfileChanged) {
      return;
    }
@@ -3128,7 +3134,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  uint64_t TSOViewMemory::ViewBase(int Slot, bool Ordered) {
    return Ordered ? OrderedViewBase(Slot) : SlotBase(Slot);
  }
-@@ -347,6 +570,24 @@ const TSOViewMemory::Range* TSOViewMemory::Find(uint64_t Addr, uint64_t* Start)
+@@ -347,6 +574,24 @@ const TSOViewMemory::Range* TSOViewMemory::Find(uint64_t Addr, uint64_t* Start)
    return &It->second;
  }
  
@@ -3153,7 +3159,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  uint64_t TSOViewMemory::ChooseAddress(uint64_t Hint, uint64_t Length) const {
    if (Hint >= 0x10000 && Hint + Length <= Window && IsFree(Hint, Length)) {
      return Hint;
-@@ -379,17 +620,27 @@ void TSOViewMemory::Erase(uint64_t Addr, uint64_t End) {
+@@ -379,17 +624,27 @@ void TSOViewMemory::Erase(uint64_t Addr, uint64_t End) {
      const Range R = It->second;
      It = Ranges.erase(It);
      if (Start < Addr) {
@@ -3185,7 +3191,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  }
  
  // ---------------------------------------------------------------------------------------------------------------
-@@ -408,24 +659,38 @@ void TSOViewMemory::AliasNone(uint64_t Addr, uint64_t Length, uint64_t Base) {
+@@ -408,24 +663,38 @@ void TSOViewMemory::AliasNone(uint64_t Addr, uint64_t Length, uint64_t Base) {
    ::mprotect(R, Length, PROT_NONE);
  }
  
@@ -3210,10 +3216,10 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
 -      AliasNone(Addr, Length, OrderedViewBase(S));
 +    if (!SlotUsed[S] || (!Eager && S != 0 && S != Slot)) {
 +      continue;
-     }
++    }
 +    if (S != 0) {
 +      AliasNone(Addr, Length, SlotBase(S));
-+    }
+     }
 +    AliasNone(Addr, Length, OrderedViewBase(S));
 +    Mask |= uint16_t(1U << S);
    }
@@ -3232,7 +3238,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
        if (S != 0) {
          Reserve(SlotBase(S) + Addr, Length);
        }
-@@ -441,10 +706,69 @@ void TSOViewMemory::SetState(uint64_t Addr, uint64_t End, uint8_t State) {
+@@ -441,10 +710,69 @@ void TSOViewMemory::SetState(uint64_t Addr, uint64_t End, uint8_t State) {
    End = std::min(End, Window);
    memset(Owner + (Addr >> PageShift), State, (End - Addr) >> PageShift);
    memset(ROMask + (Addr >> PageShift), 0, ((End - Addr) >> PageShift) * sizeof(uint16_t));
@@ -3303,7 +3309,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    const int RO = RW & PROT_READ;
    if (Stage1() || Slot == 0) {
      return RW;
-@@ -461,7 +785,7 @@ int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered
+@@ -461,7 +789,7 @@ int TSOViewMemory::ViewProt(uint8_t State, uint16_t Mask, int Slot, bool Ordered
    return State == Slot ? RW : PROT_NONE;
  }
  
@@ -3312,7 +3318,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    End = std::min(End, Window);
    if (Addr >= End) {
      return;
-@@ -478,15 +802,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+@@ -478,15 +806,16 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
      }
      const int GP = It->second.Prot;
      for (int Sl = 0; Sl < Slots; ++Sl) {
@@ -3332,7 +3338,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
            if (Prot != RunProt) {
              Protect(Base + RunStart, P - RunStart, RunProt);
              RunStart = P;
-@@ -499,16 +824,17 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
+@@ -499,16 +828,17 @@ void TSOViewMemory::Apply(uint64_t Addr, uint64_t End) {
    }
  }
  
@@ -3354,7 +3360,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
        // A view may hold less than O (a right given lazily and not used yet), never more
        if (O != N && ((O & ~N) != 0 || Sl == FaultSlot)) {
          Protect(ViewBase(Sl, Ord) + (Page << PageShift), 1ULL << PageShift, N);
-@@ -521,6 +847,17 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
+@@ -521,6 +851,17 @@ void TSOViewMemory::ApplyPage(uint64_t Page, uint8_t OldState, uint16_t OldMask,
  // ---------------------------------------------------------------------------------------------------------------
  // Guest memory management
  
@@ -3372,7 +3378,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags, int Fd, off_t Offset, int Slot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mmap %#lx+%#lx prot %d flags %#x fd %d slot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot, Flags, Fd, Slot);
-@@ -556,15 +893,25 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -556,15 +897,25 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
  
      void* R = MAP_FAILED;
      Kind K = Kind::Private;
@@ -3401,7 +3407,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
          uint64_t Done = 0;
          while (Done < Length) {
            const auto N = ::pread(Fd, static_cast<char*>(R) + Done, Length - Done, Offset + Done);
-@@ -583,17 +930,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
+@@ -583,17 +934,31 @@ int64_t TSOViewMemory::Mmap(uint64_t Addr, uint64_t Length, int Prot, int Flags,
      if (R == MAP_FAILED) {
        if (errno == EEXIST && !Fixed && !NoReplace) {
          // Something unknown to us lives there: remember it as taken and try the next gap
@@ -3436,7 +3442,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      return A;
    }
    return -ENOMEM;
-@@ -606,7 +967,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
+@@ -606,7 +971,7 @@ int64_t TSOViewMemory::Munmap(uint64_t Addr, uint64_t Length) {
    if (::munmap(reinterpret_cast<void*>(Addr), L) == -1) {
      return -errno;
    }
@@ -3445,7 +3451,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    Erase(Addr, Addr + L);
    SetState(Addr, Addr + L, 0);
    return 0;
-@@ -616,6 +977,10 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -616,6 +981,10 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    std::lock_guard lk(Mutex);
    VLOG("tso-arm: mprotect %#lx+%#lx prot %d\n", (unsigned long)Addr, (unsigned long)Length, Prot);
    const uint64_t L = PageUp(Length);
@@ -3456,7 +3462,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    if (::mprotect(reinterpret_cast<void*>(Addr), L, Prot) == -1) {
      return -errno;
    }
-@@ -628,11 +993,14 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -628,11 +997,14 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    }
    for (; It != Ranges.end() && It->first < Addr + L; ++It) {
      const uint64_t S = std::max(It->first, Addr);
@@ -3474,7 +3480,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    }
    Apply(Addr, Addr + L);
    return 0;
-@@ -652,13 +1020,12 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -652,13 +1024,12 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
    const Range Src = *SrcP;
  
    auto Place = [&](uint64_t T, uint64_t Len, Kind K) {
@@ -3490,7 +3496,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      Erase(A, A + Len);
      SetState(A, A + Len, 0);
    };
-@@ -674,6 +1041,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -674,6 +1045,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
        return -errno;
      }
      Place(T, NewL, Kind::SharedAnon);
@@ -3500,7 +3506,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      return T;
    }
  
-@@ -693,8 +1063,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -693,8 +1067,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
      if (!(Flags & MREMAP_FIXED) && IsFree(Old + OldL, NewL - OldL)) {
        auto R = ::mmap(reinterpret_cast<void*>(Old + OldL), NewL - OldL, Src.Prot, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
        if (R != MAP_FAILED) {
@@ -3510,7 +3516,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
          SetState(Old + OldL, Old + NewL, Mine);
          Apply(Old + OldL, Old + NewL);
          return Old;
-@@ -747,6 +1116,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -747,6 +1120,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      return ::madvise(reinterpret_cast<void*>(Addr), Length, Advice) == -1 ? -errno : 0;
    }
    const uint64_t End = Addr + PageUp(Length);
@@ -3520,7 +3526,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    auto It = Ranges.upper_bound(Addr);
    if (It != Ranges.begin()) {
      --It;
-@@ -757,7 +1129,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -757,7 +1133,7 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      if (S >= E) {
        continue;
      }
@@ -3529,7 +3535,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      if (::madvise(reinterpret_cast<void*>(S), E - S, A) == -1) {
        return -errno;
      }
-@@ -773,6 +1145,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -773,6 +1149,10 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    std::lock_guard lk(Mutex);
@@ -3540,7 +3546,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    int S = 1;
    for (; S < Slots; ++S) {
      if (SlotUsable[S] && !SlotUsed[S]) {
-@@ -783,10 +1159,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -783,10 +1163,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    SlotUsed[S] = true;
@@ -3562,7 +3568,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      }
    }
  
-@@ -844,17 +1227,417 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -844,17 +1231,420 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
    const int S = Base / Window;
    const uint16_t Bit = uint16_t(1U << S);
    VLOG("tso-arm: detach slot %d\n", S);
@@ -3874,6 +3880,9 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
 +  }
 +  ForkFrozenSlot = -1;
 +  Apply(0, Window);
++  // A thread that writes the same word at every fork faults there once per fork; those faults are not the protocol
++  // being stuck (64 in a row at one address handed the fault to the guest: forksnap crashed after enough forks)
++  ForkEpoch.fetch_add(1, std::memory_order_relaxed);
 +}
 +
 +void TSOViewMemory::AfterForkParent(pid_t Child) {
@@ -3984,7 +3993,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1645,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1652,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -3993,7 +4002,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -878,6 +1661,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -878,6 +1668,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    ProfileChanged = true;
  }
  
@@ -4026,7 +4035,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +1709,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +1716,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -4042,7 +4051,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,11 +1726,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,11 +1733,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -4068,7 +4077,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    Apply(First << PageShift, Last << PageShift);
    ChunkShares[Chunk] = 0;
    Count.Collapsed += Moved;
-@@ -920,10 +1751,11 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -920,10 +1758,11 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
  }
  
  TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
@@ -4082,7 +4091,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
      }
      return Fault::NotOurs;
    };
-@@ -933,9 +1765,32 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -933,9 +1772,32 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const int View = FaultAddress / Window;
    const bool Ordered = View >= Slots;
    if (View >= 2 * Slots || Slot == 0 || (Ordered ? View - Slots : View) != Slot) {
@@ -4115,7 +4124,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,6 +1801,25 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,8 +1808,32 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -4140,8 +4149,15 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
 +
    // The same address faulting over and over means the protocol is stuck: hand it to the normal fault path
    // (an atomic reported as a read first becomes shared read-only, then faults again as a write and is upgraded)
++  if (const uint32_t E = ForkEpoch.load(std::memory_order_relaxed); E != LastFaultEpoch) {
++    LastFaultEpoch = E;
++    LastFault = 0;
++    LastFaultCount = 0;
++  }
    if (LastFault == FaultAddress) {
-@@ -963,6 +1837,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+     if (++LastFaultCount > 64) {
+       LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
+@@ -963,6 +1849,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -4158,7 +4174,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -1050,7 +1934,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1050,7 +1946,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
  
    if (Log) {
@@ -4167,7 +4183,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
              (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
              Result == Fault::Escalate ? "escalate" : "retry");
    }
-@@ -1058,17 +1942,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1058,17 +1954,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    // Budget: a program that keeps the protocol busy (more than TSO_VIEWS_BUDGET faults per second over the last
    // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
    // faults while a program starts up and its threads first touch their data.
@@ -4203,7 +4219,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
        }
        return Result;
      }
-@@ -1088,6 +1989,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +2001,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -4211,7 +4227,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..3e572a41612cf7f63b8b6fd366d2bec2
        }
        return Result;
      }
-@@ -1096,12 +1998,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +2010,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;
