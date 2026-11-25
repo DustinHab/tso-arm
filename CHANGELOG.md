@@ -39,6 +39,11 @@ prebuilt anew, now with FEX's thunks.
   page protocol took reads of it for faults of the program's own (wineserver stopped at its start); a segment
   register load (`mov %eax, %ds`) read the descriptor from FEX's own table through the views (every Windows program
   stopped with "nested exception on signal stack"). `tests/writeonly.c` and `tests/segload.c` in `tests/ci.sh`.
+- Fixed in FEX, found with Wine: a fork of a program with several threads gave the child memory its parent's other
+  threads wrote after the fork (the page protocol copies the child's memory after the fork, and a thread writes its
+  own pages without a fault). A lock another thread took just after the fork came out taken in the child, which
+  waited for it forever (Wine's explorer.exe children). The other threads' writes now wait while the child copies.
+  `tests/forksnap.c`: 49 of 50 children saw memory from after the fork, now none.
 - `TSO_ARM_MODE` sets the ordering mode for programs started without `--mode` (started directly, through `tso-arm
   wine`).
 - Fixed in FEX: a prebuilt FEX unpacked elsewhere than the prefix it was built for did not find its own data

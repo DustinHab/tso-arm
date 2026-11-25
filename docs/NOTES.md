@@ -2708,3 +2708,23 @@ ones. With x86 order kept by the page protocol, Wine did not start, for two faul
 Found with strace (`-e trace=memory,signal`: the guest's `mmap(…, PROT_WRITE, MAP_SHARED, fd, 0)` before the fault
 that killed wineserver) and `TSO_VIEWS_LOG` (`fault R at 0x83a00d0768 … not ours: another thread's view` at
 `rip 0x3f7d21ba1`, which `objdump` of Wine's ntdll.so names as `mov %eax, %ds`).
+
+**fork while another thread writes.** With both faults fixed Wine ran, but now and then a run hung, on the Pi and on
+GitHub's runner alike, and the Pi restarted twice during such runs (its journal does not survive a restart, so why
+it restarted is not known; Home Assistant and Planka on it came back by themselves). A diagnosis workflow that lists
+the processes left after each run: under full ordering none, under the page protocol 35, among them 20 `explorer.exe`
+of one thread each waiting on a futex forever (Wine starts an explorer for its desktop, and without a display again
+and again). The views copy a forked child's memory after the fork (notes section 39: guest memory is shared memory,
+which the kernel's copy-on-write does not cover), while the parent's other threads run on: a thread that owns a page
+writes it without a fault, so the copy took what such threads wrote after the fork. A lock one of them took just
+after the fork came out taken in the child, which waited for it forever. `tests/forksnap.c` counts in two words 64 MB
+apart (the first, then the second) in one thread while the main thread forks 50 times, and each child checks that the
+second is not ahead of the first: 49 of 50 children saw memory from after the fork under the page protocol, none
+natively, under full ordering or without ordering.
+
+Now the other threads' views lose their write rights before such a fork (`FreezeForFork`: the views' protection with
+the write right taken from every slot but the forking thread's, applied over the window) and get them back once the
+child has its copy, or when the fork failed: their writes fault and wait for the views' lock, which the forking thread
+holds until then. `forksnap` 0 of 50; a fork with a thread running costs 3.4 to 3.6 ms instead of 3.15 ms. Not
+covered: a process in the fallback (its translated code writes guest memory directly), and the kernel writing into
+guest memory for another thread's system call while the child copies.
