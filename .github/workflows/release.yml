@@ -84,6 +84,14 @@ jobs:
       - name: Correctness tests
         run: cd tso-arm-[0-9]*/ && sh tests/ci.sh
 
+      - name: x86-64 containers through the package's statically linked FEX
+        run: |
+          cd tso-arm-[0-9]*/
+          sudo bin/tso-arm binfmt register
+          grep -q '^flags: PF' /proc/sys/fs/binfmt_misc/tso-arm
+          sh tests/container_check.sh
+          sudo bin/tso-arm binfmt unregister
+
       - name: The FEX package alone, as 'tso-arm install' fetches it
         run: |
           rm -rf ~/.local/opt/tso-arm

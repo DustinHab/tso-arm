@@ -1,6 +1,12 @@
 # Changes
 
-## 0.4.5 (not released yet)
+## 0.4.5 (2026-11-25)
+
+Containers: once installed for every user, `docker run --platform linux/amd64 IMAGE` runs x86-64 images on an Arm
+computer with x86's memory order kept. FEX is now its newest commit, and two faults are fixed, one of FEX's own.
+Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh` (with
+`| sudo sh` for every user, containers included) or `tso-arm update`; the FEX patch changed, so this release brings
+FEX prebuilt anew.
 
 - x86-64 containers: `docker run --platform linux/amd64 IMAGE` runs x86-64 images with x86 order kept, once `tso-arm
   binfmt register` has run (the installation for every user does it). It registers a statically linked FEX, built
@@ -16,7 +22,7 @@
 - fork in a program whose views fell back to full ordering (its memory kept moving between threads, or more threads
   than view slots): the child copies guest memory after the fork, and the other threads' translated code, which then
   writes past the views, went on writing into what it copied; a lock taken meanwhile came out taken in the child,
-  which waited for it forever (Wine left explorer.exe processes by the dozen). The other threads now wait, held by a
+  which waited for it forever. The other threads now wait, held by a
   signal of FEX's own, until the child has its copy; a system call that signal interrupted is made again, so the
   program sees no EINTR. `tests/forksnap.c` after a forced fallback: 49 of 50 children saw memory from after the fork,
   now none; `tests/forkeintr.c`: 150 calls came back with EINTR, now none.
@@ -24,6 +30,10 @@
   into its frontend meanwhile.
 - `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead
   of "not installed yet" after the one-line installation.
+- Windows programs through `tso-arm wine` still run with full ordering: under the page protocol Wine's desktop
+  process waits for itself in win32u's registration of its window classes (`docs/ROADMAP.md`, item 11).
+- CI, the compatibility and the Wine workflows no longer run for commits that change only words; the release's
+  checks start x86-64 containers through the package's statically linked FEX.
 
 ## 0.4.4 (2026-11-25)
 
