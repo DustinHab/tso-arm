@@ -18,7 +18,8 @@ done.
 | 8 | The page protocol for 32-bit programs | open |
 | 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
-| 11 | The page protocol for Wine: explorer.exe children left waiting on a lock of the guest's C library | open |
+| 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | open, narrowed down |
+| 12 | fork after the views fell back to full ordering | done (0.4.5) |
 
 ## 1. 32-bit x86 programs
 
@@ -163,3 +164,25 @@ with a three-way merge, stage 3 conflicted in `SignalDelegator.cpp`, where FEX m
 Done: the patches on FEX 8e980598 (2026-11-24), the conflict merged (both kept; FEX's helper for signal masks went,
 which the patches no longer used), and the commit the patches apply to named in one place (`fex/install.sh`), which
 `build_views.sh` and `export_views.sh` read. CI, the compatibility and the Wine workflows pass on it.
+
+## 11. The page protocol for Wine
+
+`tso-arm wine` runs Wine with full ordering (item 7): under the page protocol orphaned `explorer.exe` processes are
+left waiting, more of them with every program that needs the desktop (it starts another explorer each time).
+
+Found so far (notes section 59): the word they wait on is a `pthread_once` in Wine's `win32u.so` (its `.bss`), the one
+around `register_builtin_classes`, which registers the built-in window classes and then calls back into user32 on
+the Windows side (`KeUserModeCallback`). The explorer process has one thread throughout; it forks twice (Wine
+starting processes) and then waits on that `pthread_once` with the value 1, "in progress": its own initialization
+called `NtUserCreateWindowEx` again from within the callback and waits for itself. Under full ordering it does not.
+On the way, a fault of the views' own was found and fixed: a fork after the fallback to full ordering gave the child
+memory written after the fork (item 12); the explorer processes are left waiting with that fixed as well. Next: what
+user32's callback does differently under the views (Wine's own traces of the explorer process under both orderings).
+
+## 12. fork after the fallback
+
+Found while looking into item 11: `FreezeForFork` keeps the other threads from writing what a forked child copies by
+taking their views' write rights; after a fallback to full ordering their translated code writes guest memory
+directly, past the views. Done (0.4.5): such a fork holds the other threads with FEX's own signal until the child has
+its copy, and a system call that signal interrupted is made again (no EINTR for the program). `tests/forksnap.c`
+and `tests/forkeintr.c` after a forced fallback in `tests/ci.sh`.

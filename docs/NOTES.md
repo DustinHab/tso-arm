@@ -2801,3 +2801,19 @@ system call handler when the hold came during it and no signal of the guest's wa
 result is the interrupted code's RAX, never. `forksnap` and `forkeintr` after a forced fallback in `tests/ci.sh`:
 0 of 50, 0 interrupted. A fork with the views copies the parent's writable memory either way: 57 ms for forksnap's
 64 MB on the Pi, held or not.
+
+**What the explorer processes wait for.** With the fork held, they are still left (28 in a run). Under strace (futex,
+clone, execve, exit and the signals): one thread from start to end; it forks twice (Wine's `CreateProcess`: the
+child forks the program's process and exits), its waits for the child's copy end, SIGCHLD comes, and it waits on
+`0x3f4691d60` with the value 1 for good; before that a `FUTEX_WAKE_PRIVATE` of all waiters on the word beside it,
+`0x3f4691d64`. The mappings beside the word name the library: Wine's `win32u.so` (its data shows as `/dev/zero`
+under the views), the word 0x1c1d60 into it, in `.bss`. `win32u.so` is stripped; in its code both words are
+`pthread_once` controls: 0x1c1d64 the one of `NtUserInitializeClientPfnArrays`, 0x1c1d60 that of a routine which
+registers the built-in window classes in a loop and then calls `KeUserModeCallback` (Wine's `register_builtin_classes`
+and its call into user32 on the Windows side); `NtUserCreateWindowEx` and `NtUserSetObjectInformation` go through
+it. The value 1 is "in progress" (glibc's fork generation 0: a process that never forked before the call), and with
+one thread that is the waiting thread itself: from within the callback its initialization reached
+`NtUserCreateWindowEx` again. Under full ordering it does not. Reads of Windows' shared user data (0x7ffe0000,
+Wine's tick count and time, in memory wineserver writes) fault once per instruction that makes them and escalate, as
+the protocol does for memory shared with another process (`fault R view 1 slot 1 guest 0x7ffe03e8: 0xff/0 -> 0xff/0
+escalate`, 7,384 lines of the log on that page). Not found yet: what user32's callback does differently there.
