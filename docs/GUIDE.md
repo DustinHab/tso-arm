@@ -107,8 +107,9 @@ root file system), which it fetches from WineHQ the first time and keeps in `~/.
 wine install` fetches a newer one. The Windows "C:" drive and settings are in `~/.wine` as usual (`WINEPREFIX` for
 another). Windows programs need x86's memory order between their threads just as Linux programs do: the tests run
 one that passes data between two threads without locks, 20 million messages, all of them right with tso-arm and some
-hundred thousand wrong without ordering. `tso-arm wine` keeps that order with FEX's full ordering for now
-(`TSO_ARM_MODE=tso` tries the page protocol, which still leaves some of Wine's processes waiting).
+hundred thousand wrong without ordering. `tso-arm wine` keeps that order with the page protocol, as `tso-arm run`
+does; if a Windows program misbehaves, try `TSO_ARM_MODE=full tso-arm wine program.exe` (FEX's full ordering) and
+report it if that helps.
 
 ## Containers
 

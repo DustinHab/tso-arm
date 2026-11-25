@@ -42,6 +42,13 @@ for m in ${MODES:-tso full unordered}; do
     sleep 3
     left=$(pgrep -u "$(id -u)" -c -f '\.exe' || true)
     [ "${left:-0}" -gt 0 ] && echo "      $m: $left Windows processes still there 3 s after the program (wineserver -k ends them)"
+    # explorer.exe processes left waiting: Wine started one after the other for a desktop it never got (under the
+    # page protocol until 0.4.5)
+    explorers=$(pgrep -u "$(id -u)" -c -f 'explorer\.exe' || true)
+    if [ "${explorers:-0}" -gt 1 ] && [ $m != unordered ]; then
+        echo "FAIL: $m: $explorers explorer.exe processes left waiting"
+        fail=1
+    fi
     TSO_ARM_MODE=full timeout 120 $T run $w -k >/dev/null 2>&1
     if [ $m = unordered ]; then
         echo "      without ordering, for comparison: ${out:-exit status $st} ($ms ms)"

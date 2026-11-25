@@ -30,8 +30,16 @@ FEX prebuilt anew.
   into its frontend meanwhile.
 - `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead
   of "not installed yet" after the one-line installation.
-- Windows programs through `tso-arm wine` still run with full ordering: under the page protocol Wine's desktop
-  process waits for itself in win32u's registration of its window classes (`docs/ROADMAP.md`, item 11).
+- Windows programs through `tso-arm wine` run under the page protocol now, as every other program (they ran with
+  FEX's full ordering): Wine maps wineserver's sections private and writable on purpose and relies on Linux showing
+  it what wineserver writes there later; the views copied such a mapping when it was made, so a Wine process kept
+  reading the session memory as it was then, explorer.exe got no desktop, started another explorer.exe and waited
+  for itself. A writable private mapping of a file without a name now stays the file until its first write, which
+  copies it (`tests/cowmap.c`). Two more mapping faults of the views found on the way: a read-only private mapping
+  past the file's end was zeros of its own, which never showed what was written there after the file grew
+  (`tests/filegrow.c`), and a `MAP_FIXED` mapping over memory another thread had read left that thread's views on
+  the old memory (`tests/fixedover.c`). Under the page protocol no explorer.exe is left now, as under full ordering,
+  and the ring buffer test passes; `TSO_ARM_MODE=full` gives Wine full ordering.
 - CI, the compatibility and the Wine workflows no longer run for commits that change only words; the release's
   checks start x86-64 containers through the package's statically linked FEX.
 

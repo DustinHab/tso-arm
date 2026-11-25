@@ -286,8 +286,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
   i386 libraries as well.
 - **Windows programs** through `tso-arm wine` (WineHQ's Wine 11, fetched on first use; notes section 58): a ring
   buffer between two Win32 threads gets all of 20 million messages right with x86 order kept, some 350,000 wrong
-  without ordering; with FEX's full ordering by default for now (under the page protocol some of Wine's processes
-  are left waiting). **AppImages** run unpacked (they find no `fusermount` in the root file system).
+  without ordering; under the page protocol since 0.4.5 (Wine relies on seeing later changes to a file in a
+  private mapping, which the views now keep; notes section 59). **AppImages** run unpacked (they find no
+  `fusermount` in the root file system).
 - **Containers:** `docker run --platform linux/amd64 IMAGE` runs x86-64 images once `binfmt register` (the
   installation for every user does it) has registered a statically linked FEX with binfmt_misc's `F` flag: in a
   container it runs the program itself, without FEX's server and on the container's own files, with x86 order kept;

@@ -14,11 +14,11 @@ done.
 | 4 | GPU acceleration for x86 programs (FEX's thunks) | when asked for (0.4.4); FEX's thunks are incomplete |
 | 5 | Installing for every user, in one line, and updating | done (0.4.4) |
 | 6 | Containers: `docker run --platform linux/amd64` | done (0.4.5), 64-bit and 32-bit programs |
-| 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine` (full ordering for now), three faults fixed |
+| 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine`, three faults fixed |
 | 8 | The page protocol for 32-bit programs | open |
 | 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
-| 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | open: cause found (item 11) |
+| 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | done (0.4.5): `tso-arm wine` under the page protocol |
 | 12 | fork after the views fell back to full ordering | done (0.4.5) |
 | 13 | Statically linked i386 programs of glibc 2.35 (Ubuntu 22.04's) crash at start-up under FEX | open (FEX's own) |
 
@@ -187,8 +187,15 @@ showing the file's later changes in a private mapping not written to). The views
 mapping when it is made: the process kept what the file held then, and every object wineserver added later read
 wrong. Two smaller faults of the same kind were found and fixed on the way (0.4.5): a read-only private mapping past
 the file's end was zeros of its own (`tests/filegrow.c`), and a `MAP_FIXED` mapping over memory another thread's views
-mapped left those views on the old memory. Next: a writable private file mapping as the file itself until it is
-written, copied at the first write (a fault), as the kernel does page by page.
+mapped left those views on the old memory.
+
+Done (0.4.5): a writable private mapping of a file without a name (deleted, or a memfd: memory another process shares
+through it, as wineserver's sections) is the file itself, without the host's write right, until its first write: the
+fault copies the whole range then (the kernel copies page by page; once written, the range no longer shows the
+file's later changes) and the write runs again. On GitHub's runner no explorer.exe is left under the page protocol
+now, as under full ordering, and `tso-arm wine` runs Wine under it (`TSO_ARM_MODE=full` for full ordering). Not
+covered: the kernel writing into such a mapping before the program has (a `read` into it fails with EFAULT then);
+mappings of files with a name are copied when they are made, as before.
 
 ## 12. fork after the fallback
 
