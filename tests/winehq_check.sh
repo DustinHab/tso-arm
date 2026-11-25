@@ -3,10 +3,10 @@
 # with the root file system 'tso-arm rootfs' fetched, a Wine prefix of its own, then a Windows program in each
 # ordering mode. The program is tests/win/spsc.c built with MinGW: a ring buffer between two Win32 threads that relies
 # on x86's order.
-#   tests/winehq_check.sh SPSC.EXE     MESSAGES (default 20000000)
+#   tests/winehq_check.sh SPSC.EXE     MESSAGES (default 20000000), MODES (default: tso full unordered)
 # Exit status 1 if it fails with x86 order kept or under full TSO.
 cd "$(dirname "$0")/.."
-T=$PWD/bin/tso-arm
+T=${TSO_ARM:-$PWD/bin/tso-arm} # TSO_ARM: an installed tso-arm instead of this checkout's
 exe=$(readlink -f "${1:?usage: tests/winehq_check.sh SPSC.EXE}")
 n=${MESSAGES:-20000000}
 export WINEPREFIX=${WINEPREFIX:-$HOME/.wine-tso-arm-check}
@@ -29,7 +29,7 @@ if [ ! -f "$WINEPREFIX/system.reg" ]; then
     echo "ok:   a Wine prefix made in $(($(date +%s) - s)) s"
 fi
 fail=0
-for m in tso full unordered; do
+for m in ${MODES:-tso full unordered}; do
     s=$(date +%s%N)
     st=0
     # into a file, not a pipe: Wine's processes left behind (under the page protocol) would hold a pipe open
