@@ -3,11 +3,13 @@ name: Package diagnosis
 # By hand: a release run's packages, against the release before and against FEX without the tso-arm patches, on a
 # runner of choice, with 32-bit and 64-bit test programs, and how they end (FEX's own messages included).
 on:
+  # a push to diag/package runs it with the defaults (workflow_dispatch failed on GitHub's side for it at times)
+  push:
+    branches: ['diag/package']
   workflow_dispatch:
     inputs:
       release_run:
         description: the release workflow's run whose packages to take
-        required: true
       runner:
         description: the runner
         default: ubuntu-22.04-arm
@@ -20,8 +22,8 @@ on:
 
 jobs:
   diag:
-    name: Packages of run ${{ github.event.inputs.release_run }} on ${{ github.event.inputs.runner }}
-    runs-on: ${{ github.event.inputs.runner }}
+    name: Packages of run ${{ github.event.inputs.release_run || '45649681247' }} on ${{ github.event.inputs.runner || 'ubuntu-22.04-arm' }}
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-22.04-arm' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +37,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p new old
-          gh run download ${{ github.event.inputs.release_run }} -D dist
+          gh run download ${{ github.event.inputs.release_run || '45649681247' }} -D dist
           tar -xzf dist/*/tso-arm-[0-9]*-linux-arm64.tar.gz -C new
-          gh release download ${{ github.event.inputs.before }} -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D oldpkg
+          gh release download ${{ github.event.inputs.before || 'v0.4.4' }} -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D oldpkg
           tar -xzf oldpkg/*.tar.gz -C old
       - name: FEX without the patches
-        if: github.event.inputs.upstream == 'yes'
+        if: github.event.inputs.upstream != 'no'
         run: |
           base=$(sed -n 's/^BASE=\([0-9a-f]*\).*/\1/p' fex/install.sh)
           git clone -q https://github.com/FEX-Emu/FEX.git up && cd up && git checkout -q $base && git submodule update -q --init --recursive
