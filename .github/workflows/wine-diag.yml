@@ -121,5 +121,7 @@ jobs:
               grep -E 'mmap|alias|wake|Wake' views-$n.log | grep -i '7ffe' | head -n 6 | cut -c1-200
             fi
             tail -n 4 spsc-$n.log
+            # Wine's own traces, where the run asked for them (WINEDEBUG=+process,+loaddll): what was started and loaded
+            grep -aE 'trace:process:|trace:loaddll:' spsc-$n.log | grep -aE 'NtCreateUserProcess|exec_process|uxtheme|explorer|comctl32|Loaded .*\.(dll|exe)' | head -n 60 | cut -c1-220
             killnew
           done
