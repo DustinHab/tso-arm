@@ -56,12 +56,13 @@ jobs:
           for p in new old; do
             T=$(ls -d $p/tso-arm-*)/bin/tso-arm
             echo "== $($T version | head -n 2 | tr '\n' ' ')"
-            for i in $(seq 10); do
-              out=$($T run $prog "$@" 2>&1 | tail -n 2 | tr '\n' ' '); echo "run $i: exit $? $out"
+            for i in $(seq 6); do
+              $T run $prog "$@" >out.txt 2>&1; st=$?
+              echo "run $i: exit $st: $(tail -n 3 out.txt | tr '\n' ' ' | cut -c1-200)"
             done
-            F=$(ls -d $p/tso-arm-*)/fex/prebuilt/bin/FEX
-            for i in 1 2 3; do
-              out=$(FEX_TSOENABLED=1 $F $prog "$@" 2>&1 | tail -n 2 | tr '\n' ' '); echo "FEX directly, full TSO, run $i: $out"
+            for q in threads32:8 mp32:mp:20000 mp32:vec:20000 mp32:rep:20000 mp32:lb:20000; do
+              $T run build/$(echo $q | tr ':' ' ') >out.txt 2>&1; st=$?
+              echo "$q: exit $st: $(tail -n 2 out.txt | tr '\n' ' ' | cut -c1-160)"
             done
           done
           ls -la /tmp/core.* 2>/dev/null | head
