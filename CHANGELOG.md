@@ -1,6 +1,6 @@
 # Changes
 
-## 0.4.4 (2026-11-24)
+## 0.4.4 (2026-11-25)
 
 What people run on an Arm computer beyond command-line x86-64 programs: 32-bit programs, AppImages, Windows programs
 through Wine, programs with a window and a GPU, installed in one line for one user or for everyone. `docs/GUIDE.md`
@@ -43,8 +43,8 @@ prebuilt anew, now with FEX's thunks.
   stopped with "nested exception on signal stack"). `tests/writeonly.c` and `tests/segload.c` in `tests/ci.sh`.
 - Fixed in FEX, found with Wine: a fork of a program with several threads gave the child memory its parent's other
   threads wrote after the fork (the page protocol copies the child's memory after the fork, and a thread writes its
-  own pages without a fault). A lock another thread took just after the fork came out taken in the child, which
-  waited for it forever (Wine's explorer.exe children). The other threads' writes now wait while the child copies.
+  own pages without a fault): a lock another thread took just after the fork came out taken in the child, which
+  waited for it forever. The other threads' writes now wait while the child copies.
   `tests/forksnap.c`: 49 of 50 children saw memory from after the fork, now none.
 - `TSO_ARM_MODE` sets the ordering mode for programs started without `--mode` (started directly, through `tso-arm
   wine`).
