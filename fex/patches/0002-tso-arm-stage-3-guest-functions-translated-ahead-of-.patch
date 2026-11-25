@@ -1,4 +1,4 @@
-From 30d2aa0b8ffc2dbfb52efaaaadeebbb1e67a9ed5 Mon Sep 17 00:00:00 2001
+From e6019bf3abf12a5388f669ea3be848e682c7a3ed Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -33,20 +33,20 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
  .../LinuxSyscalls/FileManagement.h            |    1 +
- .../LinuxSyscalls/SignalDelegator.cpp         |  443 ++++++-
+ .../LinuxSyscalls/SignalDelegator.cpp         |  456 ++++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |   60 +-
- .../LinuxSyscalls/Syscalls/Thread.cpp         |   58 +-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |   86 +-
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |   70 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  192 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1112 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  166 ++-
- .../LinuxSyscalls/ThreadManager.cpp           |   19 +-
- .../LinuxSyscalls/ThreadManager.h             |   14 +-
+ .../LinuxSyscalls/ThreadManager.cpp           |   92 +-
+ .../LinuxSyscalls/ThreadManager.h             |   37 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 42 files changed, 3435 insertions(+), 225 deletions(-)
+ 42 files changed, 3577 insertions(+), 230 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -1467,7 +1467,7 @@ index b11f096f79a57347638af5d0b4e69d7a6d7c9c58..af7434c0470ac4c2490b152adcc6e9bf
  };
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae775f04725 100644
+index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..375a877c3d8ef7e7327cbf4e78340c53816be05a 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -84,10 +84,11 @@ void SynchronousExceptionHandler(FEXCore::Context::Context* CTX, FEXCore::Core::
@@ -1629,7 +1629,22 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
      }
      return true;
    }
-@@ -581,13 +668,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
+@@ -475,6 +562,14 @@ bool SignalDelegator::HandleSignalPause(FEXCore::Core::InternalThreadState* Thre
+   SignalEvent SignalReason = ThreadObject->SignalReason.load();
+   auto Frame = Thread->CurrentFrame;
+ 
++  if (SignalReason == SignalEvent::ForkHold) {
++    // tso-arm: another thread forks; this one waits here, wherever it was, until the child has its copy
++    ThreadObject->SignalReason.store(SignalEvent::Nothing);
++    ThreadObject->HeldDuringSyscall.store(true, std::memory_order_relaxed);
++    FEX::HLE::_SyscallHandler->TM.HeldForFork();
++    return true;
++  }
++
+   if (SignalReason == SignalEvent::Pause) {
+     // Store our thread state so we can come back to this
+     StoreThreadState(Thread, Signal, ucontext);
+@@ -581,13 +676,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
    return true;
  }
  
@@ -1646,7 +1661,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
      NewMask |= (1ULL << (Signal - 1));
    }
  
-@@ -602,6 +688,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
+@@ -602,6 +696,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
    return NewMask;
  }
  
@@ -1681,7 +1696,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
  bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext) {
    auto SigInfo = *static_cast<siginfo_t*>(Info);
  
-@@ -628,18 +742,190 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
+@@ -628,18 +750,190 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
    return false;
  }
  
@@ -1872,7 +1887,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
  
        if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
          // No signals to defer. Just set the fault page back to RW and continue execution.
-@@ -650,8 +936,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -650,8 +944,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
        const auto& Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
        Signal = Top.Signal;
        SigInfo = Top.Info;
@@ -1886,7 +1901,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
        ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
  
        // Until we re-protect the page to PROT_NONE, FEX will now *permanently* defer signals and /not/ check them.
-@@ -678,27 +967,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -678,27 +975,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
    } else if (IsAsyncSignal(&SigInfo, Signal) && MustDeferSignal) {
      // If the signal is asynchronous (as determined by si_code) and FEX is in a state of needing
      // to defer the signal, then add the signal to the thread's signal queue.
@@ -1921,7 +1936,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
  
      // Postpone the remainder of signal handling logic until we process the SIGSEGV triggered by writing to InterruptFaultPage.
      return;
-@@ -709,27 +988,56 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -709,27 +996,56 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      // This signal is masked, must defer until the guest updates the signal mask.
      // Add it to the pending signal list
      ThreadObject->SignalInfo.PendingSignals |= 1ULL << (Signal - 1);
@@ -1983,7 +1998,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
  
        // Update our host signal mask so we don't hit race conditions with signals
        // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
-@@ -747,6 +1055,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -747,6 +1063,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      Handler.OldAction.sigaction(Signal, &SigInfo, UContext);
    } else if (Handler.OldAction.handler == SIG_IGN || (Handler.OldAction.handler == SIG_DFL && Handler.DefaultBehaviour == DEFAULT_IGNORE)) {
      // Do nothing
@@ -1991,7 +2006,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
    } else if (Handler.OldAction.handler == SIG_DFL && (Handler.DefaultBehaviour == DEFAULT_COREDUMP || Handler.DefaultBehaviour == DEFAULT_TERM)) {
      CTX->FlushAndCloseCodeMap();
  
-@@ -826,6 +1135,16 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -826,6 +1143,21 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // SA_RESTORER : We always need our host side restorer on x86-64, Couldn't use guest restorer anyway
    SignalHandler.HostAction.sa_flags = CheckAndAddFlags(SignalHandler.HostAction.sa_flags, SignalHandler.GuestAction.sa_flags,
                                                         SA_NOCLDSTOP | SA_NOCLDWAIT | SA_NODEFER | SA_RESTART);
@@ -2005,10 +2020,15 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
 +  if (Signal == SIGSEGV) {
 +    SignalHandler.HostAction.sa_flags |= SA_NODEFER;
 +  }
++  // tso-arm: FEX's own signal (a pause, a fork's hold of the other threads) interrupts the guest's system calls: the
++  // kernel makes those again it can, and FEX the rest (SyscallHandler::HandleSyscall)
++  if (Signal == SIGNAL_FOR_PAUSE) {
++    SignalHandler.HostAction.sa_flags |= SA_RESTART;
++  }
  
  #ifdef ARCHITECTURE_x86_64
  #define SA_RESTORER 0x04000000
-@@ -836,11 +1155,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -836,11 +1168,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // Walk the signals we have that are required and make sure to remove it from the mask
    // This'll likely be SIGILL, SIGBUS, SIG63
  
@@ -2032,7 +2052,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1000,16 +1328,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1000,16 +1341,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
  #ifdef ARCHITECTURE_arm64
    // Register SIGBUS signal handler.
    const auto SigbusHandler = [](FEXCore::Core::InternalThreadState* Thread, int Signal, void* _info, void* ucontext) -> bool {
@@ -2060,7 +2080,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
      }
  
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSIGBUSCount, 1);
-@@ -1026,7 +1362,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1026,7 +1375,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
        return true;
      }
      ArchHelpers::Context::SetPc(ucontext, PC + Result.value_or(0));
@@ -2069,7 +2089,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
    };
  
    RegisterHostSignalHandler(SIGBUS, SigbusHandler, true);
-@@ -1038,6 +1374,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1038,6 +1387,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
    for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
      RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
    }
@@ -2091,7 +2111,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
  }
  
  SignalDelegator::~SignalDelegator() {
-@@ -1083,7 +1434,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1083,7 +1447,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    if (Thread->Thread) {
      // Reserve a small amount of deferred signal frames. Usually the stack won't be utilized beyond
      // 1 or 2 signals but add a few more just in case.
@@ -2102,7 +2122,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
    }
  }
  
-@@ -1151,6 +1504,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1151,6 +1517,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;
@@ -2110,7 +2130,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..4fef48fc215ab2d8b083a958d9927ae7
      // Only attempt to install a new thunk handler if we were installing a new guest action
      if (!InstallHostThunk(Signal)) {
        UpdateHostThunk(Signal);
-@@ -1286,6 +1640,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+@@ -1286,6 +1653,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
      }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);
@@ -2180,7 +2200,7 @@ index 9e6820bf6f22ed030fcf53b53ecc437f4ee14da1..61843152c020a96fdebee84af84706cb
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432bbd650081e4a8ed1af18a3b0650357af94..49581362595eb78560c9d172712704999efac507 100644
+index a7a432bbd650081e4a8ed1af18a3b0650357af94..20c20944bfcb789eba838d38e1d8e3ae082ccd84 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -2273,10 +2293,15 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..49581362595eb78560c9d17271270499
      auto NewThread = FEX::HLE::CreateNewThread(Thread->CTX, Frame, args);
  
      // Return the new threads TID
-@@ -899,6 +932,19 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -899,11 +932,40 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
+-  // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
+-  if (Is64Bit) {
+-    HandleSyscallImpl<true>(Frame, JITPC);
+-  } else {
+-    HandleSyscallImpl<false>(Frame, JITPC);
 +  // tso-arm: a signal deferred to the thread's next exact point (TSOViews::ExactSignals) that came in between the check
 +  // before the system call and here: the call does not run, RIP stays at the instruction, and the next block entry,
 +  // at it, delivers the signal; the call runs after the handler. Held back across a blocking call the signal would
@@ -2290,10 +2315,31 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..49581362595eb78560c9d17271270499
 +    }
 +  }
 +
-   // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
-   if (Is64Bit) {
-     HandleSyscallImpl<true>(Frame, JITPC);
-@@ -962,6 +1008,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
++  // tso-arm: a call a fork's hold of this thread interrupted (FEX's own signal; ThreadManager::HoldOthersForFork) and
++  // that the kernel does not make again itself (poll, nanosleep, epoll_wait: EINTR whatever SA_RESTART says) is made
++  // again here, with its arguments as they were: the guest never sees an EINTR of FEX's. Not with a signal of the
++  // guest's waiting for its delivery, whose EINTR it is.
++  auto CallingThread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
++  const uint64_t CallNumber = Frame->State.gregs[FEXCore::X86State::REG_RAX];
++  // (sigreturn's result is the interrupted code's RAX, which may be an EINTR of its own)
++  const bool Returns = Is64Bit ? CallNumber == 15 : (CallNumber == 119 || CallNumber == 173);
++  for (;;) {
++    CallingThread->HeldDuringSyscall.store(false, std::memory_order_relaxed);
++    // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
++    if (Is64Bit) {
++      HandleSyscallImpl<true>(Frame, JITPC);
++    } else {
++      HandleSyscallImpl<false>(Frame, JITPC);
++    }
++    if (Returns || uint32_t(Frame->State.gregs[FEXCore::X86State::REG_RAX]) != uint32_t(-EINTR) ||
++        !CallingThread->HeldDuringSyscall.load(std::memory_order_relaxed) || CallingThread->SignalInfo.InterruptArmed) {
++      break;
++    }
++    Frame->State.gregs[FEXCore::X86State::REG_RAX] = CallNumber;
+   }
+ 
+   // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
+@@ -962,6 +1024,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -2305,7 +2351,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..49581362595eb78560c9d17271270499
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +1025,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +1041,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();
@@ -2316,7 +2362,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..49581362595eb78560c9d17271270499
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..3cc4e4a205334ac6c1374cfa91a0938dcf550aea 100644
+index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91005fec27a4866c68f3b3e1ad1dcdb8836136f2 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -2361,13 +2407,19 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..3cc4e4a205334ac6c1374cfa91a0938d
  }
  
  uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
-@@ -289,19 +303,34 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -289,19 +303,40 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
    FEX::HLE::_SyscallHandler->LockBeforeFork(Frame->Thread);
  
    const bool IsVFork = flags & CLONE_VFORK;
-+  // tso-arm: the other threads write nothing the child copies (TSOViewMemory::FreezeForFork)
++  // tso-arm: the other threads write nothing the child copies (TSOViewMemory::FreezeForFork); after a fallback to full
++  // ordering, which writes past the views, they are held (ThreadManager::HoldOthersForFork)
++  bool HeldOthers = false;
 +  if (auto* Views = FEX::HLE::TSOViewMemory::Get(); Views && !IsVFork && !(flags & CLONE_VM)) {
 +    Views->FreezeForFork(Frame->TSOViewBase);
++    if (FEXCore::TSOViews::FallbackActive.load(std::memory_order_acquire)) {
++      FEX::HLE::_SyscallHandler->TM.HoldOthersForFork(Thread);
++      HeldOthers = true;
++    }
 +  }
    pid_t Result {};
 -  int VForkFDs[2];
@@ -2401,7 +2453,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..3cc4e4a205334ac6c1374cfa91a0938d
        // Close the read end of the pipe.
        // Keep the write end open so the parent can poll it.
        close(VForkFDs[0]);
-@@ -316,9 +345,17 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -316,8 +351,19 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
  
    if (IsChild) {
      auto ThreadObject = static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
@@ -2410,16 +2462,18 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..3cc4e4a205334ac6c1374cfa91a0938d
 +    FEX::HLE::_SyscallHandler->GetSignalDelegator()->ForgetDeferredInChild(ThreadObject, &Mask);
      // Unlock the mutexes on both sides of the fork
      FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, IsChild);
- 
++    if (HeldOthers) {
++      FEX::HLE::_SyscallHandler->TM.ForgetForkHold();
++    }
++
 +    // tso-arm: guest memory of its own (a vfork child runs on its parent's memory, as the guest asked)
 +    if (auto* Views = FEX::HLE::TSOViewMemory::Get()) {
 +      Views->AfterForkChild(Frame->TSOViewBase, !IsVFork, DropCopiedCode, Thread);
 +    }
-+
+ 
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
-     // Child
-@@ -366,6 +403,11 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -366,6 +412,14 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // the rest of the context remains as is, this thread will keep executing
      return 0;
    } else {
@@ -2427,11 +2481,14 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..3cc4e4a205334ac6c1374cfa91a0938d
 +    if (auto* Views = FEX::HLE::TSOViewMemory::Get(); Views && Result > 0 && !IsVFork) {
 +      Views->AfterForkParent(Result);
 +    }
++    if (HeldOthers) {
++      FEX::HLE::_SyscallHandler->TM.ReleaseForFork();
++    }
 +
      if (Result != -1) {
        if (flags & CLONE_PARENT_SETTID) {
          *parent_tid = Result;
-@@ -378,7 +420,7 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -378,7 +432,7 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
      // VFork needs the parent to wait for the child to exit.
@@ -4684,10 +4741,10 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..292926dbf0590f95304f1ac9494c521d
      uint64_t Transitions {};
    } Stats;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-index 99fd909d5efdab4c30094361657e97adcee7e7f3..2b2b4467434bb24195017b48346ddd648a456d48 100644
+index 99fd909d5efdab4c30094361657e97adcee7e7f3..1cbbec7a01717c4b3be6413747e8eeeb7b25b489 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-@@ -6,6 +6,7 @@
+@@ -6,14 +6,19 @@
  #include "LinuxSyscalls/SignalDelegator.h"
  #include "LinuxSyscalls/Seccomp/SeccompEmulator.h"
  #include "LinuxSyscalls/TSOViews.h"
@@ -4695,7 +4752,19 @@ index 99fd909d5efdab4c30094361657e97adcee7e7f3..2b2b4467434bb24195017b48346ddd64
  
  #include <FEXHeaderUtils/Syscalls.h>
  #include <FEXCore/Utils/Allocator.h>
-@@ -187,8 +188,24 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+ #include <FEXCore/Utils/Profiler.h>
+ #include <FEXCore/fextl/fmt.h>
+ 
++#include <linux/futex.h>
+ #include <sys/mman.h>
+ #include <sys/personality.h>
++#include <sys/syscall.h>
++#include <time.h>
++#include <unistd.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <git_version.h>
+@@ -187,8 +192,24 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
    if (auto* Views = TSOViewMemory::Get()) {
      Frame->TSOViewBase = Views->AttachThread(0);
      if (!Frame->TSOViewBase && !FEXCore::TSOViews::IdentityBase()) {
@@ -4721,11 +4790,95 @@ index 99fd909d5efdab4c30094361657e97adcee7e7f3..2b2b4467434bb24195017b48346ddd64
      // Before the first thread runs anything: what earlier runs of this program learned
      if (FEXCore::TSOViews::Enabled() && !FEXCore::TSOViews::Stage1()) {
        Views->LoadProfile(CTX);
+@@ -468,6 +489,75 @@ void ThreadManager::LockBeforeFork() {
+   Stat.LockBeforeFork();
+ }
+ 
++void ThreadManager::HoldOthersForFork(FEXCore::Core::InternalThreadState* Self) {
++  ForkHoldAcks.store(0, std::memory_order_relaxed);
++  ForkHoldGen.fetch_add(1, std::memory_order_acq_rel);
++  uint32_t Signalled = 0;
++  // The list of threads, unless another thread holds it while it waits for a lock the fork holds (a code
++  // invalidation): then nobody is held, as before
++  bool Locked = false;
++  for (int Try = 0; Try < 50 && !(Locked = ThreadCreationMutex.try_lock()); ++Try) {
++    const timespec Pause {0, 100'000};
++    nanosleep(&Pause, nullptr);
++  }
++  if (!Locked) {
++    return;
++  }
++  for (auto& Thread : Threads) {
++    if (Thread->Thread == Self || Thread->ThreadSleeping.load()) {
++      continue;
++    }
++    SignalDelegation->SignalThread(Thread->Thread, SignalEvent::ForkHold);
++    ++Signalled;
++  }
++  ThreadCreationMutex.unlock();
++
++  timespec Now {};
++  clock_gettime(CLOCK_MONOTONIC, &Now);
++  const int64_t Deadline = Now.tv_sec * 1'000'000'000LL + Now.tv_nsec + 50'000'000;
++  for (;;) {
++    const uint32_t Acks = ForkHoldAcks.load(std::memory_order_acquire);
++    if (Acks >= Signalled) {
++      break;
++    }
++    clock_gettime(CLOCK_MONOTONIC, &Now);
++    if (Now.tv_sec * 1'000'000'000LL + Now.tv_nsec >= Deadline) {
++      break;
++    }
++    const timespec Wait {0, 5'000'000};
++    ::syscall(SYS_futex, &ForkHoldAcks, FUTEX_WAIT_PRIVATE, Acks, &Wait, nullptr, 0);
++  }
++}
++
++void ThreadManager::ReleaseForFork() {
++  const uint32_t Gen = ForkHoldGen.load(std::memory_order_acquire);
++  if (Gen & 1) {
++    ForkHoldGen.store(Gen + 1, std::memory_order_release);
++    ::syscall(SYS_futex, &ForkHoldGen, FUTEX_WAKE_PRIVATE, INT32_MAX, nullptr, nullptr, 0);
++  }
++}
++
++void ThreadManager::HeldForFork() {
++  const uint32_t Gen = ForkHoldGen.load(std::memory_order_acquire);
++  if (!(Gen & 1)) {
++    return; // a signal that came late: the fork is done
++  }
++  ForkHoldAcks.fetch_add(1, std::memory_order_acq_rel);
++  ::syscall(SYS_futex, &ForkHoldAcks, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
++  // until the fork is done, and never longer than 2 s (should the forking thread be gone)
++  for (int i = 0; i < 40 && ForkHoldGen.load(std::memory_order_acquire) == Gen; ++i) {
++    const timespec Wait {0, 50'000'000};
++    ::syscall(SYS_futex, &ForkHoldGen, FUTEX_WAIT_PRIVATE, Gen, &Wait, nullptr, 0);
++  }
++}
++
++void ThreadManager::ForgetForkHold() {
++  const uint32_t Gen = ForkHoldGen.load(std::memory_order_relaxed);
++  if (Gen & 1) {
++    ForkHoldGen.store(Gen + 1, std::memory_order_relaxed);
++  }
++}
++
+ void ThreadManager::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
+   Stat.UnlockAfterFork(LiveThread, Child);
+   if (!Child) {
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-index dfcd4b0eb607b98b498454b6c4db0614139ca75a..cf5fbb296a3990d7ceb9032445c8bc658a22440d 100644
+index dfcd4b0eb607b98b498454b6c4db0614139ca75a..31d2c35bd5e8d173846e9cbbe2dadd38e9eccc0b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-@@ -50,7 +50,11 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+@@ -44,13 +44,19 @@ enum class SignalEvent : uint32_t {
+   Stop,
+   Return,
+   ReturnRT,
++  // tso-arm: held while another thread forks (ThreadManager::HoldOthersForFork)
++  ForkHold,
+ };
+ 
+ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
    struct DeferredSignalState {
      siginfo_t Info;
      int Signal;
@@ -4738,7 +4891,7 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..cf5fbb296a3990d7ceb9032445c8bc65
    };
  
    FEXCore::Core::InternalThreadState* Thread;
-@@ -83,6 +87,14 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+@@ -83,6 +89,14 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
      // Queue of thread local signal frames that have been deferred.
      // Async signals aren't guaranteed to be delivered in any particular order, but FEX treats them as FILO.
      fextl::vector<DeferredSignalState> DeferredSignalFrames;
@@ -4753,6 +4906,42 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..cf5fbb296a3990d7ceb9032445c8bc65
    } SignalInfo {};
  
    // Seccomp thread specific data.
+@@ -99,6 +113,9 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+ 
+   // Thread pause handling
+   std::atomic_bool ThreadSleeping {false};
++  // tso-arm: held by another thread's fork (ThreadManager::HoldOthersForFork) since this thread's last system call
++  // began: an EINTR of that call is FEX's, and the call is made again (SyscallHandler::HandleSyscall)
++  std::atomic_bool HeldDuringSyscall {false};
+   FEXCore::InterruptableConditionVariable ThreadPaused;
+ 
+   // GDB signal information
+@@ -249,7 +266,25 @@ public:
+     return &Threads;
+   }
+ 
++  // tso-arm: a fork in a process whose views fell back to full ordering (FEXCore::TSOViews::FallbackActive): its
++  // translated code writes guest memory directly, past the views, so taking the other threads' write rights from
++  // their views (TSOViewMemory::FreezeForFork) does not stop them. Guest memory is shared memory under the views,
++  // which the kernel's copy-on-write does not cover, and the child copies it after the fork: what another thread
++  // wrote meanwhile went into the child's copy. A lock taken just after the fork came out taken in the child, which
++  // waited for it forever (Wine's explorer.exe, left by the dozen). Each other thread is signalled and waits in the
++  // handler until the child has its copy; the fork goes on once all of them are there, or after 50 ms (a thread
++  // that waits with its signals blocked, for a lock the fork holds: it writes nothing meanwhile).
++  void HoldOthersForFork(FEXCore::Core::InternalThreadState* Self);
++  void ReleaseForFork();
++  // In the handler of the signal for it
++  void HeldForFork();
++  // In the child, where the other threads are not
++  void ForgetForkHold();
++
+ private:
++  std::atomic<uint32_t> ForkHoldGen {}; // odd while a fork holds the other threads
++  std::atomic<uint32_t> ForkHoldAcks {};
++
+   StatAlloc Stat;
+   FEXCore::Context::Context* CTX;
+   FEX::HLE::SignalDelegator* SignalDelegation;
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
 index 9c018bc46143c93f1083300592ac64be7de67478..0273f3d17dcbf8ba18c8ac2c721ef168b5a51262 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp

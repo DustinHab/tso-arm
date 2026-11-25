@@ -13,6 +13,13 @@
   region it took into use (`madvise(MADV_DONTNEED)` one page too long). In the statically linked FEX that page held
   the main thread's thread-local storage, and FEX crashed at once; in FEX as built before it hit a page of a library
   or the stack, mostly without harm.
+- fork in a program whose views fell back to full ordering (its memory kept moving between threads, or more threads
+  than view slots): the child copies guest memory after the fork, and the other threads' translated code, which then
+  writes past the views, went on writing into what it copied; a lock taken meanwhile came out taken in the child,
+  which waited for it forever (Wine left explorer.exe processes by the dozen). The other threads now wait, held by a
+  signal of FEX's own, until the child has its copy; a system call that signal interrupted is made again, so the
+  program sees no EINTR. `tests/forksnap.c` after a forced fallback: 49 of 50 children saw memory from after the fork,
+  now none; `tests/forkeintr.c`: 150 calls came back with EINTR, now none.
 - FEX: the patches on FEX 8e980598 (2026-11-24), 44 commits newer than be66e03; FEX moved its synchronous faults
   into its frontend meanwhile.
 - `tso-arm check` names the FEX a release package brings along (`fex/prebuilt`), which `tso-arm run` takes, instead

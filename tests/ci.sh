@@ -46,6 +46,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/writeonly tests/writeonly.c
     $CC -O2 -static -pthread -o $B/segload tests/segload.c
     $CC -O2 -static -pthread -o $B/forksnap tests/forksnap.c
+    $CC -O2 -static -pthread -o $B/forkeintr tests/forkeintr.c
     $CC -O2 -static -pthread -o $B/preempt tests/preempt.c
     $CC -O2 -static -o $B/sigspin tests/sigspin.c
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
@@ -134,6 +135,13 @@ for p in writeonly segload forksnap; do
         out=$(last $T run --mode $m $B/$p) || fail "$p, $m: $out"
         ok "$m: $out"
     done
+done
+# the same fork after the views fell back to full ordering (one view slot: the second thread has none; no profile,
+# which would have the program start without views), whose translated code writes past the views: the other threads
+# are held until the child has its copy, and their system calls go on without an EINTR
+for p in forksnap forkeintr; do
+    out=$(last env TSO_VIEWS_SLOTS=1 TSO_VIEWS_PROFILE=none $T run $B/$p) || fail "$p after the fallback: $out"
+    ok "after the fallback: $out"
 done
 
 # asynchronous signals at an instruction start: a handler that makes the interrupted thread call a routine at the
