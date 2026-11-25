@@ -60,6 +60,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     if command -v $CC32 >/dev/null; then
         $CC32 -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
         $CC32 -O2 -static -pthread -o $B/threads32 tests/threads.c
+        $CC32 -O2 -static -o $B/vsyscall32 tests/vsyscall32.c
     fi
 fi
 sh tools/board_check.sh | sed 's/^/      /'
@@ -297,6 +298,13 @@ if [ -x $B/mp32 ]; then
     out=$($T run $B/threads32 8 | tail -n 1)
     echo "$out" | grep -q 'wrong 0' || fail "32-bit threads: $out"
     ok "32-bit threads 8: $out"
+    # a system call through AT_SYSINFO, as i386 C libraries up to glibc 2.35 make every one
+    if [ -x $B/vsyscall32 ]; then
+        for m in tso full; do
+            out=$(last $T run --mode $m $B/vsyscall32) || fail "32-bit vsyscall, $m: $out"
+            ok "$m: $out"
+        done
+    fi
 else
     echo "      32-bit programs: not built (no $CC32)"
 fi

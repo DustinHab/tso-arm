@@ -20,7 +20,7 @@ done.
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
 | 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | done (0.4.5): `tso-arm wine` under the page protocol |
 | 12 | fork after the views fell back to full ordering | done (0.4.5) |
-| 13 | Statically linked i386 programs of glibc 2.35 (Ubuntu 22.04's) crash at start-up under FEX | open (FEX's own) |
+| 13 | i386 programs of glibc 2.35 and older crash at their first system call under FEX | done (0.4.6), FEX's own fault |
 
 ## 1. 32-bit x86 programs
 
@@ -205,11 +205,18 @@ directly, past the views. Done (0.4.5): such a fork holds the other threads with
 its copy, and a system call that signal interrupted is made again (no EINTR for the program). `tests/forksnap.c`
 and `tests/forkeintr.c` after a forced fallback in `tests/ci.sh`.
 
-## 13. Statically linked i386 programs of glibc 2.35
+## 13. i386 programs of glibc 2.35 and older
 
 Found by the release's checks, which build their 32-bit test programs on the runner: on Ubuntu 22.04 every statically
-linked i386 program crashed at start-up (the guest reads address 0), under FEX without the patches as well, and with
-FEX linked statically too; a program without a C library (`exit` through `int 0x80`) runs there. The same programs
-built with Ubuntu 24.04's cross C library (glibc 2.39) run, and dynamically linked 32-bit programs take the C library
-of the root file system (Ubuntu 24.04's). So it is glibc 2.35's i386 start-up code under FEX, not the host. Open; the
-release's checks build their 32-bit programs on Ubuntu 24.04.
+linked i386 program crashed at start-up (the guest jumped to an address FEX would not run), under FEX without the
+patches as well, and with FEX linked statically too; a program without a C library (`exit` through `int 0x80`) ran.
+The same programs built with Ubuntu 24.04's cross C library (glibc 2.39) ran, and the programs of Ubuntu 22.04 crashed
+on the Pi just the same: not the host but the C library.
+
+The i386 C library up to glibc 2.35 makes its system calls through the kernel's entry point that AT_SYSINFO names.
+Where FEX has no VDSO to take it from (FEX linked statically, a build without its thunks, `tso-arm run` without
+`--gpu`), it makes a page of its own (`int 0x80; ret`): mapped readable and writable, made read-only on the host
+alone, so FEX's own tracking knew it as not executable, and FEX does not translate what it knows so. Every such
+program died at its first system call. Done (0.4.6): the page is mapped executable for the guest and writable on the
+host only while its code goes in. `tests/vsyscall32.c` calls through AT_SYSINFO in `tests/ci.sh`; the release's checks
+build their 32-bit programs on Ubuntu 22.04 as well again. A fix for FEX itself.

@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.6 (not released yet)
+
+- i386 programs whose C library makes its system calls through AT_SYSINFO (glibc 2.35 and older: Ubuntu 22.04's, Debian
+  11's, older games' runtimes) crashed at their first one where FEX has no VDSO (FEX linked statically, as in
+  containers; a build without thunks; `tso-arm run` without `--gpu`): the page FEX makes for that entry was not
+  executable in FEX's own tracking. A fault of FEX's own; `tests/vsyscall32.c`, and the release's checks build their
+  32-bit test programs on Ubuntu 22.04 again.
+
 ## 0.4.5 (2026-11-25)
 
 Containers: once installed for every user, `docker run --platform linux/amd64 IMAGE` runs x86-64 images on an Arm

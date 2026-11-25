@@ -38,6 +38,7 @@ $CC -O2 -static -o build/ci/filemap tests/filemap.c
 CC32=${CC_X86_32:-"$CC -m32"}
 $CC32 -O2 -msse2 -static -pthread -o build/ci/mp32 litmus/mp32.c
 $CC32 -O2 -static -pthread -o build/ci/threads32 tests/threads.c
+$CC32 -O2 -static -o build/ci/vsyscall32 tests/vsyscall32.c
 # dynamically linked, with this machine's C library as the root file system
 R=build/ci/rootfs
 LIBC=$($CC -print-file-name=libc.so.6)

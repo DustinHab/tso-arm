@@ -1,4 +1,4 @@
-From f2760ebfa722c88d7dc19e99a512be2ba5da515c Mon Sep 17 00:00:00 2001
+From 1924ad3a58c4ba08d4b78f2ff6423921418b2040 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -29,6 +29,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Common/FDUtils.h                       |   32 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
+ Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   10 +-
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  106 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
@@ -46,7 +47,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |    2 +-
- 42 files changed, 3682 insertions(+), 232 deletions(-)
+ 43 files changed, 3690 insertions(+), 234 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -1195,6 +1196,33 @@ index 9e15947ae184fa0c8b7d295f6255ce9c0cce30ed..4491df685c4f025dec5ffcb7434de5ac
  if (ARCHITECTURE_arm64)
    if (NOT USE_LEGACY_BINFMTMISC)
      # Just restart the systemd service
+diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+index 9cedb6087d0e534cab158def792069aee38a3670..71a689e2698c7ff1f5658cd3dd4e6df3f09f440f 100644
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+@@ -662,14 +662,20 @@ public:
+       if (!VSyscallEntry) [[unlikely]] {
+         // If the VDSO thunk doesn't exist then we might not have a vsyscall entry.
+         // Newer glibc requires vsyscall to exist now. So let's allocate a buffer and stick a vsyscall in to it.
++        // tso-arm: mapped executable for the guest, and writable on the host only while the code goes in. FEX translates
++        // only what its own tracking knows as executable: mapped PROT_READ | PROT_WRITE and made PROT_READ on the host
++        // alone, the page was one FEX would not run, and every i386 program whose C library makes its system calls
++        // through AT_SYSINFO (glibc 2.35 and older: Ubuntu 22.04's, older games' runtimes) crashed at its first one,
++        // where FEX has no VDSO to take the entry from (FEX linked statically, a build without thunks)
+         auto VSyscallPage =
+-          Handler->GuestMmap(Thread, nullptr, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
++          Handler->GuestMmap(Thread, nullptr, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+         constexpr static uint8_t VSyscallCode[] = {
+           0xcd, 0x80, // int 0x80
+           0xc3,       // ret
+         };
++        mprotect(VSyscallPage, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+         memcpy(VSyscallPage, VSyscallCode, sizeof(VSyscallCode));
+-        mprotect(VSyscallPage, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ);
++        mprotect(VSyscallPage, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_EXEC);
+         VSyscallEntry = reinterpret_cast<uint64_t>(VSyscallPage);
+       }
+ 
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924f605d30b 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
