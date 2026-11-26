@@ -52,7 +52,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/userns tests/userns.c
     $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
     $CC -O2 -static -o $B/faultrip tests/faultrip.c
-    $CC -O2 -static -o $B/closeall tests/closeall.c -lm
+    $CC -O2 -static -o $B/closeall tests/closeall.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c

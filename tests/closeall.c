@@ -7,7 +7,6 @@
 //   closeall          prints one line; exit status 1 if a file of its own got bytes it did not write
 #define _GNU_SOURCE
 #include <fcntl.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +42,8 @@ int main(void) {
     char buf[64];
     double sum = 0;
     for (int i = 0; i < 512; i++) {
-        snprintf(buf, sizeof buf, "%.17g", sin(i) * 1e3 + i / 7.0);
+        // (no libm: static linking with it fails with Ubuntu 22.04's cross C library)
+        snprintf(buf, sizeof buf, "%.17g", (i * 7919 % 1000) * 1.001 + i / 7.0);
         v[i] = strtod(buf, NULL);
     }
     qsort(v, 512, sizeof v[0], cmp);
