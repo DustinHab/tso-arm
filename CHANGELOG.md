@@ -12,9 +12,10 @@
   Ubuntu's signed InRelease (with the root file system's keyring), and so do those its programs need without
   naming them (Spotify's and Zoom's libatomic, found with the root file system's dynamic loader). A menu entry starts
   the program through tso-arm (`tso-arm app run NAME`); Chromium and Electron programs run with `--no-sandbox` for
-  now (`TSO_ARM_APP_SANDBOX=1` tries their sandbox). `tests/apps_check.sh` and `.github/workflows/apps.yml` (weekly
-  and by hand) install the six on GitHub's Arm runner, start each up to its first window on Xvfb with screenshots,
-  and remove them again, the root file system as before.
+  now (`TSO_ARM_APP_SANDBOX=1` tries their sandbox); Discord, whose package is a starter that fetches Discord into
+  `~/.config/discord`, is started from there once it is there. `tests/apps_check.sh` and `.github/workflows/apps.yml`
+  (weekly and by hand) install the six on GitHub's Arm runner, start each on Xvfb until its window draws, with
+  screenshots, and remove them again, the root file system as before.
 - A program inside the root file system that starts itself again through `/proc/self/exe` (Chromium's zygote,
   renderers and services; Microsoft Edge) got ENOEXEC: FEX named it by its path there, without the root file
   system's own, and looked for that on the host; glibc then ran the program as a shell script ("/proc/self/exe: 1:

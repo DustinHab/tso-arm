@@ -194,9 +194,11 @@ one of your own.
 Chromium and Electron programs (Discord, Slack, Signal, Spotify's player, Edge) start with `--no-sandbox`: unpacked,
 their sandbox helper has no root rights, and their namespace sandbox does not start under FEX yet; they run, without
 the sandbox's protection of their renderers. `TSO_ARM_APP_SANDBOX=1` tries the sandbox. They reserve more address
-space than the page protocol's window holds and run with FEX's full ordering from their start. What the tests cover:
-each of the six programs installed and started on GitHub's Arm runner up to its first window (`.github/workflows/apps.yml`,
-weekly, with screenshots); signing in and using them is not tested.
+space than the page protocol's window holds and run with FEX's full ordering from their start. Discord's package
+holds only a starter, which fetches Discord into `~/.config/discord` on its first start (its setup window); from then
+on `tso-arm app run discord` starts Discord itself. What the tests cover: each of the six programs installed and
+started on GitHub's Arm runner until its window draws (`.github/workflows/apps.yml`, weekly, with screenshots);
+signing in and using them is not tested.
 
 ## Steam
 
