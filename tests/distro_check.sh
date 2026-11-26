@@ -59,11 +59,23 @@ named() {
     ok "$2: it names $cmd"
     cmd=$(echo "$cmd" | sed 's/apt-get install/apt-get install -y -q/; s/\(dnf\|yum\) install/\1 install -y -q/;
         s/zypper install/zypper -n -q install/; s/pacman -S/pacman -S --noconfirm/')
+    if log=$(DEBIAN_FRONTEND=noninteractive sh -c "$cmd" 2>&1); then
+        ok "installed with: $cmd"
+        return
+    fi
+    # once more with the package lists fetched anew: a distribution's mirrors change under a run (zypper said once
+    # only "Installation has completed with error" on Tumbleweed, whose snapshots come several times a day)
+    show "$(echo "$log" | tail -n 40)"
+    case $cmd in
+    *zypper*) zypper -n -q refresh >/dev/null 2>&1 ;;
+    *apt-get*) apt-get update -qq >/dev/null 2>&1 ;;
+    *dnf*) dnf -q -y makecache >/dev/null 2>&1 ;;
+    esac
     log=$(DEBIAN_FRONTEND=noninteractive sh -c "$cmd" 2>&1) || {
-        show "$(echo "$log" | tail -n 20)"
+        show "$(echo "$log" | tail -n 40)"
         fail "$cmd"
     }
-    ok "installed with: $cmd"
+    ok "installed with: $cmd (the second time)"
 }
 
 # Where the installer stops: whether the statically linked FEX of the package (which binfmt_misc starts in
