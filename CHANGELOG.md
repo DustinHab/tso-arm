@@ -2,10 +2,6 @@
 
 ## 0.4.9 (not released yet)
 
-- The disk cache is written by the translating thread itself: FEX's writer thread was a second thread in every
-  process, and Chromium's zygote (Steam's steamwebhelper, Electron programs), which forks only while it has one, stopped
-  (`tso-arm steam` had the cache off for that; on again). A program's first run takes a little longer (`python3 -c 0`
-  0.41 instead of 0.36 s), later ones are the same. `TSO_DISKCACHE_WRITER=1` brings the writer back.
 - Faster starts without the page protocol and for 32-bit programs: FEX freed the 8 MB it keeps in front of `brk` one
   page at a time at every start (2,048 system calls; a program that ends at once 7.1 instead of 12 ms under full
   ordering), and the disk cache's entries are read rather than mapped, which went through FEX's allocator for 32-bit
