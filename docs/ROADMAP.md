@@ -83,8 +83,10 @@ loader called that function for its first warning as Arm code: SIGILL, reported 
 entered (the trampoline of `vkEnumeratePhysicalDevices`, which looked like a link that had not taken). The thunk took
 only the older debug report structure out of such chains. Now every structure that hands the host a guest function
 (debug messengers and reports, a device memory report, a list of drivers to load) is taken out for the call and put
-back after it; `tests/vkproc.c` chains a messenger for every severity, and the graphics check runs it and `vulkaninfo
---summary` with and without `--gpu`. A fault of FEX's own.
+back after it. vulkaninfo also makes a messenger of its own with the function `vkGetInstanceProcAddr` gives, which was
+the loader's own rather than FEX's replacement (that one puts in a host function): `vkGetInstanceProcAddr` answers
+with FEX's for the messengers' functions now. `tests/vkproc.c` does both, for every severity, and the graphics check
+runs it and `vulkaninfo --summary` with and without `--gpu`. Faults of FEX's own.
 
 ## 5. Installing for every user, and updating
 

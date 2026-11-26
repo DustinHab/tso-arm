@@ -1,6 +1,6 @@
 // Vulkan as vulkaninfo starts it: an instance with a debug messenger chained into vkCreateInstance (VK_EXT_debug_utils,
-// every severity, so that the loader has messages for it), and the instance's functions taken through
-// vkGetInstanceProcAddr. With FEX's Vulkan thunk those are the host's own functions, linked to guest-callable thunks;
+// every severity, so that the loader has messages for it), a messenger of its own made with the function
+// vkGetInstanceProcAddr gives, and the instance's functions taken through vkGetInstanceProcAddr. With FEX's Vulkan thunk those are the host's own functions, linked to guest-callable thunks;
 // the messenger's function is the program's x86 code, which the host's loader called as its own (SIGILL) before the
 // thunk took such structures out of the chain. Without a Vulkan library or instance it says so and ends with 0.
 //   vkproc     prints "vkproc: N devices through vkGetInstanceProcAddr: ..." or what went wrong (exit status 1)
@@ -48,6 +48,8 @@ typedef struct {
 } VkDebugUtilsMessengerCreateInfoEXT;
 
 typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo *, const void *, VkInstance *);
+typedef VkResult (*PFN_vkCreateDebugUtilsMessengerEXT)(VkInstance, const VkDebugUtilsMessengerCreateInfoEXT *, const void *, uint64_t *);
+typedef void (*PFN_vkDestroyDebugUtilsMessengerEXT)(VkInstance, uint64_t, const void *);
 typedef void (*PFN_vkDestroyInstance)(VkInstance, const void *);
 typedef VkResult (*PFN_vkEnumeratePhysicalDevices)(VkInstance, uint32_t *, VkPhysicalDevice *);
 typedef void (*PFN_vkGetPhysicalDeviceProperties)(VkPhysicalDevice, void *);
@@ -91,6 +93,12 @@ int main(void) {
     PFN_vkEnumeratePhysicalDevices enumerate = (PFN_vkEnumeratePhysicalDevices)gipa(inst, "vkEnumeratePhysicalDevices");
     PFN_vkGetPhysicalDeviceProperties props = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
     PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(inst, "vkDestroyInstance");
+    // and a messenger of its own, made with the function vkGetInstanceProcAddr gives (vulkaninfo does): the loader
+    // passes it what it reports while the devices are enumerated
+    PFN_vkCreateDebugUtilsMessengerEXT create_msgr = with_messenger ? (PFN_vkCreateDebugUtilsMessengerEXT)gipa(inst, "vkCreateDebugUtilsMessengerEXT") : NULL;
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy_msgr = with_messenger ? (PFN_vkDestroyDebugUtilsMessengerEXT)gipa(inst, "vkDestroyDebugUtilsMessengerEXT") : NULL;
+    uint64_t msgr = 0;
+    if (create_msgr && create_msgr(inst, &dbg, NULL, &msgr) != 0) msgr = 0;
     uint32_t n = 0;
     if (!enumerate || enumerate(inst, &n, NULL) != 0) {
         printf("vkproc: vkEnumeratePhysicalDevices through vkGetInstanceProcAddr failed\n");
@@ -106,9 +114,10 @@ int main(void) {
         props(dev[i], p);
         printf(" %s;", (const char *)p + 20);
     }
+    if (msgr && destroy_msgr) destroy_msgr(inst, msgr, NULL);
     if (destroy) destroy(inst, NULL);
     if (with_messenger) {
-        printf(" debug messenger in vkCreateInstance: %u messages\n", messages);
+        printf(" debug messengers (in vkCreateInstance%s): %u messages\n", msgr ? " and of its own" : "", messages);
     } else {
         printf(" no VK_EXT_debug_utils\n");
     }

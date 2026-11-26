@@ -47,6 +47,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/segload tests/segload.c
     $CC -O2 -static -pthread -o $B/forksnap tests/forksnap.c
     $CC -O2 -static -pthread -o $B/forkeintr tests/forkeintr.c
+    $CC -O2 -static -pthread -o $B/lastexit tests/lastexit.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -61,6 +62,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
         $CC32 -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
         $CC32 -O2 -static -pthread -o $B/threads32 tests/threads.c
         $CC32 -O2 -static -o $B/vsyscall32 tests/vsyscall32.c
+        $CC32 -O2 -static -pthread -o $B/lastexit32 tests/lastexit.c
     fi
 fi
 sh tools/board_check.sh | sed 's/^/      /'
@@ -147,6 +149,16 @@ done
 for p in forksnap forkeintr; do
     out=$(last env TSO_VIEWS_SLOTS=1 TSO_VIEWS_PROFILE=none $T run $B/$p) || fail "$p after the fallback: $out"
     ok "after the fallback: $out"
+done
+# the process ends with its last thread's exit alone (pthread_exit in main, exit in the other thread; one thread
+# ending with exit), also with FEX's disk cache and its writer thread: exit status 7 from that thread
+for m in tso full unordered; do
+    for a in threads raw; do
+        st=0
+        out=$(timeout 60 $T run --mode $m $B/lastexit $a 2>&1) || st=$?
+        [ $st = 7 ] || fail "lastexit $a, $m: exit status $st (7 expected): $out"
+    done
+    ok "$m: lastexit: the last thread's exit ends the process"
 done
 
 # asynchronous signals at an instruction start: a handler that makes the interrupted thread call a routine at the
@@ -304,6 +316,15 @@ if [ -x $B/mp32 ]; then
             out=$(last $T run --mode $m $B/vsyscall32) || fail "32-bit vsyscall, $m: $out"
             ok "$m: $out"
         done
+    fi
+    # the last thread's exit ends a 32-bit process as well (int 0x80 exit)
+    if [ -x $B/lastexit32 ]; then
+        for a in threads raw; do
+            st=0
+            out=$(timeout 60 $T run $B/lastexit32 $a 2>&1) || st=$?
+            [ $st = 7 ] || fail "32-bit lastexit $a: exit status $st (7 expected): $out"
+        done
+        ok "32-bit lastexit: the last thread's exit ends the process"
     fi
 else
     echo "      32-bit programs: not built (no $CC32)"

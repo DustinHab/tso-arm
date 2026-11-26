@@ -4,8 +4,8 @@
 
 Programs start much faster from their second run on: `tso-arm run` keeps what FEX translated in a cache on disk,
 for the patched FEX's own states only, so x86 order stays kept. Vulkan programs that chain a debug messenger, among
-them vulkaninfo, run under `--gpu` now, and 32-bit programs of older distributions start. Three of the four faults
-fixed are FEX's own. Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`
+them vulkaninfo, run under `--gpu` now, and 32-bit programs of older distributions start. Most of the faults fixed
+are FEX's own. Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`
 or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **A program starts faster the second time.** `tso-arm run` turns on FEX's disk cache: code translated in an
@@ -13,7 +13,10 @@ or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt 
   `python3 -c 0` starts in 0.11 instead of 0.32 s, `git --version` in 0.05 instead of 0.09 s. The patched FEX keeps
   only code that every run translates alike (without the page protocol, or with its views asleep or fallen back),
   keyed by that state; code of the awake page protocol depends on what the run shares and is translated anew. A fork
-  child reads the cache but does not write it (FEX's cache left its locks to a child that has no writer thread).
+  child reads the cache but does not write it (FEX's cache left its locks to a child that has no writer thread). A
+  process whose last thread ends with `exit` alone (a program without a C library, a main thread ended with
+  `pthread_exit`) ends with it now, as on Linux: FEX's cache writer thread kept it as a zombie that blocked SIGTERM.
+  `tests/lastexit.c`.
   `tso-arm status` shows its size, `tso-arm forget --cache` empties it, `TSO_ARM_DISKCACHE=0` runs without.
   FEX's cache, turned on, made the translated code itself 9 % slower in two ways (relocatable code everywhere, and
   displacements and immediates loaded as patchable constants); neither is left, and the efficiency is 86 % (pigz 92,
@@ -30,8 +33,10 @@ or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt 
 - `--gpu`: vulkaninfo stopped with SIGILL, and so did every program that chains a debug messenger into
   `vkCreateInstance` (validation set-ups, engines in debug builds): FEX's Vulkan thunk handed the program's x86
   function to the host's loader, which called it as Arm code. Such structures (debug messengers and reports, a device
-  memory report, a list of drivers to load) are taken out of the chain for the call now and put back after it. A
-  fault of FEX's own; `tests/vkproc.c`, and the graphics check runs vulkaninfo and it with and without `--gpu`.
+  memory report, a list of drivers to load) are taken out of the chain for the call now and put back after it, and a
+  messenger a program makes itself gets FEX's host function also where the program took the function that makes it
+  from `vkGetInstanceProcAddr` (vulkaninfo does; it went to the loader as it was). Faults of FEX's own;
+  `tests/vkproc.c` does both, and the graphics check runs vulkaninfo and it with and without `--gpu`.
 - `--gpu`: no line on the terminal any more for each Vulkan function a program looks up that FEX's thunk has no
   signature for (vulkaninfo had ten, DXVK more); the program gets a null pointer for it, as before.
   `TSO_ARM_VULKAN_UNKNOWN=1` prints them.

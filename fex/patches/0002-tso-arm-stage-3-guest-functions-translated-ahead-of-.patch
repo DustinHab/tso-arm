@@ -1,4 +1,4 @@
-From 747ebfd081b52071da452ab5d0e78de6dc342e1d Mon Sep 17 00:00:00 2001
+From b94159bac4aeb935a32659511fffaa02bf95e658 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -43,18 +43,18 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/SignalDelegator.cpp         |  456 +++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  105 +-
- .../LinuxSyscalls/Syscalls/Thread.cpp         |   70 +-
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |  104 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  192 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1227 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  181 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |   92 +-
- .../LinuxSyscalls/ThreadManager.h             |   37 +-
+ .../LinuxSyscalls/ThreadManager.h             |   53 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
- ThunkLibs/libvulkan/Host.cpp                  |   60 +-
- 50 files changed, 3943 insertions(+), 257 deletions(-)
+ ThunkLibs/libvulkan/Host.cpp                  |   69 +-
+ 50 files changed, 3990 insertions(+), 269 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -2737,7 +2737,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91005fec27a4866c68f3b3e1ad1dcdb8836136f2 100644
+index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d6961567462271c06 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -2872,6 +2872,60 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91005fec27a4866c68f3b3e1ad1dcdb8
        // Wait for the read end of the pipe to close.
        pollfd PollFD {};
        PollFD.fd = VForkFDs[0];
+@@ -399,6 +453,20 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+   }
+ }
+ 
++// The guest's exit_group, and the exit of its last thread (SyscallExit)
++[[noreturn]] static void ExitGroup(FEXCore::Core::CpuStateFrame* Frame, int status) {
++  Frame->Thread->CTX->FlushAndCloseCodeMap();
++
++  // Save telemetry if we're exiting.
++  FEX::HLE::_SyscallHandler->GetSignalDelegator()->SaveTelemetry();
++  FEX::HLE::_SyscallHandler->TM.CleanupForExit();
++  FEX::HLE::TSOViewMemory::ExitStats();
++
++  syscall(SYSCALL_DEF(exit_group), status);
++  // This will never be reached
++  std::terminate();
++}
++
+ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
+   // TLS/DTV teardown is something FEX can't control. Disable glibc checking when we leave a pthread.
+   // Since this thread is hard stopping, we can't track the TLS/DTV teardown in FEX's thread handling.
+@@ -413,6 +481,13 @@ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
+ 
+   ThreadObject->StatusCode = status;
+ 
++  // tso-arm: the last guest thread ends the process with its exit, as on Linux, also where FEX runs a thread of its
++  // own (the disk cache's writer): with that one left, a program whose last thread ended with exit alone (a program
++  // without a C library, a main thread ended with pthread_exit) stayed a zombie that never ended
++  if (FEX::HLE::_SyscallHandler->TM.LastToExit(ThreadObject)) {
++    ExitGroup(Frame, status);
++  }
++
+   FEX::HLE::_SyscallHandler->UninstallTLSState(ThreadObject);
+ 
+   if (ThreadObject->ExecutionThread) {
+@@ -585,17 +660,6 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+     return ThreadObject->ThreadInfo.TID;
+   });
+ 
+-  REGISTER_SYSCALL_IMPL(exit_group, [](FEXCore::Core::CpuStateFrame* Frame, int status) -> uint64_t {
+-    Frame->Thread->CTX->FlushAndCloseCodeMap();
+-
+-    // Save telemetry if we're exiting.
+-    FEX::HLE::_SyscallHandler->GetSignalDelegator()->SaveTelemetry();
+-    FEX::HLE::_SyscallHandler->TM.CleanupForExit();
+-    FEX::HLE::TSOViewMemory::ExitStats();
+-
+-    syscall(SYSCALL_DEF(exit_group), status);
+-    // This will never be reached
+-    std::terminate();
+-  });
++  REGISTER_SYSCALL_IMPL(exit_group, [](FEXCore::Core::CpuStateFrame* Frame, int status) -> uint64_t { ExitGroup(Frame, status); });
+ }
+ } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e40bd4a8a 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
@@ -5382,10 +5436,10 @@ index 99fd909d5efdab4c30094361657e97adcee7e7f3..1cbbec7a01717c4b3be6413747e8eeeb
    Stat.UnlockAfterFork(LiveThread, Child);
    if (!Child) {
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-index dfcd4b0eb607b98b498454b6c4db0614139ca75a..31d2c35bd5e8d173846e9cbbe2dadd38e9eccc0b 100644
+index dfcd4b0eb607b98b498454b6c4db0614139ca75a..1527f2836da9566c0bec0f1cae3b9e2e88c9b43b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-@@ -44,13 +44,19 @@ enum class SignalEvent : uint32_t {
+@@ -44,17 +44,26 @@ enum class SignalEvent : uint32_t {
    Stop,
    Return,
    ReturnRT,
@@ -5406,7 +5460,14 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..31d2c35bd5e8d173846e9cbbe2dadd38
    };
  
    FEXCore::Core::InternalThreadState* Thread;
-@@ -83,6 +89,14 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+ 
++  // tso-arm: the thread has begun its exit (ThreadManager::LastToExit)
++  bool ExitBegun {};
++
+   struct {
+     uint32_t parent_tid;
+     uint32_t PID;
+@@ -83,6 +92,14 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
      // Queue of thread local signal frames that have been deferred.
      // Async signals aren't guaranteed to be delivered in any particular order, but FEX treats them as FILO.
      fextl::vector<DeferredSignalState> DeferredSignalFrames;
@@ -5421,7 +5482,7 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..31d2c35bd5e8d173846e9cbbe2dadd38
    } SignalInfo {};
  
    // Seccomp thread specific data.
-@@ -99,6 +113,9 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+@@ -99,6 +116,9 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
  
    // Thread pause handling
    std::atomic_bool ThreadSleeping {false};
@@ -5431,7 +5492,27 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..31d2c35bd5e8d173846e9cbbe2dadd38
    FEXCore::InterruptableConditionVariable ThreadPaused;
  
    // GDB signal information
-@@ -249,7 +266,25 @@ public:
+@@ -193,6 +213,19 @@ public:
+     Threads.emplace_back(Thread);
+   }
+ 
++  // tso-arm: marks the thread as exiting; true for the last guest thread to begin its exit (of two at once, one),
++  // whose status Linux gives the process
++  bool LastToExit(FEX::HLE::ThreadStateObject* Thread) {
++    std::lock_guard lk(ThreadCreationMutex);
++    Thread->ExitBegun = true;
++    for (auto* Other : Threads) {
++      if (!Other->ExitBegun) {
++        return false;
++      }
++    }
++    return true;
++  }
++
+   void DestroyThread(FEX::HLE::ThreadStateObject* Thread, bool NeedsTLSUninstall = false);
+   void StopThread(FEX::HLE::ThreadStateObject* Thread);
+   void UnpauseThread(FEX::HLE::ThreadStateObject* Thread);
+@@ -249,7 +282,25 @@ public:
      return &Threads;
    }
  
@@ -6387,7 +6468,7 @@ index 553518ea2450b61181b4fed572c7e6f0e5a86eea..e18f381a7e0fb8ea5dd04c22628d59c7
    return func;
  }
 diff --git a/ThunkLibs/libvulkan/Host.cpp b/ThunkLibs/libvulkan/Host.cpp
-index 592248e8cc4df6d4624dc71232014b91fc2cd29d..cab065860da79112bf69145650f4adc83f4be5e1 100644
+index 592248e8cc4df6d4624dc71232014b91fc2cd29d..d453190ac7988532ffe368a3ecd427e4e60bd5f8 100644
 --- a/ThunkLibs/libvulkan/Host.cpp
 +++ b/ThunkLibs/libvulkan/Host.cpp
 @@ -16,6 +16,7 @@ $end_info$
@@ -6476,6 +6557,22 @@ index 592248e8cc4df6d4624dc71232014b91fc2cd29d..cab065860da79112bf69145650f4adc8
    *a_3.get_pointer() = to_guest(to_host_layout(out));
  
    // Reload device-specific function pointers used in custom implementations.
+@@ -370,6 +402,15 @@ static PFN_vkVoidFunction LookupCustomVulkanFunction(const char* a_1) {
+     return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceXcbPresentationSupportKHR;
+   } else if (a_1 == "vkGetPhysicalDeviceXlibPresentationSupportKHR"sv) {
+     return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceXlibPresentationSupportKHR;
++    // tso-arm: the messengers' functions, which put a host function in place of the program's: taken through
++    // vkGetInstanceProcAddr they were the loader's own, which got the program's x86 function (vulkaninfo: SIGILL at the
++    // first message)
++  } else if (a_1 == "vkCreateDebugUtilsMessengerEXT"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCreateDebugUtilsMessengerEXT;
++  } else if (a_1 == "vkCreateDebugReportCallbackEXT"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCreateDebugReportCallbackEXT;
++  } else if (a_1 == "vkDestroyDebugReportCallbackEXT"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkDestroyDebugReportCallbackEXT;
+ #ifdef IS_32BIT_THUNK
+   } else if (a_1 == "vkAllocateCommandBuffers"sv) {
+     return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkAllocateCommandBuffers;
 -- 
 2.53.0
 

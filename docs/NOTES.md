@@ -2927,3 +2927,18 @@ change between runs, as Mono's), and each such value became a four-instruction c
 access. Without masks the guest code's hash covers all its bytes and a block is taken only where the code is the same;
 xz with one thread 5.15 against 5.18 s. tso-arm's directory for the cache is one per build of the patches, since FEX's
 format number does not change with them.
+**Two more found by the release's package on the Pi.** vulkaninfo under `--gpu` still stopped with SIGILL on the
+Pi's V3D (on GitHub's runner, with lavapipe, it ran): at the same messenger function, from the loader's
+`vkEnumeratePhysicalDevices`. vulkaninfo also makes a messenger of its own, with `vkCreateDebugUtilsMessengerEXT` taken
+through `vkGetInstanceProcAddr`. FEX's thunk has its own host implementations for that function and the debug
+report's two (they put a host function in place of the program's), but its table of functions `vkGetInstanceProcAddr`
+answers with them lacked these three: the program got the loader's own, and the loader its x86 function. Added;
+`tests/vkproc.c` makes such a messenger too (under the draft's FEX SIGILL, through the x86 loader 128 messages).
+
+And `raw32` of the release checks (`exit` through `int 0x80`) never ended under `tso-arm run`: a zombie whose leader
+had exited, with one thread left, FEX's disk cache writer, which blocks SIGTERM, so `timeout` could not end it
+either. A process ends when its last thread ends; FEX passed a guest thread's `exit` on to the kernel as such, which
+ended the process only while FEX had no thread of its own. The last guest thread to begin its exit now ends the
+process as `exit_group` does, with its own status, which Linux gives the process too (a main thread ended with
+`exit(3)` and a last one with `exit(7)`: 7 natively). `tests/lastexit.c` in `tests/ci.sh`, 64-bit in every mode and
+32-bit: `pthread_exit` in main with `exit` in the other thread, and a single thread ending with `exit`.

@@ -25,6 +25,7 @@ $CC -O2 -static -pthread -o build/ci/writeonly tests/writeonly.c
 $CC -O2 -static -pthread -o build/ci/segload tests/segload.c
 $CC -O2 -static -pthread -o build/ci/forksnap tests/forksnap.c
 $CC -O2 -static -pthread -o build/ci/forkeintr tests/forkeintr.c
+$CC -O2 -static -pthread -o build/ci/lastexit tests/lastexit.c
 $CC -O2 -static -pthread -o build/ci/filegrow tests/filegrow.c
 $CC -O2 -static -pthread -o build/ci/fixedover tests/fixedover.c
 $CC -O2 -static -pthread -o build/ci/cowmap tests/cowmap.c
@@ -39,6 +40,7 @@ CC32=${CC_X86_32:-"$CC -m32"}
 $CC32 -O2 -msse2 -static -pthread -o build/ci/mp32 litmus/mp32.c
 $CC32 -O2 -static -pthread -o build/ci/threads32 tests/threads.c
 $CC32 -O2 -static -o build/ci/vsyscall32 tests/vsyscall32.c
+$CC32 -O2 -static -pthread -o build/ci/lastexit32 tests/lastexit.c
 # dynamically linked, with this machine's C library as the root file system
 R=build/ci/rootfs
 LIBC=$($CC -print-file-name=libc.so.6)
