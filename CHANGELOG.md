@@ -1,12 +1,58 @@
 # Changes
 
-## 0.4.9 (not released yet)
+## 0.4.9 (2026-11-26)
+
+An RPM package for Fedora and openSUSE, `tso-arm steam` (Steam up to its login window, with FEX's full ordering for
+now), and faster starts without the page protocol and for 32-bit programs. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - Faster starts without the page protocol and for 32-bit programs: FEX freed the 8 MB it keeps in front of `brk` one
   page at a time at every start (2,048 system calls; a program that ends at once 7.1 instead of 12 ms under full
   ordering), and the disk cache's entries are read rather than mapped, which went through FEX's allocator for 32-bit
   programs (12 instead of 25 ms for one that ends at once). The main stack of a 32-bit program is placed in steps of the
   kernel's guard gap instead of a page at a time (2,560 failing `mmap` calls at every start).
+
+- **An RPM package.** Each release brings `tso-arm-VERSION-1.aarch64.rpm` as well (in `SHA256SUMS` too), for Fedora
+  and openSUSE: `sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm`, on openSUSE `sudo zypper install
+  --allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm`. The same files in the same places as the Debian package, and
+  its scriptlets run the Debian package's maintainer scripts, so it registers and unregisters x86 programs with
+  binfmt_misc alike, goes on in a container, and is not installed over an installation by `tools/get.sh`; removed, it
+  takes the root file system for every user along (RPM has no purge). It requires glibc 2.35 or newer, the C++
+  libraries of the prebuilt FEX and awk (openSUSE's image comes without), recommends curl and unsquashfs, and
+  suggests what `learn` needs. `tools/rpm.sh` builds it from a release package with `rpmbuild` (Ubuntu's `rpm`
+  package has it); a workflow builds it with Ubuntu 22.04's and 24.04's, installs, runs and removes it in Fedora's and
+  openSUSE Tumbleweed's images, and on the Arm runner itself checks the binfmt_misc registration, an upgrade to a
+  newer package and the removal. `tso-arm update`, `uninstall` and `tools/get.sh` name dnf and zypper for it. The
+  Debian package's workflow now builds from this commit's files as well where a FEX patch changed since the newest
+  release (it took the release's package as it was then, and skipped what needs this commit's `tso-arm`).
+- **Steam, up to its login window.** `tso-arm steam` fetches Valve's launcher package (`steam-launcher` from
+  repo.steampowered.com, checked against Valve's package index) into `~/.local/share/tso-arm/steam`, without
+  installing it into the system, and starts it; Steam puts its client into `~/.local/share/Steam` and updates it from
+  Valve's servers as on an x86 computer. On GitHub's Arm runner (Xvfb, no GPU) the bootstrap is unpacked after 30 s,
+  the client downloaded and unpacked after 60 s, Steam's runtime container and steamwebhelper (its Chromium) run after
+  2.5 minutes, and the "Sign in to Steam" window appears after about 4; `.github/workflows/steam.yml` requires it, with
+  screenshots, windows, processes and Steam's logs as an artifact (`tests/steam_check.sh`). Signing in and games are
+  not tested. Four things stood in the way under FEX, which `tso-arm steam` steps around for now (docs/GUIDE.md,
+  "Steam"): FEX's disk cache writer is a thread of its own in every process, and Chromium's zygote
+  forks only when it is alone in `/proc/self/task` (`Check failed: IsSingleThreaded`; `tests/singlethread.c` sees two
+  tasks with the cache, one without), so the cache is off; under the page protocol the renderer, GPU and network
+  processes the zygote forks ended within seconds (Chromium's way of forking alone, `tests/forkstack.c`, keeps parent
+  and child apart under both orderings), so Steam runs with FEX's full ordering; with Chromium's sandbox no window
+  came either, so steamwebhelper runs without it; and steamwebhelper's sandboxed zygote, in Steam's runtime container
+  and a network namespace of its own, reached neither of FEX's server sockets, so `tso-arm steam` puts the server's
+  socket into the home directory (`FEX_SERVERSOCKETPATH`), as Valve's own build of FEX for Steam does.
+- `tso-arm userns [allow | remove]`: Steam requires user namespaces (its requirements check runs bubblewrap), which
+  AppArmor restricts on Ubuntu 23.10 and newer to programs with a profile of their own, and under tso-arm the program
+  that asks is FEX: Steam stopped with "Steam now requires user namespaces to be enabled". `sudo tso-arm userns allow`
+  puts an AppArmor profile in place that allows them to tso-arm's FEX alone (as Ubuntu's own profiles do for Chrome and
+  others), `remove` takes it away, `tso-arm check` shows the state, and `tso-arm uninstall` removes the profile of its
+  installation.
+- `tso-arm run` takes scripts (`#!`): FEX runs their interpreter from the root file system (Steam's launcher and
+  `steam.sh`, the start scripts of games); it said "not an x86 Linux program" before.
+- `tso-arm run` unsets an `XDG_RUNTIME_DIR` that names no writable directory (a session without a login manager,
+  another user's after `su`): FEX's server makes a socket there and did not start where it could not, and FEX with it
+  ("FEXServerClient: Failure to setup client").
 
 ## 0.4.8 (2026-11-26)
 
@@ -62,47 +108,6 @@ release's `tso-arm_0.4.8_arm64.deb`; the FEX patch changed, so this release brin
   `tools/deb.sh` builds it from a release package with `dpkg-deb`; a workflow builds it from the newest release,
   has lintian report on it, and installs, runs, removes and purges it on Ubuntu 22.04 and 24.04 and in a Debian 12
   container.
-- **An RPM package.** Each release brings `tso-arm-VERSION-1.aarch64.rpm` as well (in `SHA256SUMS` too), for Fedora
-  and openSUSE: `sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm`, on openSUSE `sudo zypper install
-  --allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm`. The same files in the same places as the Debian package, and
-  its scriptlets run the Debian package's maintainer scripts, so it registers and unregisters x86 programs with
-  binfmt_misc alike, goes on in a container, and is not installed over an installation by `tools/get.sh`; removed, it
-  takes the root file system for every user along (RPM has no purge). It requires glibc 2.35 or newer, the C++
-  libraries of the prebuilt FEX and awk (openSUSE's image comes without), recommends curl and unsquashfs, and
-  suggests what `learn` needs. `tools/rpm.sh` builds it from a release package with `rpmbuild` (Ubuntu's `rpm`
-  package has it); a workflow builds it with Ubuntu 22.04's and 24.04's, installs, runs and removes it in Fedora's and
-  openSUSE Tumbleweed's images, and on the Arm runner itself checks the binfmt_misc registration, an upgrade to a
-  newer package and the removal. `tso-arm update`, `uninstall` and `tools/get.sh` name dnf and zypper for it. The
-  Debian package's workflow now builds from this commit's files as well where a FEX patch changed since the newest
-  release (it took the release's package as it was then, and skipped what needs this commit's `tso-arm`).
-- **Steam, up to its login window.** `tso-arm steam` fetches Valve's launcher package (`steam-launcher` from
-  repo.steampowered.com, checked against Valve's package index) into `~/.local/share/tso-arm/steam`, without
-  installing it into the system, and starts it; Steam puts its client into `~/.local/share/Steam` and updates it from
-  Valve's servers as on an x86 computer. On GitHub's Arm runner (Xvfb, no GPU) the bootstrap is unpacked after 30 s,
-  the client downloaded and unpacked after 60 s, Steam's runtime container and steamwebhelper (its Chromium) run after
-  2.5 minutes, and the "Sign in to Steam" window appears after about 4; `.github/workflows/steam.yml` requires it, with
-  screenshots, windows, processes and Steam's logs as an artifact (`tests/steam_check.sh`). Signing in and games are
-  not tested. Four things stood in the way under FEX, which `tso-arm steam` steps around for now (docs/GUIDE.md,
-  "Steam"): FEX's disk cache writer is a thread of its own in every process, and Chromium's zygote
-  forks only when it is alone in `/proc/self/task` (`Check failed: IsSingleThreaded`; `tests/singlethread.c` sees two
-  tasks with the cache, one without), so the cache is off; under the page protocol the renderer, GPU and network
-  processes the zygote forks ended within seconds (Chromium's way of forking alone, `tests/forkstack.c`, keeps parent
-  and child apart under both orderings), so Steam runs with FEX's full ordering; with Chromium's sandbox no window
-  came either, so steamwebhelper runs without it; and steamwebhelper's sandboxed zygote, in Steam's runtime container
-  and a network namespace of its own, reached neither of FEX's server sockets, so `tso-arm steam` puts the server's
-  socket into the home directory (`FEX_SERVERSOCKETPATH`), as Valve's own build of FEX for Steam does.
-- `tso-arm userns [allow | remove]`: Steam requires user namespaces (its requirements check runs bubblewrap), which
-  AppArmor restricts on Ubuntu 23.10 and newer to programs with a profile of their own, and under tso-arm the program
-  that asks is FEX: Steam stopped with "Steam now requires user namespaces to be enabled". `sudo tso-arm userns allow`
-  puts an AppArmor profile in place that allows them to tso-arm's FEX alone (as Ubuntu's own profiles do for Chrome and
-  others), `remove` takes it away, `tso-arm check` shows the state, and `tso-arm uninstall` removes the profile of its
-  installation.
-- `tso-arm run` takes scripts (`#!`): FEX runs their interpreter from the root file system (Steam's launcher and
-  `steam.sh`, the start scripts of games); it said "not an x86 Linux program" before.
-- `tso-arm run` unsets an `XDG_RUNTIME_DIR` that names no writable directory (a session without a login manager,
-  another user's after `su`): FEX's server makes a socket there and did not start where it could not, and FEX with it
-  ("FEXServerClient: Failure to setup client").
-
 ## 0.4.7 (2026-11-26)
 
 Vulkan programs under `--gpu` work on Wayland desktops, Raspberry Pi OS's own among them, in the default ordering
