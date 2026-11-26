@@ -1,5 +1,10 @@
 # Changes
 
+## Unreleased
+
+- `tso-arm steam` runs steamwebhelper with Chromium's sandbox, as on an x86 computer (it turned it off, as no window
+  came with it before 0.4.10); `TSO_ARM_STEAM_SANDBOX=0` turns it off.
+
 ## 0.4.10 (2026-11-26)
 
 A fix that matters for every installation of 0.4.6 to 0.4.9: a program that closes all of its descriptors no longer

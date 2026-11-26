@@ -95,7 +95,9 @@ if [ -z "${FEX_SERVERSOCKETPATH:-}" ]; then
         export FEX_SERVERSOCKETPATH="$s"
     fi
 fi
-# steamwebhelper without Chromium's sandbox: up to 0.4.9 it showed no window with it; since 0.4.10 the login window
-# comes with it as well (TSO_ARM_STEAM_SANDBOX=1 keeps it)
-[ "${TSO_ARM_STEAM_SANDBOX:-0}" = 1 ] || set -- -cef-disable-sandbox "$@"
+# steamwebhelper with Chromium's sandbox, as on an x86 computer (up to 0.4.9 it showed no window with it, and
+# tso-arm steam turned it off); TSO_ARM_STEAM_SANDBOX=0 turns it off
+if [ "${TSO_ARM_STEAM_SANDBOX:-1}" = 0 ]; then
+    set -- -cef-disable-sandbox "$@"
+fi
 exec "$R/bin/tso-arm" run "$D/current/usr/lib/steam/bin_steam.sh" "$@"

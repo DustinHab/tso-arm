@@ -192,20 +192,19 @@ that asks is FEX: `sudo tso-arm userns allow` puts a profile in place that allow
 program (`sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`) works as well.
 
 **What `tso-arm steam` sets, and why.** Steam's windows come from steamwebhelper, which forks its renderer, GPU and
-network processes from a "zygote"; under FEX that went wrong in three places, and `tso-arm steam` runs Steam so
-that it gets past them:
+network processes from a "zygote". `tso-arm steam` sets:
 
 - FEX's full ordering (`TSO_ARM_MODE=full`): up to 0.4.9 the processes the zygote forks ended within seconds under
   the page protocol (Chromium reserves more address space than the protocol's window held). Since 0.4.10 Steam comes
   up to its login window under the page protocol as well, in its first start some two minutes later than under full
   ordering (on GitHub's runner 7.5 instead of 5 minutes); full ordering stays the default for now. Games started from
   Steam inherit it: they run correctly, but with every access ordered (as `--mode full`).
-- steamwebhelper without Chromium's sandbox (`-cef-disable-sandbox`): up to 0.4.9 no window came with it. Since
-  0.4.10 the login window comes with the sandbox as well (`TSO_ARM_STEAM_SANDBOX=1`), as fast as without.
+- Chromium's sandbox for steamwebhelper is on, as on an x86 computer (up to 0.4.10 `tso-arm steam` turned it off,
+  as no window came with it before 0.4.10); `TSO_ARM_STEAM_SANDBOX=0` turns it off (`-cef-disable-sandbox`).
 - FEX's server socket in the home directory: steamwebhelper runs in Steam's runtime container, which has a runtime
   directory of its own, and FEX did not reach its server there ("Couldn't connect to FEXServer socket").
 
-Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`): zenity's progress windows
+Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_STEAM_SANDBOX=0`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`): zenity's progress windows
 crashed, the 32-bit client stopped at `surface_linux.cpp (2002): Fatal assert`, steamwebhelper's GPU process with a
 segmentation fault, and Steam ended after 5.5 minutes. Steam started with `tso-arm steam` waits for other x86
 programs that run through tso-arm to end (one FEX server per user).
