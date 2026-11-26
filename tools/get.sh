@@ -7,7 +7,8 @@
 # For the user who runs it: into ~/.local/share/tso-arm, the command into ~/.local/bin. As root, for every user: into
 # /opt/tso-arm, the command into /usr/local/bin, and x86 programs started directly run through it (binfmt_misc).
 # The release package brings FEX prebuilt; nothing is compiled. 'tso-arm update' runs this again. On Debian, Ubuntu
-# and Raspberry Pi OS the release's tso-arm_VERSION_arm64.deb installs the same for every user through apt instead.
+# and Raspberry Pi OS the release's tso-arm_VERSION_arm64.deb installs the same for every user through apt instead,
+# on Fedora and openSUSE its tso-arm-VERSION-1.aarch64.rpm through dnf or zypper.
 #   TSO_ARM_VERSION   a version other than the newest (0.4.4)
 #   TSO_ARM_TARBALL   a release package downloaded beforehand (tso-arm-VERSION-linux-arm64.tar.gz)
 #   TSO_ARM_DEST      another directory than the default for the installation
@@ -146,9 +147,13 @@ else
     dest=${TSO_ARM_DEST:-${XDG_DATA_HOME:-$HOME/.local/share}/tso-arm}
     bindir=$HOME/.local/bin
 fi
-# an installation from the Debian package (tools/deb.sh) is dpkg's to update and remove
+# an installation from the Debian or the RPM package (tools/deb.sh, tools/rpm.sh) is the package manager's to update
+# and remove
 if [ -f "$dest/current/PACKAGE" ]; then
-    die "$dest holds tso-arm $(readlink "$dest/current") from its Debian package; a newer release's tso-arm_VERSION_arm64.deb updates it: sudo apt install ./tso-arm_VERSION_arm64.deb"
+    case $(cat "$dest/current/PACKAGE") in
+    rpm) die "$dest holds tso-arm $(readlink "$dest/current") from its RPM package; a newer release's tso-arm-VERSION-1.aarch64.rpm updates it: sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm (openSUSE: sudo zypper install --allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm)" ;;
+    *) die "$dest holds tso-arm $(readlink "$dest/current") from its Debian package; a newer release's tso-arm_VERSION_arm64.deb updates it: sudo apt install ./tso-arm_VERSION_arm64.deb" ;;
+    esac
 fi
 
 # what this script and tso-arm itself use (tso-arm reads a program's ELF header with od and awk)

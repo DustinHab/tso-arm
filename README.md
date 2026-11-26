@@ -53,7 +53,10 @@ On Debian, Ubuntu and Raspberry Pi OS the same comes as a Debian package, from 0
 ./tso-arm_VERSION_arm64.deb` with the file from the [releases](https://github.com/DustinHab/tso-arm/releases)
 installs for every user as `| sudo sh` does (into `/opt/tso-arm`, the command as `/usr/bin/tso-arm`, x86 programs
 started directly and in containers through binfmt_misc), a newer release's package updates it, `sudo apt remove
-tso-arm` removes it and `sudo apt purge tso-arm` the root file system for all users as well.
+tso-arm` removes it and `sudo apt purge tso-arm` the root file system for all users as well. On Fedora and openSUSE
+the same as an RPM package: `sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm` (openSUSE: `sudo zypper install
+--allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm`), and `sudo dnf remove tso-arm` removes it with the root file
+system for all users.
 
 From a git checkout instead: `git clone https://github.com/DustinHab/tso-arm && tso-arm/bin/tso-arm install`
 (FEX prebuilt where the release has one for exactly these patches, otherwise built from source), and `sudo

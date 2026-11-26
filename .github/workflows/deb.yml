@@ -1,9 +1,9 @@
 name: Debian package
 
-# The .deb that tools/deb.sh makes, from the newest release's package: with this commit's files where that release's
-# FEX was built from this commit's patches (the next release's package then), as it is otherwise. lintian reports on
-# it; on both Arm runners it is not installed over an installation by tools/get.sh, then installed, run, removed and
-# purged; in a Debian 12 container, where binfmt_misc is missing, it is installed and run.
+# The .deb that tools/deb.sh makes, from a release package of this commit with the newest release's prebuilt FEX (as
+# the distributions workflow puts it together). lintian reports on it; on both Arm runners it is not installed over an
+# installation by tools/get.sh, then installed, run, removed and purged; in a Debian 12 container, where binfmt_misc
+# is missing, it is installed and run.
 
 on:
   push:
@@ -29,25 +29,22 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q gcc-x86-64-linux-gnu libc6-dev-amd64-cross
 
-      - name: The newest release's package
+      - name: Release package of this commit, with the newest release's prebuilt FEX
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir rel dist
-          gh release download --repo DustinHab/tso-arm -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D rel
-          pkg=$(ls rel/tso-arm-[0-9]*-linux-arm64.tar.gz)
-          tar -xzf "$pkg" -C rel
-          p=$(ls -d rel/tso-arm-[0-9]*/)fex/prebuilt
-          if grep -qx "patches $(cat fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)" "$p/BUILD"; then
-            # its FEX with this commit's files, put together as the release workflow does
-            mkdir rel/fex-src && cp "$p/licenses/FEX" rel/fex-src/LICENSE
-            sh tools/package.sh "$p" dist rel/fex-src
-            echo "OWN=1" >>"$GITHUB_ENV"
-            echo "this commit's files with the FEX of $(basename "$pkg")"
-          else
-            cp "$pkg" dist/
-            echo "$(basename "$pkg") as it is: its FEX was built from other patches than this commit has"
+          gh release download --repo DustinHab/tso-arm -p 'tso-arm-fex-*-linux-arm64.tar.gz' -D rel
+          mkdir rel/x && tar -xzf rel/tso-arm-fex-*-linux-arm64.tar.gz -C rel/x
+          P=$(echo rel/x/tso-arm-fex-*)
+          want=$(cat fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
+          if ! grep -qx "patches $want" $P/BUILD; then
+            # a FEX patch changed since the release: what is checked here, the package and its installation, does
+            # not depend on the patches (CI's correctness tests do)
+            echo "::notice::the newest release's FEX was built with other patches; the package takes it for these ($want)"
+            sed -i "s/^patches .*/patches $want/" $P/BUILD
           fi
+          mkdir rel/src && cp $P/licenses/FEX rel/src/LICENSE
+          sh tools/package.sh $P dist rel/src
           echo "TARBALL=$(ls "$PWD"/dist/tso-arm-[0-9]*-linux-arm64.tar.gz)" >>"$GITHUB_ENV"
 
       - name: Debian package
@@ -114,7 +111,6 @@ jobs:
           sudo dpkg --verify tso-arm
 
       - name: tso-arm update and uninstall leave it to apt
-        if: env.OWN == '1'
         run: |
           if sudo tso-arm update; then
             echo "tso-arm update went on"

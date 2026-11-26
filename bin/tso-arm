@@ -85,13 +85,22 @@ installed_dir() {
     [ -L "$d/current" ] && [ "$(readlink -f "$d/current")" = "$REPO" ] && echo "$d"
 }
 
-# An installation from the Debian package (tools/deb.sh), which dpkg updates and removes
+# An installation from the Debian or the RPM package (tools/deb.sh, tools/rpm.sh), which the package manager updates
+# and removes; its PACKAGE file says which (deb, rpm). package_says update | remove: with what.
 packaged() {
     [ -f "$REPO/PACKAGE" ]
 }
+package_says() {
+    case $(cat "$REPO/PACKAGE")-$1 in
+    rpm-update) echo "installed from its RPM package: a newer release's tso-arm-VERSION-1.aarch64.rpm updates it (sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm, on openSUSE sudo zypper install --allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm; https://github.com/DustinHab/tso-arm/releases)" ;;
+    rpm-remove) echo "installed from its RPM package: 'sudo dnf remove tso-arm' (openSUSE: 'sudo zypper remove tso-arm') removes it, the root file system for every user as well" ;;
+    *-update) echo "installed from its Debian package: a newer release's tso-arm_VERSION_arm64.deb updates it (sudo apt install ./tso-arm_VERSION_arm64.deb; https://github.com/DustinHab/tso-arm/releases)" ;;
+    *) echo "installed from its Debian package: 'sudo apt remove tso-arm' removes it ('sudo apt purge tso-arm' the root file system for every user as well)" ;;
+    esac
+}
 
 cmd_update() {
-    packaged && die "this tso-arm is installed from its Debian package: a newer release's tso-arm_VERSION_arm64.deb updates it (sudo apt install ./tso-arm_VERSION_arm64.deb; https://github.com/DustinHab/tso-arm/releases)"
+    packaged && die "this tso-arm is $(package_says update)"
     d=$(installed_dir) || {
         if [ -e "$REPO/.git" ]; then
             die "this is a git checkout ($REPO): 'git -C $REPO pull' and then 'tso-arm install' bring it up to date"
@@ -104,7 +113,7 @@ cmd_update() {
 
 cmd_uninstall() {
     if inst=$(installed_dir) && [ -n "$inst" ] && packaged; then
-        echo "tso-arm: $inst is installed from the Debian package: 'sudo apt remove tso-arm' removes it ('sudo apt purge tso-arm' the root file system for every user as well)" >&2
+        echo "tso-arm: $inst is $(package_says remove)" >&2
     elif [ -n "$inst" ]; then
         # installed by tools/get.sh: the whole directory, the command's link, and binfmt_misc where it points here
         [ -w "$inst" ] || die "$inst belongs to another user: 'sudo tso-arm uninstall'"

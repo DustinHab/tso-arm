@@ -1,6 +1,7 @@
 #!/bin/sh
-# tso-arm's Debian package (tools/deb.sh), before it is unpacked: not over an installation for every user that
-# tools/get.sh made in the same directory. That one stays as it is, and the package is not installed.
+# tso-arm's Debian package (tools/deb.sh; the RPM package's %pre runs it as well, tools/rpm.sh), before it is
+# unpacked: not over an installation for every user that tools/get.sh made in the same directory. That one stays as it
+# is, and the package is not installed.
 set -e
 D=/opt/tso-arm
 case $1 in

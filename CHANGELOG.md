@@ -40,6 +40,19 @@
   `tools/deb.sh` builds it from a release package with `dpkg-deb`; a workflow builds it from the newest release,
   has lintian report on it, and installs, runs, removes and purges it on Ubuntu 22.04 and 24.04 and in a Debian 12
   container.
+- **An RPM package.** Each release brings `tso-arm-VERSION-1.aarch64.rpm` as well (in `SHA256SUMS` too), for Fedora
+  and openSUSE: `sudo dnf install ./tso-arm-VERSION-1.aarch64.rpm`, on openSUSE `sudo zypper install
+  --allow-unsigned-rpm ./tso-arm-VERSION-1.aarch64.rpm`. The same files in the same places as the Debian package, and
+  its scriptlets run the Debian package's maintainer scripts, so it registers and unregisters x86 programs with
+  binfmt_misc alike, goes on in a container, and is not installed over an installation by `tools/get.sh`; removed, it
+  takes the root file system for every user along (RPM has no purge). It requires glibc 2.35 or newer, the C++
+  libraries of the prebuilt FEX and awk (openSUSE's image comes without), recommends curl and unsquashfs, and
+  suggests what `learn` needs. `tools/rpm.sh` builds it from a release package with `rpmbuild` (Ubuntu's `rpm`
+  package has it); a workflow builds it with Ubuntu 22.04's and 24.04's, installs, runs and removes it in Fedora's and
+  openSUSE Tumbleweed's images, and on the Arm runner itself checks the binfmt_misc registration, an upgrade to a
+  newer package and the removal. `tso-arm update`, `uninstall` and `tools/get.sh` name dnf and zypper for it. The
+  Debian package's workflow now builds from this commit's files as well where a FEX patch changed since the newest
+  release (it took the release's package as it was then, and skipped what needs this commit's `tso-arm`).
 
 ## 0.4.7 (2026-11-26)
 

@@ -1,0 +1,178 @@
+name: RPM package
+
+# The .rpm that tools/rpm.sh makes, from a release package of this commit with the newest release's prebuilt FEX (as
+# the distributions workflow puts it together), built with the rpmbuild of Ubuntu 22.04 (the release's) and of 24.04.
+# Installed, run and removed in Fedora's and openSUSE Tumbleweed's images, where binfmt_misc is missing; and on the Arm
+# runner itself with rpm alone (Ubuntu's rpm knows none of the system's packages: --nodeps), where its scriptlets
+# register x86 programs with binfmt_misc, keep them over an upgrade and unregister them, and where it is not installed
+# over an installation by tools/get.sh.
+
+on:
+  push:
+    # not for what changes only words or the diagnosis workflows run by hand
+    paths-ignore: ['docs/**', '**.md', '.github/workflows/*-diag.yml', '.github/workflows/profile.yml', '.github/ISSUE_TEMPLATE/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rpm:
+    name: RPM package on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04-arm, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q rpm gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          rpmbuild --version
+
+      - name: Release package of this commit, with the newest release's prebuilt FEX
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo DustinHab/tso-arm -p 'tso-arm-fex-*-linux-arm64.tar.gz' -D rel
+          mkdir rel/x && tar -xzf rel/tso-arm-fex-*-linux-arm64.tar.gz -C rel/x
+          P=$(echo rel/x/tso-arm-fex-*)
+          want=$(cat fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
+          if ! grep -qx "patches $want" $P/BUILD; then
+            # a FEX patch changed since the release: what is checked here, the package and its installation, does
+            # not depend on the patches (CI's correctness tests do)
+            echo "::notice::the newest release's FEX was built with other patches; the package takes it for these ($want)"
+            sed -i "s/^patches .*/patches $want/" $P/BUILD
+          fi
+          mkdir rel/src && cp $P/licenses/FEX rel/src/LICENSE
+          sh tools/package.sh $P dist rel/src
+          echo "TARBALL=$(ls "$PWD"/dist/tso-arm-[0-9]*-linux-arm64.tar.gz)" >>"$GITHUB_ENV"
+
+      - name: RPM package
+        run: |
+          sh tools/rpm.sh "$TARBALL" rpm
+          echo "RPM=$(ls "$PWD"/rpm/tso-arm-*-1.aarch64.rpm)" >>"$GITHUB_ENV"
+          rpm -qp --recommends --suggests rpm/tso-arm-*-1.aarch64.rpm
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o threads tests/threads.c
+
+      - name: In Fedora's image (dnf)
+        run: |
+          docker run --rm -v "$PWD:/w:ro" -w /w fedora:latest sh -c '
+            set -e
+            dnf install -y /w/rpm/tso-arm-*-1.aarch64.rpm
+            v=$(rpm -q --qf "%{VERSION}" tso-arm)
+            test "$(readlink -f /usr/bin/tso-arm)" = "/opt/tso-arm/$v/bin/tso-arm"
+            test "$(cat /opt/tso-arm/current/PACKAGE)" = rpm
+            test ! -e /etc/binfmt.d/tso-arm.conf
+            tso-arm version
+            tso-arm version | grep -q "^FEX: .*, patches "
+            tso-arm check
+            tso-arm check | grep -qx "=> tso-arm can run here"
+            tso-arm run ./threads 4 | tail -n 1 | grep "wrong 0"
+            # what sudo tso-arm rootfs leaves beside the package files (not fetched here: 2 GB)
+            mkdir -p /opt/tso-arm/rootfs/RootFS/Ubuntu_24_04/usr
+            dnf remove -y tso-arm
+            if rpm -q tso-arm; then exit 1; fi
+            test ! -e /opt/tso-arm && test ! -e /usr/bin/tso-arm'
+
+      - name: In openSUSE Tumbleweed's image (zypper)
+        run: |
+          docker run --rm -v "$PWD:/w:ro" -w /w opensuse/tumbleweed sh -c '
+            set -e
+            # once more with the repositories refreshed: the mirrors of Tumbleweed change several times a day
+            z() { zypper --non-interactive "$@" || { zypper --non-interactive refresh && zypper --non-interactive "$@"; }; }
+            z install --allow-unsigned-rpm /w/rpm/tso-arm-*-1.aarch64.rpm
+            v=$(rpm -q --qf "%{VERSION}" tso-arm)
+            test "$(readlink -f /usr/bin/tso-arm)" = "/opt/tso-arm/$v/bin/tso-arm"
+            test ! -e /etc/binfmt.d/tso-arm.conf
+            tso-arm version
+            tso-arm version | grep -q "^FEX: .*, patches "
+            tso-arm check
+            tso-arm check | grep -qx "=> tso-arm can run here"
+            tso-arm run ./threads 4 | tail -n 1 | grep "wrong 0"
+            mkdir -p /opt/tso-arm/rootfs/RootFS/Ubuntu_24_04/usr
+            z remove tso-arm
+            if rpm -q tso-arm; then exit 1; fi
+            test ! -e /opt/tso-arm && test ! -e /usr/bin/tso-arm'
+
+      - name: On the runner, not over an installation by tools/get.sh
+        run: |
+          # (Debian's rpm once wanted --force-debian to install anything)
+          o=$(rpm --force-debian -q rpm 2>&1 || true)
+          case $o in *"unknown option"*) f="" ;; *) f=--force-debian ;; esac
+          echo "RPMI=rpm --nodeps $f" >>"$GITHUB_ENV"
+          v=$(rpm -qp --qf '%{VERSION}' "$RPM")
+          sudo TSO_ARM_TARBALL="$TARBALL" sh tools/get.sh
+          if sudo rpm -i --nodeps $f "$RPM"; then
+            echo "the package was installed over the installation by tools/get.sh"
+            exit 1
+          fi
+          if sudo rpm -q tso-arm; then exit 1; fi
+          test "$(readlink /opt/tso-arm/current)" = "$v"
+          grep -qx 'interpreter /opt/tso-arm/current/fex/prebuilt/bin/FEX-static' /proc/sys/fs/binfmt_misc/tso-arm
+          sudo /usr/local/bin/tso-arm uninstall
+          test ! -e /opt/tso-arm && test ! -e /usr/local/bin/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm
+
+      - name: On the runner, installed
+        run: |
+          v=$(rpm -qp --qf '%{VERSION}' "$RPM")
+          sudo $RPMI -i "$RPM"
+          sudo rpm -q tso-arm
+          test "$(command -v tso-arm)" = /usr/bin/tso-arm
+          test "$(readlink -f /usr/bin/tso-arm)" = "/opt/tso-arm/$v/bin/tso-arm"
+          tso-arm version
+          tso-arm binfmt
+          for e in tso-arm tso-arm-i386; do
+            grep -qx 'interpreter /opt/tso-arm/current/fex/prebuilt/bin/FEX-static' /proc/sys/fs/binfmt_misc/$e
+          done
+          grep -q '^flags: PF' /proc/sys/fs/binfmt_misc/tso-arm
+          grep -q ':/opt/tso-arm/current/fex/prebuilt/bin/FEX-static:PF$' /etc/binfmt.d/tso-arm.conf
+          ./threads 4 | tee direct.txt
+          grep -q 'wrong 0' direct.txt
+          tso-arm run ./threads 4 | tee run.txt
+          grep -q 'wrong 0' run.txt
+
+      - name: On the runner, tools/get.sh, tso-arm update and uninstall leave it to rpm
+        run: |
+          if sudo TSO_ARM_TARBALL="$TARBALL" sh tools/get.sh; then
+            echo "tools/get.sh installed over the package"
+            exit 1
+          fi
+          if sudo tso-arm update; then
+            echo "tso-arm update went on"
+            exit 1
+          fi
+          sudo tso-arm uninstall
+          test -L /opt/tso-arm/current && test -e /usr/bin/tso-arm
+          sudo rpm -V tso-arm
+
+      - name: On the runner, upgraded to a newer package
+        run: |
+          v=$(rpm -qp --qf '%{VERSION}' "$RPM")
+          t=$(mktemp -d) && tar -xzf "$TARBALL" -C $t
+          mv $t/tso-arm-$v $t/tso-arm-99.0.0 && echo 99.0.0 >$t/tso-arm-99.0.0/VERSION
+          tar -czf $t/tso-arm-99.0.0-linux-arm64.tar.gz -C $t tso-arm-99.0.0
+          sh tools/rpm.sh $t/tso-arm-99.0.0-linux-arm64.tar.gz rpm99
+          sudo $RPMI -U rpm99/tso-arm-99.0.0-1.aarch64.rpm
+          test "$(sudo rpm -q tso-arm)" = tso-arm-99.0.0-1.aarch64
+          test "$(readlink /opt/tso-arm/current)" = 99.0.0 && test ! -e /opt/tso-arm/$v
+          test "$(tso-arm version | sed -n 1p)" = 'tso-arm 99.0.0'
+          # the old version's scriptlets left the new one's registration as it was
+          grep -qx 'interpreter /opt/tso-arm/current/fex/prebuilt/bin/FEX-static' /proc/sys/fs/binfmt_misc/tso-arm
+          ./threads 4 | tail -n 1 | grep 'wrong 0'
+
+      - name: On the runner, removed
+        run: |
+          other=$(tso-arm binfmt | grep -c 'another handler' || true)
+          sudo mkdir -p /opt/tso-arm/rootfs/RootFS/Ubuntu_24_04/usr
+          sudo rpm -e tso-arm
+          if sudo rpm -q tso-arm; then exit 1; fi
+          test ! -e /proc/sys/fs/binfmt_misc/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm-i386
+          test ! -e /etc/binfmt.d/tso-arm.conf
+          test ! -e /usr/bin/tso-arm && test ! -e /opt/tso-arm
+          if [ "$other" = 0 ] && ./threads 4 2>/dev/null; then
+            echo "an x86-64 program still started directly after the removal"
+            exit 1
+          fi

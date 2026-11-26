@@ -1,9 +1,9 @@
 name: Release
 
 # A tag v* builds FEX with the tso-arm patches for any Armv8.0 core on Ubuntu 22.04 (glibc 2.35, so the build runs
-# on Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS), checks the packages (the tarballs and the Debian
-# package made from them) on both Arm runners and makes a draft release of them. Run by hand, it builds and checks the
-# packages only.
+# on Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS), checks the packages (the tarballs, and the Debian
+# and the RPM package made from them) on both Arm runners and makes a draft release of them. Run by hand, it builds and
+# checks the packages only.
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 git
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 git rpm
           # FEX's thunks: libclang for their generator, the x86 C++ libraries for their guest side, the host's headers
           g=$(gcc -dumpversion | cut -d. -f1)
           sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
@@ -45,9 +45,10 @@ jobs:
       - name: Packages for the release
         run: |
           sh tools/package.sh /opt/tso-arm dist
-          # the same release as a Debian package, beside the tarballs and in SHA256SUMS
+          # the same release as a Debian and an RPM package, beside the tarballs and in SHA256SUMS
           sh tools/deb.sh dist/tso-arm-$(cat VERSION)-linux-arm64.tar.gz dist
-          cd dist && sha256sum tso-arm_*_arm64.deb >>SHA256SUMS && cat SHA256SUMS
+          sh tools/rpm.sh dist/tso-arm-$(cat VERSION)-linux-arm64.tar.gz dist
+          cd dist && sha256sum tso-arm_*_arm64.deb tso-arm-*-1.aarch64.rpm >>SHA256SUMS && cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -119,6 +120,23 @@ jobs:
           /usr/bin/tso-arm run ./tso-arm-[0-9]*/build/ci/threads 8 | grep 'wrong 0'
           sudo apt-get purge -y -q tso-arm
           test ! -e /opt/tso-arm && test ! -e /usr/bin/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm
+
+      - name: The RPM package in Fedora's and openSUSE Tumbleweed's images, installed, run, removed
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          p=$(ls -d tso-arm-[0-9]*/)build/ci/threads
+          docker run --rm -v "$PWD:/w:ro" fedora:latest sh -c "set -e
+            dnf install -y /w/dist/tso-arm-*-1.aarch64.rpm
+            tso-arm version
+            tso-arm run /w/$p 8 | tail -n 1 | grep 'wrong 0'
+            dnf remove -y tso-arm
+            test ! -e /opt/tso-arm"
+          docker run --rm -v "$PWD:/w:ro" opensuse/tumbleweed sh -c "set -e
+            zypper --non-interactive install --allow-unsigned-rpm /w/dist/tso-arm-*-1.aarch64.rpm
+            tso-arm version
+            tso-arm run /w/$p 8 | tail -n 1 | grep 'wrong 0'
+            zypper --non-interactive remove tso-arm
+            test ! -e /opt/tso-arm"
 
   release:
     name: Draft release

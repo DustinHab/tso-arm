@@ -36,6 +36,18 @@ available, it says so and installs all the same; `tso-arm run` works there. `sud
 leaves programs started directly as they are. The package is not installed over an installation by the line with
 `sudo`: `sudo tso-arm uninstall` removes that one first.
 
+**As an RPM package** (Fedora, openSUSE; releases from 0.4.8 on): download `tso-arm-VERSION-1.aarch64.rpm` from the
+[releases](https://github.com/DustinHab/tso-arm/releases) and install it with dnf or zypper (the package is not
+signed, hence zypper's option):
+
+```sh
+sudo dnf install ./tso-arm-0.4.8-1.aarch64.rpm                               # Fedora
+sudo zypper install --allow-unsigned-rpm ./tso-arm-0.4.8-1.aarch64.rpm       # openSUSE
+```
+
+It installs the same files in the same places as the Debian package and does the same at installation, in a
+container as well, and with an installation by the line with `sudo`.
+
 **Raspberry Pi 5 with Raspberry Pi OS:** the Pi 5 starts a kernel with 16 KB pages, which FEX cannot use. The 4 KB
 kernel is on the card already; one line selects it:
 
@@ -178,7 +190,10 @@ tso-arm uninstall       # removes it again (--all: what learn translated as well
 
 The Debian package is updated by a newer release's package (`sudo apt install ./tso-arm_VERSION_arm64.deb`) and
 removed with `sudo apt remove tso-arm`; `sudo apt purge tso-arm` removes the root file system `sudo tso-arm rootfs`
-fetched for every user as well. What `learn` translated stays in each user's `~/.cache/tso-arm`.
+fetched for every user as well. The RPM package is updated the same way (`sudo dnf install
+./tso-arm-VERSION-1.aarch64.rpm`, on openSUSE `sudo zypper install --allow-unsigned-rpm ...`), and `sudo dnf remove
+tso-arm` (`sudo zypper remove tso-arm`) removes it together with that root file system: RPM has no purge of its own.
+What `learn` translated stays in each user's `~/.cache/tso-arm`.
 
 ## Ordering modes
 

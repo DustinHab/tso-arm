@@ -1,8 +1,9 @@
 #!/bin/sh
-# tso-arm's Debian package (tools/deb.sh), configured: x86 programs started directly, and x86-64 programs in
-# containers, run through it (binfmt_misc, and /etc/binfmt.d for after a reboot), as with the installation for every
-# user by tools/get.sh. Left as it is with TSO_ARM_BINFMT=0, where binfmt_misc is missing (in a container), and where
-# another tso-arm installation registered itself; the package is installed in each case.
+# tso-arm's Debian package (tools/deb.sh; the RPM package's %post runs it as well, tools/rpm.sh), configured: x86
+# programs started directly, and x86-64 programs in containers, run through it (binfmt_misc, and /etc/binfmt.d for
+# after a reboot), as with the installation for every user by tools/get.sh. Left as it is with TSO_ARM_BINFMT=0, where
+# binfmt_misc is missing (in a container), and where another tso-arm installation registered itself; the package is
+# installed in each case.
 set -e
 D=/opt/tso-arm
 B=/proc/sys/fs/binfmt_misc

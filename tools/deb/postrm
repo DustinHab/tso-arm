@@ -1,8 +1,9 @@
 #!/bin/sh
-# tso-arm's Debian package (tools/deb.sh), purged: what its command made beside the package's own files goes as well,
-# the root file system 'sudo tso-arm rootfs' fetched for every user (/opt/tso-arm/rootfs), files left in a version's
-# directory (Python's caches of a 'learn' run as root), and the binfmt_misc configuration if prerm could not remove
-# it. What 'learn' translated and FEX's disk cache are each user's own, in ~/.cache/tso-arm, and stay.
+# tso-arm's Debian package (tools/deb.sh; the RPM package's %postun runs it as well, as a purge, tools/rpm.sh),
+# purged: what its command made beside the package's own files goes as well, the root file system 'sudo tso-arm rootfs'
+# fetched for every user (/opt/tso-arm/rootfs), files left in a version's directory (Python's caches of a 'learn' run
+# as root), and the binfmt_misc configuration if prerm could not remove it. What 'learn' translated and FEX's disk
+# cache are each user's own, in ~/.cache/tso-arm, and stay.
 set -e
 D=/opt/tso-arm
 C=/etc/binfmt.d/tso-arm.conf
