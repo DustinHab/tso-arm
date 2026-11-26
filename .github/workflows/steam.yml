@@ -26,15 +26,13 @@ jobs:
           - name: userns-strace
             userns: 1
             strace: 1
-          - name: userns-fex-binfmt
+          - name: userns-socket-in-home
             userns: 1
-            fexbinfmt: 1
-          - name: userns-socket-in-tmp
+            steam_env: FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+          - name: userns-socket-in-home-strace
             userns: 1
-            steam_env: -u XDG_RUNTIME_DIR
-          - name: apparmor-profile-fex-binfmt
-            apparmor: 1
-            fexbinfmt: 1
+            strace: 1
+            steam_env: FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
     steps:
       - uses: actions/checkout@v4
 

@@ -123,7 +123,7 @@ fi
 start=$(date +%s)
 wrap=""
 if [ "${STEAM_STRACE:-0}" = 1 ]; then
-    wrap="strace -f -Z -q --seccomp-bpf -e signal=none -e trace=%process,%memory,%ipc,%network -o $O/strace.txt"
+    wrap="strace -f -q --seccomp-bpf -e status=!successful -e signal=none -e trace=%process,%memory,%ipc,%network,%signal -o $O/strace.txt"
 fi
 setsid $wrap env ${STEAM_ENV:-} "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
 pid=$!
@@ -224,7 +224,13 @@ done
         echo "How processes ended other than with exit status 0 (how often):"
         echo
         echo '```'
-        grep -E '\+\+\+ (killed by|exited with [1-9])' "$O/strace.txt" | sed 's/^[0-9]* *//' | sort | uniq -c | sort -rn | head -n 20
+        grep -E '\+\+\+ (killed by|exited with [1-9])|exit_group\([1-9]' "$O/strace.txt" | sed 's/^[0-9]* *//' | sort | uniq -c | sort -rn | head -n 20
+        echo '```'
+        echo
+        echo "Signals sent (kill, tgkill; the first 20):"
+        echo
+        echo '```'
+        grep -E '^[0-9]+ +(kill|tgkill|tkill)\(' "$O/strace.txt" | grep -v ', 0)' | head -n 20 | cut -c1-200
         echo '```'
         echo
         echo "Of them clone, clone3, fork, vfork (the first 20):"
