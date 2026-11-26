@@ -4,9 +4,10 @@ name: Steam
 # (tests/steam_check.sh): Valve's launcher package unpacked, started with 'tso-arm run' on Xvfb, the bootstrap, the
 # client's update, steamwebhelper and its windows recorded with screenshots and Steam's logs. Steam requires user
 # namespaces (its requirements check runs bubblewrap, and steamwebhelper's sandbox makes them), which Ubuntu 24.04's
-# AppArmor restricts: variants with the restriction lifted (sysctl) or an AppArmor profile that allows them to FEX
-# alone, with the failed system calls traced, with binfmt_misc entries under FEX's own names, and with FEX's server
-# socket in /tmp instead of XDG_RUNTIME_DIR.
+# AppArmor restricts: with the restriction lifted (sysctl) or with 'tso-arm userns allow' (a profile for FEX alone).
+# Variants: without FEX's disk cache (its writer thread is a second thread in each process, and Chromium's zygote
+# forks only single-threaded), with FEX's server socket in the home directory (FEX_SERVERSOCKETPATH, which Steam's
+# runtime container shares), with --gpu.
 
 on:
   push:
@@ -23,16 +24,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: userns-strace
+          - name: diskcache-off
             userns: 1
-            strace: 1
-          - name: userns-socket-in-home
+            steam_env: TSO_ARM_DISKCACHE=0
+          - name: diskcache-off-socket-in-home
             userns: 1
-            steam_env: FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
-          - name: userns-socket-in-home-strace
+            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+          - name: diskcache-off-socket-in-home-gpu
             userns: 1
-            strace: 1
-            steam_env: FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+            args: --gpu
+            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+          - name: userns-allow-diskcache-off-socket-in-home
+            userns_allow: 1
+            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
     steps:
       - uses: actions/checkout@v4
 
@@ -69,18 +73,13 @@ jobs:
         if: matrix.userns
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: User namespaces allowed for FEX alone (AppArmor profile)
-        if: matrix.apparmor
+      - name: User namespaces allowed for FEX alone (sudo tso-arm userns allow)
+        if: matrix.userns_allow
         run: |
-          sudo tee /etc/apparmor.d/tso-arm-fex >/dev/null <<EOF
-          abi <abi/4.0>,
-          include <tunables/global>
-          profile tso-arm-fex $HOME/.local/opt/tso-arm/bin/{FEX,FEX-static} flags=(unconfined) {
-            userns,
-          }
-          EOF
-          sudo apparmor_parser -r /etc/apparmor.d/tso-arm-fex
-          sudo aa-status 2>/dev/null | grep -A1 -i 'tso-arm' || true
+          bin/tso-arm userns
+          sudo bin/tso-arm userns allow
+          bin/tso-arm userns
+          cat /etc/apparmor.d/tso-arm-fex
 
       # FEX passes an x86 program a program executes to the kernel only where binfmt_misc has entries of its own names
       # (FEX-x86_64, FEX-x86); otherwise it starts itself again through /proc/self/exe
