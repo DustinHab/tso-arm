@@ -1,0 +1,15 @@
+#!/bin/sh
+# tso-arm's Debian package (tools/deb.sh), before it is unpacked: not over an installation for every user that
+# tools/get.sh made in the same directory. That one stays as it is, and the package is not installed.
+set -e
+D=/opt/tso-arm
+case $1 in
+install | upgrade)
+    if [ -L "$D/current" ] && [ ! -f "$D/current/PACKAGE" ]; then
+        echo "tso-arm: $D holds tso-arm $(readlink "$D/current"), installed for every user by tools/get.sh; the package is not installed over it" >&2
+        echo "tso-arm: 'sudo tso-arm uninstall' removes that installation (what users learned stays in their ~/.cache/tso-arm), then the package installs" >&2
+        exit 1
+    fi
+    ;;
+esac
+exit 0

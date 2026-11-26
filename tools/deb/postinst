@@ -1,0 +1,40 @@
+#!/bin/sh
+# tso-arm's Debian package (tools/deb.sh), configured: x86 programs started directly, and x86-64 programs in
+# containers, run through it (binfmt_misc, and /etc/binfmt.d for after a reboot), as with the installation for every
+# user by tools/get.sh. Left as it is with TSO_ARM_BINFMT=0, where binfmt_misc is missing (in a container), and where
+# another tso-arm installation registered itself; the package is installed in each case.
+set -e
+D=/opt/tso-arm
+B=/proc/sys/fs/binfmt_misc
+C=/etc/binfmt.d/tso-arm.conf
+say() { echo "tso-arm: $*"; }
+
+[ "$1" = configure ] || exit 0
+
+# the interpreter another tso-arm installation registered (in a home directory, a git checkout), if it is still there
+other=""
+for e in "$B/tso-arm" "$B/tso-arm-i386"; do
+    [ -f "$e" ] || continue
+    i=$(sed -n 's/^interpreter //p' "$e")
+    case $i in
+    "" | "$D"/*) ;;
+    *) [ ! -e "$i" ] || other=$i ;;
+    esac
+done
+
+if [ "${TSO_ARM_BINFMT:-1}" = 0 ]; then
+    say "binfmt_misc left as it is (TSO_ARM_BINFMT=0): x86 programs run with 'tso-arm run PROGRAM', 'sudo tso-arm binfmt register' registers them"
+elif [ ! -f "$B/status" ]; then
+    say "binfmt_misc is not available here (in a container?): x86 programs run with 'tso-arm run PROGRAM'"
+elif [ -n "$other" ]; then
+    say "x86 programs started directly stay with the tso-arm registered before ($other); 'sudo tso-arm binfmt register' moves them to this one"
+# the package's FEX, not one that 'tso-arm install' put into the home directory of the user who called sudo
+elif ! TSO_ARM_FEX=$D/current/fex/prebuilt/bin/FEX "$D/current/bin/tso-arm" binfmt register; then
+    say "could not register x86 programs with binfmt_misc: they run with 'tso-arm run PROGRAM'"
+    # nothing of a registration that failed half-way for after a reboot
+    if ! grep -qs "^interpreter $D/" "$B/tso-arm" "$B/tso-arm-i386" && { [ ! -s "$C" ] || grep -qs ":$D/" "$C"; }; then
+        rm -f "$C"
+    fi
+fi
+sh "$D/current/tools/pages_hint.sh" | sed 's/^/tso-arm: /' || true
+exit 0

@@ -21,6 +21,20 @@ double click in a file manager):
 curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sudo sh
 ```
 
+**As a Debian package** (Debian, Ubuntu, Raspberry Pi OS; releases from 0.4.8 on): download
+`tso-arm_VERSION_arm64.deb` from the [releases](https://github.com/DustinHab/tso-arm/releases) and install it with
+apt, which fetches the libraries it needs:
+
+```sh
+sudo apt install ./tso-arm_0.4.8_arm64.deb      # the version downloaded
+```
+
+It installs for every user as the line with `sudo` does: into `/opt/tso-arm`, the command as `/usr/bin/tso-arm`, and
+x86 programs and x86-64 containers start directly. Inside a container, where the kernel's binfmt_misc is not
+available, it says so and installs all the same; `tso-arm run` works there. `sudo TSO_ARM_BINFMT=0 apt install ...`
+leaves programs started directly as they are. The package is not installed over an installation by the line with
+`sudo`: `sudo tso-arm uninstall` removes that one first.
+
 **Raspberry Pi 5 with Raspberry Pi OS:** the Pi 5 starts a kernel with 16 KB pages, which FEX cannot use. The 4 KB
 kernel is on the card already; one line selects it:
 
@@ -141,6 +155,10 @@ binfmt register` puts tso-arm last again.
 tso-arm update          # sudo tso-arm update for the installation for every user
 tso-arm uninstall       # removes it again (--all: what learn translated as well)
 ```
+
+The Debian package is updated by a newer release's package (`sudo apt install ./tso-arm_VERSION_arm64.deb`) and
+removed with `sudo apt remove tso-arm`; `sudo apt purge tso-arm` removes the root file system `sudo tso-arm rootfs`
+fetched for every user as well. What `learn` translated stays in each user's `~/.cache/tso-arm`.
 
 ## Ordering modes
 
