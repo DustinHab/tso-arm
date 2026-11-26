@@ -1,6 +1,12 @@
 # Changes
 
-## 0.4.8 (not released yet)
+## 0.4.8 (2026-11-26)
+
+A Debian package for Debian, Ubuntu and Raspberry Pi OS, the one-line installer tested on seven distributions, and the
+disk cache made to work as meant: programs start about three times as fast from their second run (a static program
+that ends at once in 6.5 instead of 16 ms, `python3 -c 0` in 0.095 s). Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update` or the
+release's `tso-arm_0.4.8_arm64.deb`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - The disk cache keeps the code of the page protocol's awake state as well: a block is taken only where the escalations
   within its range are the ones it was translated with (they go into its guest code's hash), and not while the run has
