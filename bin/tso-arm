@@ -515,7 +515,9 @@ diskcache() {
         rm -rf "$CACHE/fex"
         mkdir -p "$d" 2>/dev/null || return 0
     fi
-    export FEX_DISKCACHE=1 FEX_DISKCACHEPATH="$d/"
+    # read with pread rather than mapped: mapping each entry went through FEX's allocator for 32-bit programs, whose
+    # start took 25 instead of 12 ms with it (21 without the cache); 64-bit programs start alike either way
+    export FEX_DISKCACHE=1 FEX_DISKCACHEPATH="$d/" FEX_DISKCACHEFILEMAPPING=${FEX_DISKCACHEFILEMAPPING:-0}
 }
 
 # what `learn` translated: the program's library (TSO_AOT, for this program only: programs it starts with execve look

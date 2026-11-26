@@ -1,4 +1,4 @@
-From ae485ed00e22dfbdb092968254e7006d60c18be3 Mon Sep 17 00:00:00 2001
+From 2bc615b8e33f9152370ff9011733f264c0f4d2b3 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -40,6 +40,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
  .../LinuxSyscalls/FileManagement.h            |    1 +
+ .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
  .../LinuxSyscalls/SignalDelegator.cpp         |  456 +++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  106 +-
@@ -55,7 +56,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 51 files changed, 4184 insertions(+), 294 deletions(-)
+ 52 files changed, 4192 insertions(+), 300 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
@@ -2003,6 +2004,32 @@ index b11f096f79a57347638af5d0b4e69d7a6d7c9c58..af7434c0470ac4c2490b152adcc6e9bf
    dev_t ProcFSDev;
  };
  } // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+index 60b0ef192be43077c65e9101e78819076fb0d621..fc0f9c2cf09cc6a8d0a329d0fddcc34f22056099 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+@@ -271,13 +271,15 @@ int MemAllocator32Bit::Munmap(void* addr, size_t length) {
+     return 0;
+   }
+ 
+-  while (PageAddr != PageEnd) {
+-    // Always pass to munmap, it may be something allocated we aren't tracking
+-    int Result = ::munmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT), FEXCore::Utils::FEX_PAGE_SIZE);
+-    if (Result != 0) {
+-      return -errno;
+-    }
++  // Always pass to munmap, it may be something allocated we aren't tracking. tso-arm: one call for the whole range,
++  // which unmaps what a call per page did (unmapped pages in it are no error): the 8 MB FEX reserves in front of brk
++  // and frees at the start took 2,048 calls, some 3.5 ms of every start
++  int Result = ::munmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT), length);
++  if (Result != 0) {
++    return -errno;
++  }
+ 
++  while (PageAddr != PageEnd) {
+     if (MappedPages.test(PageAddr)) {
+       MappedPages.reset(PageAddr);
+     }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..375a877c3d8ef7e7327cbf4e78340c53816be05a 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
