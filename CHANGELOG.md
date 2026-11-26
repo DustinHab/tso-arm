@@ -1,6 +1,12 @@
 # Changes
 
-## Unreleased
+## 0.4.11 (2026-11-27)
+
+x86 desktop programs that have no Arm build for Linux: `tso-arm app install spotify` (or discord, edge, signal, slack,
+zoom, or any x86 Debian package) installs one from its maker's package, with a menu entry; Discord, Spotify, Signal,
+Zoom and Microsoft Edge draw their windows on GitHub's Arm runner. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **`tso-arm app`: x86 desktop programs from their makers' Debian packages.** `tso-arm app install NAME` installs
   Discord, Microsoft Edge, Signal, Slack, Spotify or Zoom from their makers' own addresses (a package index's entry
