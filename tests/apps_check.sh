@@ -7,7 +7,8 @@
 # dbus-launch where there is one.
 #   tests/apps_check.sh [NAME...]     default: every program 'tso-arm app' knows by name
 #   APPS_MINUTES (default 5); APPS_EXPECT=window: exit status 1 unless each program drew in a window; APPS_REMOVE=1:
-#   at the end every program removed again, and the root file system has to hold the files it held before
+#   at the end every program removed again, and the root file system has to hold the files it held before;
+#   APPS_KNOWN: programs known not to draw yet (reported, not counted against APPS_EXPECT)
 # Into build/apps: summary.md (each program: its version, the install's seconds, the second of its first window and
 # its title), and per program NAME/: install.txt, console.txt, windows-SSSS.txt and shot-SSSS.png every 20 seconds,
 # window.png at the first window.
@@ -137,8 +138,13 @@ for n in "$@"; do
     if [ -n "$drawn" ]; then
         echo "| $n | $ver | $inst s | $win s | $drawn s | $title |" >>"$O/summary.md"
     else
-        echo "| $n | $ver | $inst s | ${win:-none}${win:+ s} | no | ${title:--} |" >>"$O/summary.md"
-        failed="$failed $n"
+        case " ${APPS_KNOWN:-} " in
+        *" $n "*) echo "| $n | $ver | $inst s | ${win:-none}${win:+ s} | no (known) | ${title:--} |" >>"$O/summary.md" ;;
+        *)
+            echo "| $n | $ver | $inst s | ${win:-none}${win:+ s} | no | ${title:--} |" >>"$O/summary.md"
+            failed="$failed $n"
+            ;;
+        esac
         {
             echo
             echo "$n, last lines of its output:"

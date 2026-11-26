@@ -3160,3 +3160,10 @@ by itself, as the soak test does, then found that server where it looked for its
 bubblewrap with `--unshare-net` needed, but the zygote still does not come up. Its `clone(CLONE_FS)` and `chroot` to
 take away its files work under FEX as natively (`tests/chrootfs.c`); not looked into further yet. `tso-arm app run` starts these programs with
 `--no-sandbox` meanwhile.
+**On GitHub's Arm runner** (`tests/apps_check.sh`, Xvfb, no GPU), from the install to a window that draws: Discord
+(its starter fetches Discord on the first start; its window drew after 25 s), Spotify (10 s, its login page), Signal
+(15 s, the code to link a phone), Zoom (151 s, Zoom Workplace with its sign-in), Microsoft Edge (15 s, a new tab).
+Slack opens its window after 5 s, but it stays black, and Slack writes nothing after its start; a first cause was
+found and fixed (its keyboard module loads libxkbfile, which the root file system lacks and Slack's package does not
+name: now fetched), the black window is open. Installing all six and removing them again leaves the root file system
+with the files it held before (directories it had, empty ones as well, stay).

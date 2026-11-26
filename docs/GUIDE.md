@@ -197,8 +197,9 @@ the sandbox's protection of their renderers. `TSO_ARM_APP_SANDBOX=1` tries the s
 space than the page protocol's window holds and run with FEX's full ordering from their start. Discord's package
 holds only a starter, which fetches Discord into `~/.config/discord` on its first start (its setup window); from then
 on `tso-arm app run discord` starts Discord itself. What the tests cover: each of the six programs installed and
-started on GitHub's Arm runner until its window draws (`.github/workflows/apps.yml`, weekly, with screenshots);
-signing in and using them is not tested.
+started on GitHub's Arm runner until its window draws (`.github/workflows/apps.yml`, weekly, with screenshots):
+Discord, Spotify, Signal, Zoom and Edge draw their windows (Zoom after some two minutes); Slack's window stays black
+so far. Signing in and using them is not tested.
 
 ## Steam
 
