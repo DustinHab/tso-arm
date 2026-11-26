@@ -250,4 +250,8 @@ taken around a fork, and the child reads the cache without writing it (it shares
 file locks). `tso-arm run` turns the cache on, one directory per build of the patches (FEX's own version number does
 not change with them), and drops the old build's directory with the first run of a new one; `TSO_ARM_DISKCACHE=0`
 runs without it, `tso-arm forget --cache` empties it. Under the page protocol `python3 -c 0` 0.11 instead of 0.32 s;
-the litmus tests with the cache warm, under the page protocol and under full ordering, never forbidden.
+the litmus tests with the cache warm, under the page protocol and under full ordering, never forbidden. Turned on,
+FEX's cache made the translated code slower, in two ways of its own: all of it relocatable (the awake protocol's as
+well: pigz 9 % slower), and every 32-bit displacement and many immediates loaded as constants the cache could patch
+(xz with one thread 9 % slower). Relocatable code only where the cache may keep it, and no such data masks (a block is
+taken only where the guest code is the same): the same speed with the cache as without (notes section 60).

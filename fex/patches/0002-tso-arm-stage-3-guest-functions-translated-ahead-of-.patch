@@ -1,16 +1,20 @@
-From 76da2022ed65b79c6a2d1c5b53d70598458289c5 Mon Sep 17 00:00:00 2001
+From 747ebfd081b52071da452ab5d0e78de6dc342e1d Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
  FEXCore/Source/Interface/Context/Context.h    |    4 +
- FEXCore/Source/Interface/Core/Core.cpp        |  135 +-
+ .../Core/ArchHelpers/Arm64Emitter.cpp         |   28 +-
+ .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
+ FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  138 +-
  FEXCore/Source/Interface/Core/DiskCache.cpp   |   32 +
  FEXCore/Source/Interface/Core/DiskCache.h     |    4 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
- FEXCore/Source/Interface/Core/Frontend.cpp    |   20 +-
+ FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
  FEXCore/Source/Interface/Core/Frontend.h      |    6 +
+ .../Interface/Core/JIT/Arm64Relocations.cpp   |   11 +-
  .../Source/Interface/Core/JIT/BranchOps.cpp   |   28 +
  FEXCore/Source/Interface/Core/JIT/JIT.cpp     |   26 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |    9 +
@@ -50,7 +54,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   60 +-
- 46 files changed, 3869 insertions(+), 250 deletions(-)
+ 50 files changed, 3943 insertions(+), 257 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -67,8 +71,127 @@ index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569
  
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 8b060b10e13eaf36400782122352f5842143c1fa..83334b3a47efee9455259f71b914b4f41aabfad7 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -426,6 +426,30 @@ FEXCore::X86State::X86Reg Arm64Emitter::GetX86RegRelationToARMReg(ARMEmitter::Re
+   return FEXCore::X86State::X86Reg::REG_INVALID;
+ }
+ 
++void Arm64Emitter::LoadConstantParts(ARMEmitter::Register Reg, uint64_t Constant, int Moves) {
++  LOGMAN_THROW_A_FMT(MoveParts(Constant) <= Moves && Moves <= 4, "{:#x} does not fit in {} moves", Constant, Moves);
++  int Emitted = 0;
++  for (int i = 0; i < 4; ++i) {
++    const uint16_t Part = (Constant >> (i * 16)) & 0xFFFF;
++    if (Part == 0) {
++      continue;
++    }
++    if (Emitted == 0) {
++      movz(ARMEmitter::Size::i64Bit, Reg, Part, i * 16);
++    } else {
++      movk(ARMEmitter::Size::i64Bit, Reg, Part, i * 16);
++    }
++    ++Emitted;
++  }
++  if (Emitted == 0) {
++    movz(ARMEmitter::Size::i64Bit, Reg, 0, 0);
++    ++Emitted;
++  }
++  for (; Emitted < Moves; ++Emitted) {
++    nop();
++  }
++}
++
+ void Arm64Emitter::LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, uint64_t Constant, PadType Pad, int MaxBytes) {
+   bool NOPPad = false;
+   if (Pad == PadType::DOPAD) {
+@@ -434,7 +458,9 @@ void Arm64Emitter::LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, ui
+     NOPPad = false;
+   } else if (Pad == PadType::AUTOPAD) {
+     // Force NOP padding to ensure relocated constants always have enough encoding space available
+-    NOPPad = SupportCodeRelocations;
++    // tso-arm: only where the disk cache may keep the code (TSOViews::DiskCacheable); every constant of the awake page
++    // protocol's code padded to four instructions made pigz 9 % slower with the cache on
++    NOPPad = SupportCodeRelocations && FEXCore::TSOViews::DiskCacheable();
+   }
+ 
+   bool Is64Bit = s == ARMEmitter::Size::i64Bit;
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+index a65d037aa0a036cdcb47e19b803b6e448bca47d6..95576ab2d594ef1a0f614d340049e2e55e77603a 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+@@ -122,6 +122,18 @@ public:
+   };
+   void LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, uint64_t Constant, PadType Pad = PadType::NOPAD, int MaxBytes = 0);
+ 
++  // tso-arm: a guest address in exactly Moves instructions (movz and a movk for each further non-zero 16 bits, nop
++  // after them), so that a relocation can put another address of no more parts there; MoveParts counts them (at least
++  // one). A relocated guest address keeps its number in bits 5 to 7 of its register index (RelocGuestRIP).
++  static int MoveParts(uint64_t Constant) {
++    int Parts = 0;
++    for (int i = 0; i < 4; ++i) {
++      Parts += ((Constant >> (i * 16)) & 0xFFFF) != 0;
++    }
++    return Parts ? Parts : 1;
++  }
++  void LoadConstantParts(ARMEmitter::Register Reg, uint64_t Constant, int Moves);
++
+ protected:
+   FEXCore::Context::ContextImpl* EmitterCTX;
+ 
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 87a110c845921e3d5bd7dd5f22b0f97d95aa9ba6..e5ff4c712e54e05557a525c86b5be4e552f14150 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -521,12 +521,22 @@ static inline void ApplyRIPLiteralRelocation(ContextImpl& CTX, uint64_t GuestRIP
+   Emitter.dc64(GuestEntry + GuestRIP);
+ }
+ 
+-static inline void
++static inline bool
+ ApplyRIPMoveRelocation(ContextImpl& CTX, uint64_t GuestRIP, uint8_t RegisterIndex, uint64_t GuestEntry, CPU::Arm64Emitter& Emitter) {
+   uint64_t Pointer = GuestRIP + GuestEntry;
++  // tso-arm: a move of as few instructions as its address needed (their number in bits 5 to 7, Arm64Relocations.cpp);
++  // an address that needs more does not fit, and the block is translated anew
++  if (const int Moves = RegisterIndex >> 5) {
++    if (CPU::Arm64Emitter::MoveParts(Pointer) > Moves) {
++      return false;
++    }
++    Emitter.LoadConstantParts(ARMEmitter::Register(RegisterIndex & 31), Pointer, Moves);
++    return true;
++  }
+   // TODO: Pointers are required to fit within 48-bit VA space.
+   // But forcing 6-byte broke relocations.
+   Emitter.LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Register(RegisterIndex), Pointer, CPU::Arm64Emitter::PadType::DOPAD);
++  return true;
+ }
+ 
+ static inline int64_t ReadLiveGuestData(uint64_t SiteAddress, uint8_t ValueSize) {
+@@ -580,7 +590,9 @@ bool CodeCache::ApplyPackedCodeRelocations(uint64_t GuestEntry, std::span<std::b
+       break;
+     }
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE: {
+-      ApplyRIPMoveRelocation(CTX, Reloc.RIPMove.GuestRIP, Reloc.RIPMove.RegisterIndex, GuestEntry, Emitter);
++      if (!ApplyRIPMoveRelocation(CTX, Reloc.RIPMove.GuestRIP, Reloc.RIPMove.RegisterIndex, GuestEntry, Emitter)) {
++        return false;
++      }
+       break;
+     }
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_PATCHABLE_DATA_MOVE: {
+@@ -639,7 +651,9 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+       break;
+     }
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE: {
+-      ApplyRIPMoveRelocation(CTX, Reloc.GuestRIP.GuestRIP, Reloc.GuestRIP.RegisterIndex, GuestEntry, Emitter);
++      if (!ApplyRIPMoveRelocation(CTX, Reloc.GuestRIP.GuestRIP, Reloc.GuestRIP.RegisterIndex, GuestEntry, Emitter)) {
++        return false;
++      }
+       break;
+     }
+ 
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c937fc4ed4 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d584838165 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
@@ -151,16 +274,20 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
  ContextImpl::GenerateIRResult
  ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
    FEXCORE_PROFILE_SCOPED("GenerateIR");
-@@ -529,6 +574,8 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -529,8 +574,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
    uint64_t TotalInstructionsLength {0};
  
    bool HasCustomIR {};
 +  // tso-arm: an instruction touched guest memory without an exit point before it (see below)
 +  bool ViewRetranslate {};
  
-   bool WantsDiskCachePatching = DiskCache.IsReadingDiskCache() || DiskCache.IsWritingDiskCache();
+-  bool WantsDiskCachePatching = DiskCache.IsReadingDiskCache() || DiskCache.IsWritingDiskCache();
++  // tso-arm: not for code the disk cache does not keep (TSOViews::DiskCacheable)
++  bool WantsDiskCachePatching = (DiskCache.IsReadingDiskCache() || DiskCache.IsWritingDiskCache()) && TSOViews::DiskCacheable();
  
-@@ -637,13 +684,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+   if (HasCustomIRHandlers.load(std::memory_order_relaxed)) {
+     std::shared_lock lk(CustomIRMutex);
+@@ -637,13 +685,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
          // side effect here and (if that behaviour is required) we should handle
          // that more explicitly later.
          // tso-arm: with the page protocol a thread may be sent back to the dispatcher at any instruction start
@@ -184,7 +311,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
            }
            Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
          }
-@@ -696,12 +750,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -696,12 +751,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
            }
            // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
            // thread writes; the page protections make that sound
@@ -211,7 +338,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
            if (Thread->OpDispatcher->HadDecodeFailure()) {
              HadDispatchError = true;
            } else {
-@@ -781,6 +848,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -781,6 +849,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
  
    Thread->FrontendDecoder->DelayedDisownBuffer();
  
@@ -223,7 +350,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
    IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
  
    auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
-@@ -899,9 +971,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -899,9 +972,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
    std::optional<DiskCache::CodeHitData> Hit;
    std::optional<uint64_t> DiskCacheGuestCodeKey;
@@ -254,7 +381,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
        if (LoadedCode.BlockBegin) {
-@@ -938,10 +1030,17 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -938,10 +1031,17 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
@@ -275,7 +402,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -959,9 +1058,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -959,9 +1059,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
          fclose(F);
        }
      }
@@ -287,7 +414,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..957017b678e3ec1c1d0ccea6be9485c9
                static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
                (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
      }
-@@ -1143,6 +1242,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1243,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -425,10 +552,31 @@ index 1fb812a54f145c3976c350c2b2a097bcf3e50585..5648f6e803b078dd2d5a6d33d33fc164
      ldr(ARMEmitter::WReg::w2, STATE_PTR(CpuStateFrame, SignalHandlerRefCounter));
      add(ARMEmitter::Size::i32Bit, ARMEmitter::Reg::r2, ARMEmitter::Reg::r2, 1);
 diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
-index 94e4ac522637ca2bf36d204221d20f9ff9fb82e1..eee31154dff2480a01ccaee04d7085818983c47e 100644
+index 94e4ac522637ca2bf36d204221d20f9ff9fb82e1..c83ef2a17da6c19608bc658f74354e478f5f7eb3 100644
 --- a/FEXCore/Source/Interface/Core/Frontend.cpp
 +++ b/FEXCore/Source/Interface/Core/Frontend.cpp
-@@ -1634,12 +1634,16 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+@@ -16,6 +16,7 @@ $end_info$
+ #include <algorithm>
+ #include <cstring>
+ #include <FEXCore/Config/Config.h>
++#include <FEXCore/Core/TSOViews.h>
+ #include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
+ #include <FEXCore/Utils/Allocator.h>
+@@ -1566,7 +1567,11 @@ void Decoder::PruneInlinedBranchDataMasks() {
+ 
+ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+   // counter-intuitively, the masks are also needed for lookup on anon prefix decodes, not just stores
+-  bool WantsDataMasks = CTX->DiskCache.IsReadingDiskCache() || CTX->DiskCache.IsWritingDiskCache();
++  // tso-arm: none. A mask makes an immediate or a displacement data the cache patches in at load (anonymous code whose
++  // embedded values change between runs, Mono's), and the translated code loads each such value as a four-instruction
++  // constant instead of folding it into the access: xz with one thread ran 9 % slower with the cache on. Without masks
++  // the guest code's hash covers all its bytes, and a block is taken only where the code is the same.
++  bool WantsDataMasks = false;
+ 
+   while (!FinalInstruction && (Paused || !BlocksToDecode.empty())) {
+     bool Pausing = false;
+@@ -1634,12 +1639,16 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
  
        if (OpMinPage != CurrentCodePage) {
          CurrentCodePage = OpMinPage;
@@ -447,7 +595,7 @@ index 94e4ac522637ca2bf36d204221d20f9ff9fb82e1..eee31154dff2480a01ccaee04d708581
        }
  
        LastFieldReadSize = 0;
-@@ -1779,6 +1783,17 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+@@ -1779,6 +1788,17 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
    }
  }
  
@@ -465,7 +613,7 @@ index 94e4ac522637ca2bf36d204221d20f9ff9fb82e1..eee31154dff2480a01ccaee04d708581
  void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t PC, uint64_t MaxInst) {
    FEXCORE_PROFILE_SCOPED("DecodeInstructions");
    BlockInfo.TotalInstructionCount = 0;
-@@ -1828,6 +1843,7 @@ void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState*
+@@ -1828,6 +1848,7 @@ void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState*
    CurrentCodePage = PC & FEXCore::Utils::FEX_PAGE_MASK;
  
    BlockInfo.CodePages = {CurrentCodePage};
@@ -490,6 +638,35 @@ index ade14bc445a99e9ed566b02747c41ba2eb40e551..d4f515b6cb3049bc9b465188bbe31cfc
    void BranchTargetInMultiblockRange();
    bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
    bool InstCanContinue() const;
+diff --git a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+index bb00718c481008677e2958b01f6256f6eb3b713e..293cfd769b585c1cd68501f13742ea9d6070fa44 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+@@ -5,6 +5,7 @@ tags: backend|arm64
+ desc: relocation logic of the arm64 splatter backend
+ $end_info$
+ */
++#include <FEXCore/Core/TSOViews.h>
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/JIT/JITClass.h"
+ 
+@@ -99,7 +100,15 @@ void Arm64JITCore::InsertGuestRIPMove(ARMEmitter::Register Reg, uint64_t Constan
+   // TODO: Force 6-byte `MaxSize`, with sign extension to 64-bit. Current code not smart enough to handle negatives.
+   // 48-bit sign extension works because x86-64 guests only receive 47-bit VA space, with 48-bit being reserved for kernel.
+   // Additional quirk, "canonical" 48-bit pointers on x86-64, sign extend the 48-bit as well (Which is why kernel pointers are negative).
+-  LoadConstant(ARMEmitter::Size::i64Bit, Reg, Constant, FEXCore::CPU::Arm64Emitter::PadType::AUTOPAD);
++  // tso-arm: where the disk cache may keep the code, the address in as few instructions as it needs, their number kept
++  // with the relocation; FEX padded it to four, which made xz's hot loop 9 % slower with the cache on
++  if (SupportCodeRelocations && FEXCore::TSOViews::DiskCacheable()) {
++    const int Moves = MoveParts(Constant);
++    MoveABI.GuestRIP.RegisterIndex = Reg.Idx() | (Moves << 5);
++    LoadConstantParts(Reg, Constant, Moves);
++  } else {
++    LoadConstant(ARMEmitter::Size::i64Bit, Reg, Constant, FEXCore::CPU::Arm64Emitter::PadType::AUTOPAD);
++  }
+   Relocations.emplace_back(MoveABI);
+ }
+ 
 diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
 index ae3ed51e4f430c5c482ce4cf595717616cd70c21..71fc373a3e1d984ee7f751a5d3f067c0d2f17df6 100644
 --- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp

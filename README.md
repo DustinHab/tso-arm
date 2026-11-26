@@ -64,6 +64,12 @@ effects. Afterwards every `tso-arm run` of that program uses the translated func
 on this machine; a program that falls back to full ordering is timed with its pages moving between threads as well
 and keeps that where it is faster (zstd). `tso-arm status` and `tso-arm forget` show and drop what was learned.
 
+Without `learn` as well, a program starts faster the second time: `tso-arm run` keeps the code FEX translated in a
+cache on disk and loads it in later runs of the same program and libraries (on a Pi 5 `python3 -c 0` starts in 0.11
+instead of 0.32 s, a shell loop of 300 programs takes 5.1 instead of 12.2 s). Only code every run translates alike
+is kept: without the page protocol, or while a program has one thread, or after it fell back to full ordering
+(roadmap item 14). `TSO_ARM_DISKCACHE=0` runs without it, `tso-arm forget --cache` empties it.
+
 Dynamically linked programs need an x86-64 root file system: `tso-arm rootfs` fetches Ubuntu 24.04 with FEX's own
 tool (unpacked, about 2 GB, 95 s on a Pi 5), or `FEX_ROOTFS` names a directory with the x86-64 libraries. `learn`
 translates such a program's own functions and those of its shared libraries: a shared library's translation is kept

@@ -2858,7 +2858,7 @@ The same programs built with Ubuntu 24.04's i386 C library run everywhere, and d
 root file system's. So it is glibc 2.35's i386 start-up under FEX (roadmap item 13); the release's checks build
 their 32-bit programs on Ubuntu 24.04.
 
-## 60. After 0.4.5: the AT_SYSINFO page, EFAULT in copy-on-write ranges, vulkaninfo (2026-11-26)
+## 60. After 0.4.5: the AT_SYSINFO page, EFAULT in copy-on-write ranges, vulkaninfo, FEX's disk cache (2026-11-26)
 
 **i386 programs of glibc 2.35 and older** (roadmap item 13). They crashed at their first system call, also under
 FEX without the patches. glibc up to 2.35 makes every i386 system call through the entry AT_SYSINFO names (`call
@@ -2893,3 +2893,37 @@ graphics check runs it and `vulkaninfo --summary` with and without `--gpu`. On t
 line for every function the program looked up that FEX has no signature for (`vkCmdDispatchGraphAMDX` and nine more
 for vulkaninfo); the program gets a null pointer for those, as the specification has it for a function the
 implementation lacks, and the lines only where `TSO_ARM_VULKAN_UNKNOWN=1` asks for them.
+**FEX's disk cache** (roadmap item 14). Since the rebase FEX has a new code cache on disk (`FEX_DISKCACHE`; its
+directory option needs a trailing slash, FEX appends its own subdirectory to the string): translated blocks keyed by
+the guest's code (file and offset, or a hash of anonymous code) and FEX's configuration, written by a thread of its
+own, the files locked against other processes. Without the views (`--mode full`) it worked as it was: `python3 -c 0`
+0.11 instead of 0.33 s, `git --version` 0.045 instead of 0.092 s, a 1.3 MB cache for zstd.
+
+Bound to the views: a block's code depends on the views' state when it is translated. Asleep (one thread) or fallen
+back, guest memory is addressed directly and ordered as FEX's configuration says, alike in every run; awake, through
+the views, ordered as the profile and this run's faults escalated it, with the exit points learned so far. The state
+is read once, under the invalidation lock the views' waking and fallback take to throw code away
+(`TSOViews::BeginCompile` in `CompileBlock`), and goes into the key (four bits: views on, asleep, fallen back, exact
+signals); awake code is neither looked up nor stored, nor code at an address with a handler of its own (a function
+translated ahead of time, a thunk's trampoline), nor a block one of whose entries has one. Measurement knobs turn it
+off. Litmus tests with the cache warm, three rounds under the page protocol and under full ordering: none forbidden.
+
+Fork: FEX's cache had no handling for it. A fork while its writer thread held the index's locks left them held in the
+child, and the child has no writer thread; its descriptors are the parent's, whose file locks it shares, so both
+would append at once. The locks are taken around the fork (after the invalidation lock, the order a translation takes
+them), and the child reads the cache without writing it. A shell loop of 300 programs: 5.1 s with the cache, 12.2 s
+without; Python's multiprocessing with fork, forkserver and spawn the same results, 1.4 instead of 2.3 s;
+`rootfs_check` 28 of 28 twice with the cache.
+
+Two costs of FEX's own came with turning it on, both in the translated code rather than in loading it. First, all
+code was translated relocatable, the awake protocol's included, which is never stored: pigz under the page protocol
+1.45 instead of 1.33 s. Relocatable code is made only where the cache may keep it now. Second, with that, xz with one
+thread (asleep throughout, all of it cacheable) ran 5.67 instead of 5.18 s, translated afresh as much as loaded.
+Padding each relocated guest address to four instructions was not it: an address in as few as it needs, their number
+kept with the relocation (bits 5 to 7 of its register index) and the block translated anew where a relocated address
+needs more, changed nothing measurable. It was the decoder's data masks: with the cache on it marks every 32-bit
+displacement and many immediates as data the cache patches in at load (meant for anonymous code whose embedded values
+change between runs, as Mono's), and each such value became a four-instruction constant instead of part of the
+access. Without masks the guest code's hash covers all its bytes and a block is taken only where the code is the same;
+xz with one thread 5.15 against 5.18 s. tso-arm's directory for the cache is one per build of the patches, since FEX's
+format number does not change with them.
