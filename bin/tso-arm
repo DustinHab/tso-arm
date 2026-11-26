@@ -583,9 +583,10 @@ cmd_run() {
 # exited prematurely"). FEX runs one server per user, whatever its socket: while one with the usual sockets runs (x86
 # programs started before, or not through tso-arm), this one could not start, and FEX keeps to the usual ones then.
 # Looked at only while the socket is not there yet (a server of ours runs once it is). FEX_SERVERSOCKETPATH set is left
-# alone; TSO_ARM_SERVER_SOCKET=0: the usual sockets.
+# alone. Only with TSO_ARM_SERVER_SOCKET=home: as the default, FEX started by itself (not through tso-arm run: the
+# Compat workflow's soak test, FEXBash) found the server of ours where it looked for its own and could not start one.
 server_socket() {
-    [ -z "${FEX_SERVERSOCKETPATH:-}" ] && [ "${TSO_ARM_SERVER_SOCKET:-1}" != 0 ] || return 0
+    [ -z "${FEX_SERVERSOCKETPATH:-}" ] && [ "${TSO_ARM_SERVER_SOCKET:-}" = home ] || return 0
     s=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/server/$(id -u).FEXServer.Socket
     [ ${#s} -lt 108 ] || return 0
     if [ ! -S "$s" ]; then

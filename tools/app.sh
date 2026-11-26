@@ -167,18 +167,33 @@ needed() { # INDEX HAVE DEPENDS
     END { want(deps) }' "$1" "$2"
 }
 
-# Unpacks a package's data into the root file system, its new files only (what is there stays), and lists them
+# Unpacks a package's data into the root file system, its new files only (what is there stays), and lists them in
+# LIST, and the directories it makes in LIST.dirs (directories the root file system had stay, empty ones as well)
 add_to_rootfs() { # PACKAGE.deb ROOTFS LIST
     at=$(mktemp -d "$D/.tmp.XXXXXX")
     undeb "$1" "$at"
     (cd "$at" && find . ! -type d) | sed 's,^\./,/,' | while read -r af; do
         if [ ! -e "$2$af" ] && [ ! -L "$2$af" ]; then
+            ad=$(dirname "$af")
+            while [ ! -d "$2$ad" ]; do
+                echo "$ad" >>"$3.dirs"
+                echo "$ad" >>"$D/.dirs"
+                ad=$(dirname "$ad")
+            done
             mkdir -p "$(dirname "$2$af")"
             mv "$at$af" "$2$af"
             echo "$af" >>"$3"
         fi
     done
     rm -rf "$at"
+}
+
+# Removes what LIST names from the root file system: its files, then the directories it made, when empty
+remove_listed() { # LIST ROOTFS
+    while read -r rf; do rm -f "$2$rf"; done <"$1"
+    if [ -f "$1.dirs" ]; then
+        sort -u -r "$1.dirs" | while read -r rd; do rmdir "$2$rd" 2>/dev/null || true; done
+    fi
 }
 
 fetch_ubuntu() { # PACKAGE INDEX ROOTFS LIST
@@ -258,6 +273,7 @@ fetch_libraries() { # DEPENDS
         : >"$LIB/$lp.new"
         fetch_ubuntu "$lp" "$idx" "$rfs" "$LIB/$lp.new"
         mv "$LIB/$lp.new" "$LIB/$lp"
+        [ -f "$LIB/$lp.new.dirs" ] && mv "$LIB/$lp.new.dirs" "$LIB/$lp.dirs"
     done
     miss=$(awk '$1 == "missing" { printf "%s ", $2 }' "$work/need")
     [ -n "$miss" ] && say "not in the root file system, not fetched (no libraries): $miss"
@@ -397,6 +413,7 @@ cmd_install() {
                     : >"$LIB/$lp.new"
                     fetch_ubuntu "$lp" "$idx" "$rfs" "$LIB/$lp.new"
                     mv "$LIB/$lp.new" "$LIB/$lp"
+        [ -f "$LIB/$lp.new.dirs" ] && mv "$LIB/$lp.new.dirs" "$LIB/$lp.dirs"
                 fi
                 ld=$(awk -v p="$lp" '$1 == p { print $4; exit }' "$idx")
                 [ -n "$ld" ] && fetch_libraries "$ld"
@@ -447,14 +464,8 @@ cmd_remove() {
     app=$1
     [ -f "$D/$app/files" ] || die "$app is not installed ('tso-arm app list')"
     rfs=$(rootfs_dir)
-    rn=0
-    while read -r rf; do
-        rm -f "$rfs$rf" && rn=$((rn + 1))
-    done <"$D/$app/files"
-    # directories the program's files leave empty
-    xargs -r -n1 dirname <"$D/$app/files" | sort -u -r | while read -r rd; do
-        rmdir -p "$rfs$rd" 2>/dev/null || true
-    done
+    rn=$(wc -l <"$D/$app/files")
+    remove_listed "$D/$app/files" "$rfs"
     # the libraries fetched for it, unless another program is installed so: a program lists those it needed and the
     # root file system lacked, not those another one had fetched already (Zoom's libatomic after Spotify's), so all stay
     # until the last program goes
@@ -462,13 +473,16 @@ cmd_remove() {
     if [ "${others:-0}" = 0 ]; then
         for lf in "$LIB"/*; do
             [ -f "$lf" ] || continue
-            while read -r rf; do rm -f "$rfs$rf"; done <"$lf"
-            xargs -r -n1 dirname <"$lf" | sort -u -r | while read -r rd; do
-                rmdir -p "$rfs$rd" 2>/dev/null || true
-            done
-            rm -f "$lf"
+            case $lf in *.dirs) continue ;; esac
+            remove_listed "$lf" "$rfs"
+            rm -f "$lf" "$lf.dirs"
             say "removed library $(basename "$lf")"
         done
+        # and every directory tso-arm app made that is empty now (one a program and a library shared)
+        if [ -f "$D/.dirs" ]; then
+            sort -u -r "$D/.dirs" | while read -r rd; do rmdir "$rfs$rd" 2>/dev/null || true; done
+            rm -f "$D/.dirs"
+        fi
     fi
     while read -r de; do rm -f "$de"; done <"$D/$app/desktop" 2>/dev/null || true
     rm -rf "${D:?}/$app"

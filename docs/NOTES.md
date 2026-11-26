@@ -3154,7 +3154,9 @@ starts itself through `/proc/self/exe`) inside the root file system: ENOEXEC bef
 (`chrome-sandbox`) has no root rights, so they use the namespace sandbox where user namespaces are allowed. Under FEX
 its zygote, started in user, PID and network namespaces of its own, sends no hello ("Zygote process exited
 prematurely", "Failed to receive hello message from zygote"; Chromium's verbose log: "Lacking support for seccomp-bpf
-sandbox"). FEX's server, whose abstract socket is one per network namespace, is in the home directory for every
-program `tso-arm run` starts now (`server_socket` in `bin/tso-arm`), which bubblewrap with `--unshare-net` needed, but
-the zygote still does not come up; not looked into further yet. `tso-arm app run` starts these programs with
+sandbox"). FEX's server, whose abstract socket is one per network namespace, can be in the home directory for the programs
+`tso-arm run` starts (`TSO_ARM_SERVER_SOCKET=home`, `server_socket` in `bin/tso-arm`; not the default: FEX started
+by itself, as the soak test does, then found that server where it looked for its own and could not start one), which
+bubblewrap with `--unshare-net` needed, but the zygote still does not come up. Its `clone(CLONE_FS)` and `chroot` to
+take away its files work under FEX as natively (`tests/chrootfs.c`); not looked into further yet. `tso-arm app run` starts these programs with
 `--no-sandbox` meanwhile.

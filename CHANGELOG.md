@@ -20,11 +20,10 @@
   system's own, and looked for that on the host; glibc then ran the program as a shell script ("/proc/self/exe: 1:
   Syntax error"). FEX looks such a path up in the root file system first now, as any absolute path
   (`tests/selfexec.c`; `tests/chrome_check.sh` runs Chromium from inside the root file system as well).
-- FEX's server socket in the home directory for every program `tso-arm run` starts (as `tso-arm steam` had it, and
-  Valve's build of FEX for Steam): a program in a network namespace of its own (Chromium's and Electron's sandbox,
-  bubblewrap with `--unshare-net`) reached neither FEX's abstract socket nor the one in `XDG_RUNTIME_DIR`, and FEX
-  did not start there. While a server with the usual sockets runs (programs started before an update), FEX keeps to
-  those; `TSO_ARM_SERVER_SOCKET=0` keeps to them as well.
+- `TSO_ARM_SERVER_SOCKET=home`: FEX's server socket in the home directory for the programs `tso-arm run` starts (as
+  `tso-arm steam` has it, and Valve's build of FEX for Steam), which a program in a network namespace of its own
+  reaches (bubblewrap with `--unshare-net`); not the default, as FEX started by itself then could not start its
+  server (FEX runs one per user, whatever its socket).
 
 ## 0.4.10 (2026-11-26)
 
