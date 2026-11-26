@@ -71,8 +71,8 @@ fi
         echo "tso-arm run SCRIPT, XDG_RUNTIME_DIR=/nonexistent/run: exit status $s $(echo "$o" | tail -n 1)"
         sleep 2
     fi
-    # the threads a program of one thread sees in /proc/self/task under tso-arm (Chromium's zygote forks with one
-    # only), with FEX's disk cache and without (tests/singlethread.c, built by the workflow)
+    # the threads a program sees in /proc/self/task under tso-arm (Chromium's zygote forks with one only), with FEX's
+    # disk cache, whose writer is a thread of FEX's, and without (tests/singlethread.c, built by the workflow)
     if [ -x "$R/build/steam/singlethread" ]; then
         for c in 1 0; do
             o=$(TSO_ARM_DISKCACHE=$c "$T" run "$R/build/steam/singlethread" 2>&1) && s=0 || s=$?

@@ -1,4 +1,4 @@
-From abfc692b563585c7c10a6e0cac1f3eee34de576a Mon Sep 17 00:00:00 2001
+From 17c7a5844acba9537dcff0d3458d3b308225ae67 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -38,7 +38,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   16 +-
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  106 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
- .../LinuxSyscalls/FileManagement.cpp          |   16 +-
+ .../LinuxSyscalls/FileManagement.cpp          |  193 ++-
  .../LinuxSyscalls/FileManagement.h            |    1 +
  .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
  .../LinuxSyscalls/SignalDelegator.cpp         |  456 +++++-
@@ -51,12 +51,14 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  184 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |   92 +-
  .../LinuxSyscalls/ThreadManager.h             |   53 +-
+ .../LinuxSyscalls/Utils/Threads.cpp           |   21 +
+ .../LinuxSyscalls/Utils/Threads.h             |    6 +
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 52 files changed, 4196 insertions(+), 302 deletions(-)
+ 54 files changed, 4335 insertions(+), 367 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
@@ -1951,7 +1953,7 @@ index 02bb6bfef5053101164bef99371c3990cf3075ef..2e1d44a03d582caeb5a1dec776f1c7e5
  
    // Arm64 doesn't have a red zone
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
-index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb07725326 100644
+index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4eb9b2728 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -1962,7 +1964,23 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb
  #include "Common/JSONPool.h"
  
  #include "FEXCore/Config/Config.h"
-@@ -231,7 +232,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
+@@ -15,6 +16,7 @@ $end_info$
+ #include "LinuxSyscalls/EmulatedFiles/EmulatedFiles.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
++#include "LinuxSyscalls/Utils/Threads.h"
+ 
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/FileLoading.h>
+@@ -36,6 +38,7 @@ $end_info$
+ #include <stdio.h>
+ #include <sys/stat.h>
+ #include <sys/statfs.h>
++#include <sys/sysmacros.h>
+ #include <sys/xattr.h>
+ #include <syscall.h>
+ #include <system_error>
+@@ -231,7 +234,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
    }
  
    if (!LDPath().empty()) {
@@ -1971,7 +1989,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb
      if (RootFSFD == -1) {
        RootFSFD = AT_FDCWD;
      } else {
-@@ -339,7 +340,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
+@@ -339,7 +342,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
    }
  
    // Keep an fd open for /proc, to bypass chroot-style sandboxes
@@ -1980,7 +1998,224 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb
    if (ProcFD != -1) {
      // Track the st_dev of /proc, to check for inode equality
      struct stat Buffer;
-@@ -1296,6 +1297,15 @@ void FileManager::UpdatePID(uint32_t PID) {
+@@ -719,37 +722,76 @@ uint64_t FileManager::CloseRange(unsigned int first, unsigned int last, unsigned
+   return ::syscall(SYSCALL_DEF(close_range), first, last, flags);
+ }
+ 
++// tso-arm: FEX's own threads (the disk cache's writer) are not the guest's. A program that counts its threads by the
++// links of its /proc/self/task directory, two and one per thread, saw them: Chromium's zygote forks only with one
++// ("Check failed: IsSingleThreaded"), and Steam's steamwebhelper drew nothing. A stat of that directory leaves them out.
++template<typename T>
++static void HideInternalThreads(uint64_t Result, uint32_t Mode, uint64_t Dev, uint64_t Ino, T& NLink) {
++  if (Result == -1 || !S_ISDIR(Mode)) {
++    return;
++  }
++  const uint32_t Internal = FEX::LinuxEmulation::Threads::InternalThreadCount();
++  if (Internal == 0 || NLink < 3 + Internal) {
++    return;
++  }
++  struct stat Task;
++  if (::stat("/proc/self/task", &Task) == 0 && Task.st_dev == Dev && Task.st_ino == Ino) {
++    NLink -= Internal;
++  }
++}
++
++static uint64_t HideInternalThreads(uint64_t Result, struct stat* buf) {
++  HideInternalThreads(Result, buf->st_mode, buf->st_dev, buf->st_ino, buf->st_nlink);
++  return Result;
++}
++
++static uint64_t HideInternalThreads(uint64_t Result, struct stat64* buf) {
++  HideInternalThreads(Result, buf->st_mode, buf->st_dev, buf->st_ino, buf->st_nlink);
++  return Result;
++}
++
++static uint64_t HideInternalThreads(uint64_t Result, struct statx* buf) {
++  if (Result != -1 && (buf->stx_mask & STATX_NLINK)) {
++    HideInternalThreads(Result, buf->stx_mode, makedev(buf->stx_dev_major, buf->stx_dev_minor), buf->stx_ino, buf->stx_nlink);
++  }
++  return Result;
++}
++
+ uint64_t FileManager::Stat(const char* pathname, void* buf) {
+-  auto NewPath = GetSelf(pathname);
+-  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  return HideInternalThreads([&]() -> uint64_t {
++    auto NewPath = GetSelf(pathname);
++    const char* SelfPath = NewPath ? NewPath->data() : nullptr;
+ 
+-  // Stat follows symlinks
+-  FDPathTmpData TmpFilename;
+-  auto Path = GetEmulatedFDPath(AT_FDCWD, SelfPath, true, TmpFilename);
+-  if (Path.FD != -1) {
+-    uint64_t Result = ::fstatat(Path.FD, Path.Path, reinterpret_cast<struct stat*>(buf), 0);
+-    if (Result != -1) {
+-      return Result;
++    // Stat follows symlinks
++    FDPathTmpData TmpFilename;
++    auto Path = GetEmulatedFDPath(AT_FDCWD, SelfPath, true, TmpFilename);
++    if (Path.FD != -1) {
++      uint64_t Result = ::fstatat(Path.FD, Path.Path, reinterpret_cast<struct stat*>(buf), 0);
++      if (Result != -1) {
++        return Result;
++      }
+     }
+-  }
+-  return ::stat(SelfPath, reinterpret_cast<struct stat*>(buf));
++    return ::stat(SelfPath, reinterpret_cast<struct stat*>(buf));
++  }(), reinterpret_cast<struct stat*>(buf));
+ }
+ 
+ uint64_t FileManager::Lstat(const char* pathname, void* buf) {
+-  auto NewPath = GetSelf(pathname);
+-  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  return HideInternalThreads([&]() -> uint64_t {
++    auto NewPath = GetSelf(pathname);
++    const char* SelfPath = NewPath ? NewPath->data() : nullptr;
+ 
+-  // lstat does not follow symlinks
+-  FDPathTmpData TmpFilename;
+-  auto Path = GetEmulatedFDPath(AT_FDCWD, SelfPath, false, TmpFilename);
+-  if (Path.FD != -1) {
+-    uint64_t Result = ::fstatat(Path.FD, Path.Path, reinterpret_cast<struct stat*>(buf), AT_SYMLINK_NOFOLLOW);
+-    if (Result != -1) {
+-      return Result;
++    // lstat does not follow symlinks
++    FDPathTmpData TmpFilename;
++    auto Path = GetEmulatedFDPath(AT_FDCWD, SelfPath, false, TmpFilename);
++    if (Path.FD != -1) {
++      uint64_t Result = ::fstatat(Path.FD, Path.Path, reinterpret_cast<struct stat*>(buf), AT_SYMLINK_NOFOLLOW);
++      if (Result != -1) {
++        return Result;
++      }
+     }
+-  }
+ 
+-  return ::lstat(pathname, reinterpret_cast<struct stat*>(buf));
++    return ::lstat(pathname, reinterpret_cast<struct stat*>(buf));
++  }(), reinterpret_cast<struct stat*>(buf));
+ }
+ 
+ uint64_t FileManager::Access(const char* pathname, [[maybe_unused]] int mode) {
+@@ -984,24 +1026,26 @@ uint64_t FileManager::Openat2(int dirfs, const char* pathname, FEX::HLE::open_ho
+ }
+ 
+ uint64_t FileManager::Statx(int dirfd, const char* pathname, int flags, uint32_t mask, struct statx* statxbuf) {
+-  if (IsSelfNoFollow(pathname, flags)) {
+-    // If we aren't following the symlink for self then we need to return data about the symlink itself.
+-    // Let's just /actually/ return FEX symlink information in this case.
+-    return FHU::Syscalls::statx(dirfd, pathname, flags, mask, statxbuf);
+-  }
++  return HideInternalThreads([&]() -> uint64_t {
++    if (IsSelfNoFollow(pathname, flags)) {
++      // If we aren't following the symlink for self then we need to return data about the symlink itself.
++      // Let's just /actually/ return FEX symlink information in this case.
++      return FHU::Syscalls::statx(dirfd, pathname, flags, mask, statxbuf);
++    }
+ 
+-  auto NewPath = GetSelf(pathname);
+-  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++    auto NewPath = GetSelf(pathname);
++    const char* SelfPath = NewPath ? NewPath->data() : nullptr;
+ 
+-  FDPathTmpData TmpFilename;
+-  auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flags & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+-  if (Path.FD != -1) {
+-    uint64_t Result = FHU::Syscalls::statx(Path.FD, Path.Path, flags, mask, statxbuf);
+-    if (Result != -1) {
+-      return Result;
++    FDPathTmpData TmpFilename;
++    auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flags & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
++    if (Path.FD != -1) {
++      uint64_t Result = FHU::Syscalls::statx(Path.FD, Path.Path, flags, mask, statxbuf);
++      if (Result != -1) {
++        return Result;
++      }
+     }
+-  }
+-  return FHU::Syscalls::statx(dirfd, SelfPath, flags, mask, statxbuf);
++    return FHU::Syscalls::statx(dirfd, SelfPath, flags, mask, statxbuf);
++  }(), statxbuf);
+ }
+ 
+ uint64_t FileManager::Mknod(const char* pathname, mode_t mode, dev_t dev) {
+@@ -1031,43 +1075,47 @@ uint64_t FileManager::Statfs(const char* path, void* buf) {
+ }
+ 
+ uint64_t FileManager::NewFSStatAt(int dirfd, const char* pathname, struct stat* buf, int flag) {
+-  if (IsSelfNoFollow(pathname, flag)) {
+-    // See Statx
+-    return ::fstatat(dirfd, pathname, buf, flag);
+-  }
++  return HideInternalThreads([&]() -> uint64_t {
++    if (IsSelfNoFollow(pathname, flag)) {
++      // See Statx
++      return ::fstatat(dirfd, pathname, buf, flag);
++    }
+ 
+-  auto NewPath = GetSelf(pathname);
+-  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++    auto NewPath = GetSelf(pathname);
++    const char* SelfPath = NewPath ? NewPath->data() : nullptr;
+ 
+-  FDPathTmpData TmpFilename;
+-  auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+-  if (Path.FD != -1) {
+-    uint64_t Result = ::fstatat(Path.FD, Path.Path, buf, flag);
+-    if (Result != -1) {
+-      return Result;
++    FDPathTmpData TmpFilename;
++    auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
++    if (Path.FD != -1) {
++      uint64_t Result = ::fstatat(Path.FD, Path.Path, buf, flag);
++      if (Result != -1) {
++        return Result;
++      }
+     }
+-  }
+-  return ::fstatat(dirfd, SelfPath, buf, flag);
++    return ::fstatat(dirfd, SelfPath, buf, flag);
++  }(), buf);
+ }
+ 
+ uint64_t FileManager::NewFSStatAt64(int dirfd, const char* pathname, struct stat64* buf, int flag) {
+-  if (IsSelfNoFollow(pathname, flag)) {
+-    // See Statx
+-    return ::fstatat64(dirfd, pathname, buf, flag);
+-  }
++  return HideInternalThreads([&]() -> uint64_t {
++    if (IsSelfNoFollow(pathname, flag)) {
++      // See Statx
++      return ::fstatat64(dirfd, pathname, buf, flag);
++    }
+ 
+-  auto NewPath = GetSelf(pathname);
+-  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++    auto NewPath = GetSelf(pathname);
++    const char* SelfPath = NewPath ? NewPath->data() : nullptr;
+ 
+-  FDPathTmpData TmpFilename;
+-  auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+-  if (Path.FD != -1) {
+-    uint64_t Result = ::fstatat64(Path.FD, Path.Path, buf, flag);
+-    if (Result != -1) {
+-      return Result;
++    FDPathTmpData TmpFilename;
++    auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
++    if (Path.FD != -1) {
++      uint64_t Result = ::fstatat64(Path.FD, Path.Path, buf, flag);
++      if (Result != -1) {
++        return Result;
++      }
+     }
+-  }
+-  return ::fstatat64(dirfd, SelfPath, buf, flag);
++    return ::fstatat64(dirfd, SelfPath, buf, flag);
++  }(), buf);
+ }
+ 
+ uint64_t FileManager::Setxattr(const char* path, const char* name, const void* value, size_t size, int flags) {
+@@ -1296,6 +1344,15 @@ void FileManager::UpdatePID(uint32_t PID) {
      ProcFDInode = 0;
      return;
    }
@@ -1996,7 +2231,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..91c5e0a267e3b8ba42c7c22a9fac49eb
  }
  
  bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
-@@ -1307,6 +1317,8 @@ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
+@@ -1307,6 +1364,8 @@ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
      Match = "/proc";
    } else if (inode == CodeMapInode) {
      Match = "code map";
@@ -5835,6 +6070,90 @@ index dfcd4b0eb607b98b498454b6c4db0614139ca75a..1527f2836da9566c0bec0f1cae3b9e2e
    StatAlloc Stat;
    FEXCore::Context::Context* CTX;
    FEX::HLE::SignalDelegator* SignalDelegation;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+index 8b9c25948bd4de0d2d27140812ec5efa6114e8e7..c8a884e2b66fdce07aec91d53fc26587afe21851 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+@@ -7,6 +7,7 @@
+ #include <FEXCore/Utils/LongJump.h>
+ #include <FEXCore/Utils/Threads.h>
+ #include <FEXHeaderUtils/Syscalls.h>
++#include <atomic>
+ #include <sys/resource.h>
+ 
+ namespace FEX::LinuxEmulation::Threads {
+@@ -192,6 +193,14 @@ __attribute__((naked)) static void StackPivotAndCall(void* Arg, FEXCore::Threads
+                    : "memory");
+ }
+ #endif
++// tso-arm: FEX's own threads, counted while they run, which the guest does not see in its /proc/self/task
++// (FileManagement.cpp)
++static std::atomic<uint32_t> InternalThreads {};
++
++uint32_t InternalThreadCount() {
++  return InternalThreads.load(std::memory_order_relaxed);
++}
++
+ namespace PThreads {
+   void* InitializeThread(void* Ptr);
+ 
+@@ -328,6 +337,13 @@ namespace PThreads {
+       setpriority(PRIO_PROCESS, FHU::Syscalls::gettid(), 19);
+     }
+ 
++    // (counted once it runs and no longer before it returns: before and after, the kernel lists it while it is not
++    // counted, which errs towards one thread more, as without the count)
++    const bool Internal = Thread->GetFlags().Internal;
++    if (Internal) {
++      InternalThreads.fetch_add(1, std::memory_order_relaxed);
++    }
++
+     if (FEXCore::UncheckedLongJump::SetJump(exit_resolver) == 0) {
+       Thread->SetupLongJump(&exit_resolver);
+       // Run the user function.
+@@ -337,6 +353,9 @@ namespace PThreads {
+     } else {
+       LongJumpExit = true;
+     }
++    if (Internal) {
++      InternalThreads.fetch_sub(1, std::memory_order_relaxed);
++    }
+ 
+     const auto Status = Thread->GetStatus();
+     auto ThreadObject = Thread->GetThreadObject();
+@@ -384,6 +403,8 @@ namespace PThreads {
+ 
+   static void CleanupAfterFork_PThread() {
+     STracker->CleanupAfterFork_PThread();
++    // the child of a fork has none of its parent's threads
++    InternalThreads.store(0, std::memory_order_relaxed);
+   }
+ 
+ }; // namespace PThreads
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.h
+index 0f6ce00296dcbe12f4ecf34da7235b36f3e311ee..edfce6491023f6bd872f9c531b256a7ba74ef60d 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.h
+@@ -5,6 +5,7 @@
+ #include <FEXCore/fextl/memory.h>
+ 
+ #include <cstddef>
++#include <cstdint>
+ #include <mutex>
+ 
+ namespace FEXCore::Threads {
+@@ -77,6 +78,11 @@ void* GetStackBase(FEXCore::Threads::Thread* ThreadObject);
+ [[noreturn]]
+ void LongjumpDeallocateAndExit(FEX::HLE::ThreadStateObject* ThreadObject, int Status);
+ 
++/**
++ * @brief How many of FEX's own threads (`Flags::Internal`, as the disk cache's writer) run in this process.
++ */
++uint32_t InternalThreadCount();
++
+ /**
+  * @brief Registers thread creation handlers with FEXCore.
+  */
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
 index 9c018bc46143c93f1083300592ac64be7de67478..0273f3d17dcbf8ba18c8ac2c721ef168b5a51262 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp

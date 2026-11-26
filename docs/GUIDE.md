@@ -188,12 +188,9 @@ that asks is FEX: `sudo tso-arm userns allow` puts a profile in place that allow
 program (`sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`) works as well.
 
 **What `tso-arm steam` sets, and why.** Steam's windows come from steamwebhelper, which forks its renderer, GPU and
-network processes from a "zygote"; under FEX that went wrong in four places, and `tso-arm steam` runs Steam so
+network processes from a "zygote"; under FEX that went wrong in three places, and `tso-arm steam` runs Steam so
 that it gets past them:
 
-- FEX's disk cache off (`TSO_ARM_DISKCACHE=0`): its writer is a second thread in every process, and the zygote
-  forks only when it is alone in `/proc/self/task` (otherwise it stops at `Check failed: IsSingleThreaded`, and no
-  window comes). Steam's programs start slower without it.
 - FEX's full ordering (`TSO_ARM_MODE=full`): under the page protocol the processes the zygote forks ended within
   seconds and were started again, and the window stayed empty. Games started from Steam inherit this: they run
   correctly, but with every access ordered (as `--mode full`).
@@ -201,8 +198,7 @@ that it gets past them:
 - FEX's server socket in the home directory: steamwebhelper runs in Steam's runtime container, which has a runtime
   directory of its own, and FEX did not reach its server there ("Couldn't connect to FEXServer socket").
 
-Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_DISKCACHE=1`,
-`TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`): zenity's progress windows
+Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`): zenity's progress windows
 crashed, the 32-bit client stopped at `surface_linux.cpp (2002): Fatal assert`, steamwebhelper's GPU process with a
 segmentation fault, and Steam ended after 5.5 minutes. Steam started with `tso-arm steam` waits for other x86
 programs that run through tso-arm to end (one FEX server per user).

@@ -48,6 +48,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/forksnap tests/forksnap.c
     $CC -O2 -static -pthread -o $B/forkeintr tests/forkeintr.c
     $CC -O2 -static -pthread -o $B/lastexit tests/lastexit.c
+    $CC -O2 -static -pthread -o $B/singlethread tests/singlethread.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -63,6 +64,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
         $CC32 -O2 -static -pthread -o $B/threads32 tests/threads.c
         $CC32 -O2 -static -o $B/vsyscall32 tests/vsyscall32.c
         $CC32 -O2 -static -pthread -o $B/lastexit32 tests/lastexit.c
+        $CC32 -O2 -static -pthread -o $B/singlethread32 tests/singlethread.c
     fi
 fi
 sh tools/board_check.sh | sed 's/^/      /'
@@ -159,6 +161,14 @@ for m in tso full unordered; do
         [ $st = 7 ] || fail "lastexit $a, $m: exit status $st (7 expected): $out"
     done
     ok "$m: lastexit: the last thread's exit ends the process"
+done
+
+# a program's own threads in /proc/self/task and no thread of FEX's (its disk cache's writer, on here as it is by
+# default): Chromium's zygote forks only when it sees one there
+for m in tso full; do
+    out=$(timeout 60 $T run --mode $m $B/singlethread 2>&1) || fail "singlethread, $m: $out"
+    ok "$m: $(echo "$out" | tr '
+' ' ')"
 done
 
 # asynchronous signals at an instruction start: a handler that makes the interrupted thread call a routine at the
@@ -325,6 +335,11 @@ if [ -x $B/mp32 ]; then
             [ $st = 7 ] || fail "32-bit lastexit $a: exit status $st (7 expected): $out"
         done
         ok "32-bit lastexit: the last thread's exit ends the process"
+    fi
+    if [ -x $B/singlethread32 ]; then
+        out=$(timeout 60 $T run $B/singlethread32 2>&1) || fail "32-bit singlethread: $out"
+        ok "32-bit: $(echo "$out" | tr '
+' ' ')"
     fi
 else
     echo "      32-bit programs: not built (no $CC32)"

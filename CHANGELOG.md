@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+- Steam with FEX's disk cache: a program no longer sees FEX's own threads in its `/proc/self/task`. The cache's
+  writer is a thread of FEX's in every process, and a program that counts its threads by the links of that
+  directory counted it as well; Chromium's zygote, which forks only when it is alone there, stopped at `Check failed:
+  IsSingleThreaded`, so `tso-arm steam` ran without the cache. FEX counts its own threads now and leaves them out of
+  `stat`, `fstatat` and `statx` of the directory, for 32-bit programs as well; `tso-arm steam` keeps the cache on, and
+  Steam's programs start faster from their second run. `tests/singlethread.c` (in CI) counts with all three, with one
+  thread and with two.
+
 ## 0.4.9 (2026-11-26)
 
 An RPM package for Fedora and openSUSE, `tso-arm steam` (Steam up to its login window, with FEX's full ordering for

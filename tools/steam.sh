@@ -66,9 +66,6 @@ esac
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && [ ! -f /etc/apparmor.d/tso-arm-fex ]; then
     die "Steam requires user namespaces, which AppArmor restricts here, FEX's as well: 'sudo tso-arm userns allow' allows them to tso-arm's FEX alone"
 fi
-# FEX's disk cache off: its writer is a second thread in every process, and Chromium's zygote (steamwebhelper's)
-# forks only with one ('Check failed: IsSingleThreaded'), so steamwebhelper started no GPU process and drew nothing
-export TSO_ARM_DISKCACHE=${TSO_ARM_DISKCACHE:-0}
 # FEX's full ordering: under the page protocol the processes steamwebhelper's zygote forks (renderer, GPU, network)
 # ended within seconds, and it drew nothing (games Steam starts inherit this as well)
 export TSO_ARM_MODE=${TSO_ARM_MODE:-full}

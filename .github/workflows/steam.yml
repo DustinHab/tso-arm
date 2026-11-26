@@ -48,12 +48,12 @@ jobs:
         if: steps.fex.outputs.cache-hit != 'true'
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
 
-      # what 'tso-arm steam' works around, for the record: a thread of FEX's own in /proc/self/task (its disk cache),
-      # and Chromium's way of forking (both in the summary)
+      # for the record: the threads a program sees in /proc/self/task (none of FEX's), and Chromium's way of forking
+      # (both in the summary)
       - name: x86 test programs
         run: |
           mkdir -p build/steam
-          x86_64-linux-gnu-gcc -O2 -static -o build/steam/singlethread tests/singlethread.c
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o build/steam/singlethread tests/singlethread.c
           x86_64-linux-gnu-gcc -O2 -static -pthread -o build/steam/forkstack tests/forkstack.c
 
       - name: Machine

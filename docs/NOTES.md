@@ -3020,3 +3020,15 @@ the 128 MB guest stack (`MAP_GROWSDOWN`), whose candidate range moves down a pag
 free around such a mapping (its guard gap, which `/proc/self/maps` does not show). The loop was FEX's ELF loader's,
 which tried the stack's hint a page lower after each failure: in steps of 256 pages now, 799 `mmap` calls at a
 32-bit start instead of 3,349.
+## 63. FEX's own threads in /proc/self/task (2026-11-26)
+
+Chromium's zygote (Steam's steamwebhelper) forks only when it is alone in its process:
+`sandbox::ThreadHelpers::IsSingleThreaded` takes `fstatat(proc_fd, "self/task/")` and wants a link count of 3 ("."
+"..", one task). With FEX's disk cache on, its writer thread is a task of every process, the count was 4, and the
+zygote stopped at `Check failed: IsSingleThreaded`. FEX counts its threads with `Flags::Internal` while they run (from
+their first instruction to their return, so that the count errs towards one thread more; zero in a fork's child) and
+takes them off the link count in `stat`, `lstat`, `fstatat` and `statx` (the 32-bit calls as well) when the result
+is this process's `/proc/self/task` (device and inode of a `stat` of it, looked up only for a directory with more
+links than three). A listing of the directory (`getdents64`) and the `Threads:` line of `/proc/self/status` still
+show the writer: nothing seen to depend on them. `tests/singlethread.c` counts with all three calls, alone and with a
+second thread: 1 and 2 in both orderings, with the cache and without.
