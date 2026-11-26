@@ -1,16 +1,16 @@
-From f47b0ff8ff0eb5ea9cbffccdbac1258b0702bbff Mon Sep 17 00:00:00 2001
+From 12f58b52e989ee162de5d2695bc32f4827552b02 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
- FEXCore/Source/Interface/Context/Context.h    |   10 +
+ FEXCore/Source/Interface/Context/Context.h    |   14 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |   28 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
- FEXCore/Source/Interface/Core/Core.cpp        |  156 ++-
- FEXCore/Source/Interface/Core/DiskCache.cpp   |   49 +-
- FEXCore/Source/Interface/Core/DiskCache.h     |    4 +
+ FEXCore/Source/Interface/Core/Core.cpp        |  167 ++-
+ FEXCore/Source/Interface/Core/DiskCache.cpp   |   79 +-
+ FEXCore/Source/Interface/Core/DiskCache.h     |    8 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
  FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
  FEXCore/Source/Interface/Core/Frontend.h      |    6 +
@@ -27,7 +27,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../IR/Passes/RegisterAllocationPass.cpp      |    2 +-
  .../Source/Utils/Allocator/64BitAllocator.cpp |   12 +-
  FEXCore/Source/Utils/AllocatorHooks.cpp       |   41 +
- FEXCore/include/FEXCore/Core/Context.h        |   10 +
+ FEXCore/include/FEXCore/Core/Context.h        |   12 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   86 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |    2 +
@@ -42,8 +42,8 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/FileManagement.h            |    1 +
  .../LinuxSyscalls/SignalDelegator.cpp         |  456 +++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  105 +-
- .../LinuxSyscalls/Syscalls/Thread.cpp         |  104 +-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  106 +-
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |  105 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  217 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1238 +++++++++++++++--
@@ -55,13 +55,24 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 51 files changed, 4113 insertions(+), 293 deletions(-)
+ 51 files changed, 4165 insertions(+), 294 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 18f08b861e4b979c9b12b6317138519dccccb50b..c4ad396840f23ee014adbccefc7a2d9904f959bc 100644
+index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
-@@ -238,6 +238,10 @@ public:
+@@ -220,6 +220,10 @@ public:
+       CodeMapWriter.reset();
+     }
+   }
++  // tso-arm: the disk cache's queued stores written out (DiskCache::DrainWrites)
++  void DrainDiskCache(bool Again) override {
++    DiskCache.DrainWrites(Again);
++  }
+ 
+   void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
+   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
+@@ -238,6 +242,10 @@ public:
    AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandler Handler, void* Creator = nullptr, void* Data = nullptr);
  
    void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) override;
@@ -72,7 +83,7 @@ index 18f08b861e4b979c9b12b6317138519dccccb50b..c4ad396840f23ee014adbccefc7a2d99
  
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
-@@ -513,6 +517,12 @@ private:
+@@ -513,6 +521,12 @@ private:
    fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
    // tso-arm: guest instructions translated ordered (all others plain) when views are on; under CodeInvalidationMutex
    IntervalList<uint64_t> TSOEscalated;
@@ -205,7 +216,7 @@ index 87a110c845921e3d5bd7dd5f22b0f97d95aa9ba6..e5ff4c712e54e05557a525c86b5be4e5
      }
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3405c8c17 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..d7524010071568695ef3e48856303c091ca6438a 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
@@ -365,7 +376,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
    IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
  
    auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
-@@ -899,9 +973,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -899,9 +973,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
    std::optional<DiskCache::CodeHitData> Hit;
    std::optional<uint64_t> DiskCacheGuestCodeKey;
@@ -382,6 +393,11 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
 +    return CustomIRHandlers.find(RIP) != CustomIRHandlers.end();
 +  };
 +  TSOViews::BeginCompile();
++  static const bool DCLog = getenv("TSO_DISKCACHE_LOG") != nullptr;
++  if (DCLog) {
++    fprintf(stderr, "dc rip %#lx state %d cacheable %d region %d own %d\n", (unsigned long)GuestRIP, TSOViews::DiskCacheState(),
++            TSOViews::DiskCacheable(), Region && Region->FileStartVA ? 1 : 0, HasOwnHandler(GuestRIP));
++  }
 +  if (TSOViews::DiskCacheable() && !HasOwnHandler(GuestRIP)) {
      FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedDiskCacheLookupTime);
      Hit = DiskCache.Lookup(Thread, Region, GuestRIP, DiskCacheGuestCodeKey);
@@ -396,7 +412,15 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
        if (LoadedCode.BlockBegin) {
-@@ -938,10 +1032,21 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -933,15 +1032,32 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+       }
+     }
+     FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedDiskCacheMissCount, 1);
++    if (DCLog) {
++      fprintf(stderr, "dc miss rip %#lx key %d hit %d\n", (unsigned long)GuestRIP, DiskCacheGuestCodeKey ? 1 : 0, Hit ? 1 : 0);
++    }
+   }
+ 
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
@@ -413,6 +437,9 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
 +  if (DiskCacheGuestCodeKey &&
 +      (!TSOViews::DiskCacheable() || TSOEscalationGeneration.load(std::memory_order_acquire) != EscalationsBefore)) {
 +    DiskCacheGuestCodeKey.reset();
++    if (DCLog) {
++      fprintf(stderr, "dc nostore rip %#lx cacheable %d\n", (unsigned long)GuestRIP, TSOViews::DiskCacheable());
++    }
 +  }
 +  if (ViewsOn) {
 +    if (CompileStart) {
@@ -421,7 +448,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -959,9 +1064,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -959,9 +1075,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
          fclose(F);
        }
      }
@@ -433,7 +460,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
                static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
                (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
      }
-@@ -1143,6 +1248,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1259,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -456,7 +483,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
  void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
-@@ -1199,9 +1320,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
+@@ -1199,9 +1331,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
      return false;
    }
    TSOEscalated.Insert({Start, End});
@@ -480,7 +507,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3
    const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
    auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1cdac2a38 100644
+index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b087481b67 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
 @@ -8,6 +8,7 @@
@@ -491,7 +518,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/HLE/SyscallHandler.h>
-@@ -484,6 +485,48 @@ namespace DiskCache {
+@@ -484,6 +485,68 @@ namespace DiskCache {
      }
    }
  
@@ -504,6 +531,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
 +    if (!ReadingDiskCache && !WritingDiskCache) {
 +      return;
 +    }
++    WriterLock.lock();
 +    IndexLock.lock();
 +    MemoryLRULock.lock();
 +  }
@@ -522,6 +550,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
 +    }
 +    MemoryLRULock.unlock();
 +    IndexLock.unlock();
++    WriterLock.unlock();
 +  }
 +
 +  // tso-arm: code translated with the views awake was ordered as the escalations within its range said: they go into
@@ -537,10 +566,28 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
 +    return XXH3_128bits(&Mixed, sizeof(Mixed));
 +  }
 +
++  // tso-arm: the writer runs at nice 19 and got next to no time beside a program that keeps every core busy: zstd -T4
++  // on a small input missed 424 of its 714 blocks in every run, their stores still queued when it ended. The queue is
++  // written out before exit_group and execve now (destroying the writer runs its queue to the end and joins it; at
++  // the exit the other threads are mostly done), and after execve, which may fail, writing goes on with a new writer.
++  void DiskCache::DrainWrites(bool Again) {
++    std::lock_guard lk(WriterLock);
++    if (!Writer) {
++      return;
++    }
++    Writer.reset();
++    if (Again) {
++      FEXCore::Threads::Flags WriterThreadFlags = {.LowPriority = true, .Internal = true};
++      Writer = fextl::make_unique<WorkQueueThread>(WriterThreadFlags, "FEX:DiskCache");
++    } else {
++      WritingDiskCache = false;
++    }
++  }
++
    uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
      struct __attribute__((packed)) {
        uint64_t CodeKey;
-@@ -503,6 +546,8 @@ namespace DiskCache {
+@@ -503,6 +566,8 @@ namespace DiskCache {
      if (MonoBackpatcher) {
        BlobKeyBytes.Flags |= 1 << 3;
      }
@@ -549,7 +596,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
  
      return XXH3_64bits(&BlobKeyBytes, sizeof(BlobKeyBytes));
    }
-@@ -707,7 +752,7 @@ namespace DiskCache {
+@@ -707,7 +772,7 @@ namespace DiskCache {
            for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
              XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
            }
@@ -558,7 +605,27 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
            LastFootprintHashed = CurrentFootprint;
            FirstHash = false;
          }
-@@ -1179,7 +1224,7 @@ namespace DiskCache {
+@@ -832,7 +897,10 @@ namespace DiskCache {
+     }
+ 
+     if (StoreInMemory && MemoryLRUCurrentSize > MemoryLRUMaxSize + MemoryLRUEvictThreshold) {
+-      Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(this));
++      std::lock_guard WLk(WriterLock);
++      if (Writer) {
++        Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(this));
++      }
+     }
+ 
+     HitData.HostCode = {HitData.Blob.data() + BlobOffset, Header.HostSize};
+@@ -973,6 +1041,7 @@ namespace DiskCache {
+       }
+ 
+       if (KeepEntryInMemory && Self->MemoryLRUCurrentSize > Self->MemoryLRUMaxSize + Self->MemoryLRUEvictThreshold) {
++        // tso-arm: from the writer's own thread: not under WriterLock, which DrainWrites holds while it joins this thread
+         Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
+       }
+     }
+@@ -1179,7 +1248,7 @@ namespace DiskCache {
        for (uint32_t i = 0; i < ExactGuestCodeExtents.size(); i += 2) {
          XXH3_128bits_update(&HashState, GuestCode.data() + ExactGuestCodeExtents[i], ExactGuestCodeExtents[i + 1]);
        }
@@ -567,21 +634,43 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1
      }
      memcpy(BlobData + HeaderOffset, &Header, sizeof(Header));
  
+@@ -1248,6 +1317,10 @@ namespace DiskCache {
+     }
+ 
+     // hand the rest off to the writer thread
++    std::lock_guard WLk(WriterLock);
++    if (!Writer) {
++      return false;
++    }
+     Writer->QueueWork(fextl::make_unique<CacheStoreWorkItem>(this, RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize),
+                                                              std::move(IndexBlob), StoreDisk));
+     return true;
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.h b/FEXCore/Source/Interface/Core/DiskCache.h
-index f7792be2d331effc2f372179a30fa94a434be097..0f1e3e3bac2c397457cd1eb2d147b3f81ebd1444 100644
+index f7792be2d331effc2f372179a30fa94a434be097..8464c5ac6fea3dfc277332efa04f1968c4cf9c86 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.h
 +++ b/FEXCore/Source/Interface/Core/DiskCache.h
-@@ -209,6 +209,10 @@ namespace DiskCache {
+@@ -209,6 +209,12 @@ namespace DiskCache {
        return Validation;
      }
  
 +    // tso-arm: around a fork (DiskCache.cpp)
 +    void LockBeforeFork();
 +    void UnlockAfterFork(bool Child);
++    // tso-arm: the writer's queue written out (DiskCache.cpp), before exit_group (Again false) or execve
++    void DrainWrites(bool Again);
 +
    private:
      bool OpenCacheDB(const fextl::string& CacheDBName, bool ReadOnly);
      uint64_t MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t ModuleOffset, bool Writable, bool MonoBackpatcher);
+@@ -232,6 +238,8 @@ namespace DiskCache {
+ 
+     // the Writer holds references to all this stuff above and needs to be last
+     fextl::unique_ptr<WorkQueueThread> Writer;
++    // tso-arm: held for queueing work and for DrainWrites, which replaces Writer
++    std::mutex WriterLock;
+ 
+     FEX_CONFIG_OPT(EnableDiskCache, DISKCACHE);
+     FEX_CONFIG_OPT(Validation, DISKCACHEVALIDATION);
 diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
 index 1fb812a54f145c3976c350c2b2a097bcf3e50585..5648f6e803b078dd2d5a6d33d33fc164dc5b7399 100644
 --- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
@@ -1188,10 +1277,19 @@ index 63f84a824c25858ec175b0bad99823cb85628225..55ac344d163faec286be9024f023d964
  
  #endif
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index af14fc4b92d25141a3a21c6ab9642c1c10eb7b85..5931e523bb4c0fb6a4c7aa56da9729b2a2da73e2 100644
+index af14fc4b92d25141a3a21c6ab9642c1c10eb7b85..8f8221410ada626c73f268d9d2e972015ca7c15f 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
-@@ -174,6 +174,16 @@ public:
+@@ -138,6 +138,8 @@ public:
+   virtual AbstractCodeCache& GetCodeCache() = 0;
+   virtual void SetCodeMapWriter(fextl::unique_ptr<CodeMapWriter>) = 0;
+   virtual void FlushAndCloseCodeMap() = 0;
++  // tso-arm: the disk cache's queued stores written out, before exit_group (Again false) and execve
++  virtual void DrainDiskCache(bool Again) = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
+@@ -174,6 +176,16 @@ public:
     */
    FEX_DEFAULT_VISIBILITY virtual void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) = 0;
  
@@ -2639,7 +2737,7 @@ index 9e6820bf6f22ed030fcf53b53ecc437f4ee14da1..61843152c020a96fdebee84af84706cb
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0d4a3c874 100644
+index a7a432bbd650081e4a8ed1af18a3b0650357af94..8c593a40917731f10a8a8a8785ff96392b97b67e 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -2658,7 +2756,15 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
  #include "LinuxSyscalls/Utils/Threads.h"
  #include "LinuxSyscalls/x32/Syscalls.h"
  #include "LinuxSyscalls/x64/Syscalls.h"
-@@ -352,10 +354,12 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
+@@ -199,6 +201,7 @@ static fextl::string GetShebangInterpFilename(const fextl::string& Filename) {
+ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname, char* const* argv, char* const* envp, ExecveAtArgs Args) {
+   auto SyscallHandler = FEX::HLE::_SyscallHandler;
+   Frame->Thread->CTX->FlushAndCloseCodeMap();
++  Frame->Thread->CTX->DrainDiskCache(true);
+ 
+   fextl::string Filename {};
+ 
+@@ -352,10 +355,12 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
        if (NeedsFDCopy) {
          // FEX needs the FD to live past execve when binfmt_misc isn't used,
          // so duplicate the FD if FD_CLOEXEC is set, which removes the FD_CLOEXEC flag.
@@ -2673,7 +2779,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
          if (Args.dirfd == -1) {
            CloseSeccompFD();
            return -errno;
-@@ -441,7 +445,10 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
+@@ -441,7 +446,10 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
      if (*OldArgv) {
        // The direct fallback uses the executable path as argv[0]. An FD-backed load uses the
        // binfmt preserve-argv0 layout, so the caller-supplied argv[0] has to stay in the vector.
@@ -2685,7 +2791,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
          ++OldArgv;
        }
        while (*OldArgv) {
-@@ -673,6 +680,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -673,6 +681,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
        args->NewStack = FEX::LinuxEmulation::Threads::AllocateStackObject();
  
        FEX::HLE::_SyscallHandler->LockBeforeFork(Frame->Thread);
@@ -2696,7 +2802,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
  
        uint64_t Result {};
        if (args->Type == TYPE_CLONE2) {
-@@ -683,6 +694,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -683,6 +695,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
  
        if (Result != 0) {
          // Parent
@@ -2707,7 +2813,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
          // Unlock the mutexes on both sides of the fork
          FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, false);
  
-@@ -711,6 +726,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -711,6 +727,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
      // CLONE_PARENT is ignored (Implied by CLONE_THREAD)
      return FEX::HLE::ForkGuest(Thread, Frame, args);
    } else {
@@ -2732,7 +2838,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
      auto NewThread = FEX::HLE::CreateNewThread(Thread->CTX, Frame, args);
  
      // Return the new threads TID
-@@ -899,11 +932,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -899,11 +933,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
@@ -2797,7 +2903,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
    }
  
    // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
-@@ -962,6 +1043,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
+@@ -962,6 +1044,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -2809,7 +2915,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +1060,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +1061,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();
@@ -2820,7 +2926,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..1c8afa765173b05558db8f7959e528f0
  
    CTX->UnlockAfterFork(LiveThread, Child);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d6961567462271c06 100644
+index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..1d039129e298ac61f025baf5b81a187cc792fd9f 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -2955,13 +3061,14 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d69615674
        // Wait for the read end of the pipe to close.
        pollfd PollFD {};
        PollFD.fd = VForkFDs[0];
-@@ -399,6 +453,20 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -399,6 +453,21 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
    }
  }
  
 +// The guest's exit_group, and the exit of its last thread (SyscallExit)
 +[[noreturn]] static void ExitGroup(FEXCore::Core::CpuStateFrame* Frame, int status) {
 +  Frame->Thread->CTX->FlushAndCloseCodeMap();
++  Frame->Thread->CTX->DrainDiskCache(false);
 +
 +  // Save telemetry if we're exiting.
 +  FEX::HLE::_SyscallHandler->GetSignalDelegator()->SaveTelemetry();
@@ -2976,7 +3083,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d69615674
  uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
    // TLS/DTV teardown is something FEX can't control. Disable glibc checking when we leave a pthread.
    // Since this thread is hard stopping, we can't track the TLS/DTV teardown in FEX's thread handling.
-@@ -413,6 +481,13 @@ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
+@@ -413,6 +482,13 @@ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
  
    ThreadObject->StatusCode = status;
  
@@ -2990,7 +3097,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d69615674
    FEX::HLE::_SyscallHandler->UninstallTLSState(ThreadObject);
  
    if (ThreadObject->ExecutionThread) {
-@@ -585,17 +660,6 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+@@ -585,17 +661,6 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
      return ThreadObject->ThreadInfo.TID;
    });
  

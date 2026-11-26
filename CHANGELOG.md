@@ -6,6 +6,10 @@
   within its range are the ones it was translated with (they go into its guest code's hash), and not while the run has
   learned exit points of its own (rare). zstd starts in 46 instead of 63 ms on the Pi 5; efficiency 87 % (pigz 91, xz
   91, zstd 79 %). Litmus tests with the cache warm, three rounds: none forbidden.
+- The disk cache's stores were lost where a program kept every core busy until it ended: FEX's writer thread runs at
+  nice 19 and its queue was thrown away at the exit, so zstd -T4 missed 424 of its 714 blocks in every run. The queue is
+  written out before `exit_group` and `execve` now; the cache grows in the first run only, and zstd on a small input
+  starts in 33 instead of 59 ms. `TSO_DISKCACHE_LOG=1` prints each lookup of the cache with its state and outcome.
 - **Installing on other distributions.** The one-line installer and a first run are tested on every change in the
   container images of Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Fedora and openSUSE Tumbleweed, as root (the
   installation for every user) and as a user: `tso-arm check`, x86-64 and 32-bit programs with their threads and

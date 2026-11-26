@@ -2975,3 +2975,29 @@ V3D. Under the page protocol two things stood in the way:
 vulkaninfo under the page protocol with both thunks: 2,540 lines, the V3D presenting to Wayland windows, as under full
 ordering; `tests/vkproc.c` and `tests/gpu_info.c` as before. `tests/graphics_check.sh` runs vulkaninfo on a headless
 Weston (`--backend=headless`) with and without `--gpu` and requires a Wayland surface.
+## 62. The disk cache for the awake page protocol, and stores lost at the exit (2026-11-26)
+
+**Awake code.** Code translated with the views awake depends on two things a run learns: the escalations (the
+profile's and the faults') and the instruction kinds learned as exit points. The escalations within a block's range,
+relative to its start, go into its guest code's hash now, at the store and at the lookup (`WithEscalations`,
+`TSOEscalationFingerprint` over the sorted intervals), so a block is taken only where they are the ones it was
+translated with; a store is dropped when the escalations changed while the block was translated (a generation counter
+read before and after). Learned exit kinds are identified by their table entries' addresses, which move with FEX's
+own load address, so they cannot go into the key: awake code is cached only while a run has learned none (rare). The
+litmus tests with the cache warm, three rounds of every variant: none forbidden; forks and the threads test as before.
+
+**Stores lost at the exit.** zstd on a small input missed 424 of its 714 blocks in every run, and every run added the
+same 486 KB to the cache. `TSO_DISKCACHE_LOG=1` (FEX prints each lookup's state and outcome) showed the misses in
+the state without views (zstd's profile says full ordering, so its runs start without them, notes section 59). The
+cache's writer thread runs at nice 19; beside four busy guest threads it got next to no time, and at the exit its
+queue was thrown away: what it had written was found next time, the rest was translated and queued again. The queue
+is written out before `exit_group` and `execve` now (destroying the writer runs its queue to the end and joins it;
+after an `execve`, which may fail, a new writer goes on), under a lock that queueing takes as well, and around forks.
+The cache grows in the first run only; zstd on a small input starts in 33 instead of 59 ms with it, `python3 -c 0`
+in 0.11 s as before; the first run's exit takes some 20 ms longer once.
+
+**Where zstd's start goes now** (`perf record -e cycles:u`, which the Pi's `perf_event_paranoid` 2 allows for
+one's own processes, FEX relinked with symbols): before the drain mostly FEX translating (register allocation 13 %,
+code emission 4 %, the IR 4 %, the decoder 6 %). A program that ends at once takes FEX some 16 ms (native 0.9 ms),
+zstd on a small input 33 ms with the cache; `strace` counts some 2,100 `munmap` per run with or without the cache,
+without views as well (not looked into yet).
