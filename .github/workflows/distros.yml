@@ -1,0 +1,97 @@
+name: Distributions
+
+# The one-line installation and a first run in containers of the distributions people run on 64-bit Arm, from their
+# own images as they come (tests/distro_check.sh): tools/get.sh as root and as a user, then tso-arm version, check,
+# run (threads, litmus tests, 32-bit programs), report, uninstall. Where the prebuilt FEX cannot run (musl, glibc
+# older than 2.35) the installer has to stop and say why. The package is this commit's files with the prebuilt FEX
+# of the newest release.
+
+on:
+  push:
+    # as CI: not for what changes only words or the diagnosis workflows run by hand
+    paths-ignore: ['docs/**', '**.md', '.github/workflows/*-diag.yml', '.github/workflows/profile.yml', '.github/ISSUE_TEMPLATE/**']
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: Package and x86 test programs
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cross compilers
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-x86-64-linux-gnu libc6-dev-amd64-cross gcc-i686-linux-gnu libc6-dev-i386-cross
+
+      - name: x86 test programs
+        run: |
+          B=build/distros
+          mkdir -p $B
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o $B/threads tests/threads.c
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o $B/mp litmus/mp.c
+          x86_64-linux-gnu-gcc -O2 -pthread -o $B/threads-dyn tests/threads.c
+          i686-linux-gnu-gcc -O2 -static -pthread -o $B/threads32 tests/threads.c
+          i686-linux-gnu-gcc -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
+          ls -l $B
+
+      - name: Release package of this commit, with the newest release's prebuilt FEX
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'tso-arm-fex-*-linux-arm64.tar.gz' --dir rel
+          mkdir rel/x && tar -xzf rel/tso-arm-fex-*-linux-arm64.tar.gz -C rel/x
+          P=$(echo rel/x/tso-arm-fex-*)
+          cat $P/BUILD
+          want=$(cat fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)
+          if ! grep -qx "patches $want" $P/BUILD; then
+            # a FEX patch changed since the release: what this workflow checks, whether the prebuilt FEX installs and
+            # starts on each distribution, comes from where it was built (Ubuntu 22.04), not from the patches (CI's)
+            echo "::notice::the newest release's FEX was built with other patches; the package takes it for these ($want)"
+            sed -i "s/^patches .*/patches $want/" $P/BUILD
+          fi
+          mkdir rel/src && cp $P/licenses/FEX rel/src/LICENSE
+          sh tools/package.sh $P dist rel/src
+          tar -cf distros.tar dist build/distros
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distros-${{ github.sha }}
+          path: distros.tar
+          retention-days: 7
+
+  distro:
+    name: ${{ matrix.image }}
+    needs: package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12
+          - image: debian:13
+          - image: ubuntu:22.04
+          - image: ubuntu:24.04
+          - image: ubuntu:26.04
+          - image: fedora:latest
+          - image: opensuse/tumbleweed
+          # the installer stops there and says why
+          - image: alpine:latest
+            expect: musl
+          - image: debian:11
+            expect: old-glibc
+          - image: amazonlinux:2023
+            expect: old-glibc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: distros-${{ github.sha }}
+
+      - name: Installed and run in ${{ matrix.image }}
+        run: |
+          tar -xf distros.tar
+          sh tests/distro_check.sh '${{ matrix.image }}' ${{ matrix.expect }}

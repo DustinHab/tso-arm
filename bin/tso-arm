@@ -311,6 +311,13 @@ elfinfo() {
         }')
         [ "$r" = more ] || break
     done
+    # nothing at all: no od or no awk (openSUSE's container image comes without awk)
+    if [ -z "$r" ]; then
+        for t in od awk; do
+            command -v $t >/dev/null 2>&1 ||
+                die "tso-arm reads programs with od and awk, and $t is missing here (package $([ $t = od ] && echo coreutils || echo gawk))"
+        done
+    fi
     echo "${r:-other other - -}"
 }
 
@@ -449,6 +456,10 @@ cmd_run() {
     for x in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
         eval "[ -n \"\${$x-unset}\" ] || unset $x"
     done
+    # without glibc's dynamic loader (musl) the shell would say no more than "FEX: not found"
+    [ -x /lib/ld-linux-aarch64.so.1 ] || case $F in *-static) ;; *)
+        die "FEX ($F) needs glibc, and this system has none ($(libc)); 'tso-arm check' says more" ;;
+    esac
     exec "$F" "$prog" "$@"
 }
 
@@ -618,12 +629,20 @@ cmd_forget() {
     echo "tso-arm: forgot $(basename "$1")"
 }
 
+# The C library: "glibc 2.39", "musl" (ldd is a bash script of glibc's, musl's prints its version on stderr)
+libc() {
+    g=$(getconf GNU_LIBC_VERSION 2>/dev/null) && echo "$g" && return
+    g=$(/lib/ld-linux-aarch64.so.1 --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/glibc \1/p')
+    [ -n "$g" ] && echo "$g" && return
+    ls /lib/ld-musl-*.so.1 >/dev/null 2>&1 && echo musl || echo "C library unknown"
+}
+
 # What a bug report needs, in one block to paste: versions, machine, kernel, distribution, the root file system, and
 # for a program what tso-arm knows of it and how it ends in each mode
 cmd_report() {
     echo '```'
     cmd_version
-    echo "system: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"), kernel $(uname -r), glibc $(ldd --version 2>/dev/null | sed -n '1s/.* //p')"
+    echo "system: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"), kernel $(uname -r), $(libc)"
     sh "$REPO/tools/board_check.sh" 2>&1 | grep -v '^for \|^to build' | sed 's/  */ /g'
     if has_rootfs; then
         echo "root file system: ${FEX_ROOTFS:-from FEX's configuration}"

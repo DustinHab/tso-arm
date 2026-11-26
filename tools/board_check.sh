@@ -10,17 +10,19 @@ say() { printf '%-30s %s\n' "$1" "$2"; }
 bad() { say "$1" "$2  <- needed"; ok=0; }
 
 [ "$(uname -m)" = aarch64 ] && say "architecture" "aarch64" || bad "architecture" "$(uname -m)"
-ps=$(getconf PAGESIZE)
+ps=$(sh tools/pages_hint.sh --size)
 if [ "$ps" = 4096 ]; then
     say "page size" "4 KB"
 else
-    bad "page size" "$((ps / 1024)) KB (FEX and the views need a 4 KB-page kernel)"
+    bad "page size" "$([ -n "$ps" ] && echo "$((ps / 1024)) KB" || echo unknown) (FEX and the views need a 4 KB-page kernel)"
     sh tools/pages_hint.sh | sed 's/^/    /'
 fi
 cfg=/boot/config-$(uname -r)
 va=$( (cat $cfg 2>/dev/null || zcat /proc/config.gz 2>/dev/null) | sed -n 's/^CONFIG_ARM64_VA_BITS=//p')
 say "virtual address bits" "${va:-unknown} (39 or more: 15 threads with views of their own, more share them in the fallback)"
 model=$(lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
+# without lscpu (util-linux): the cores' part numbers, which lscpu turns into names
+[ -n "$model" ] || model=$(sed -n 's/^CPU part[[:space:]]*: *0x/part 0x/p' /proc/cpuinfo | sort -u | tr '\n' ' ')
 say "cores" "$(nproc), ${model:-unknown model}"
 f=$(grep -m1 '^Features' /proc/cpuinfo)
 has() { echo "$f" | grep -qw "$1" && echo yes || echo no; }
@@ -43,10 +45,19 @@ if command -v clang >/dev/null; then
 fi
 say "FEAT_LSE (atomics)" "$(has atomics)"
 command -v readelf >/dev/null && say "readelf" "found (for 'learn')" || say "readelf" "missing (binutils): only 'learn' needs it"
-gv=$(getconf GNU_LIBC_VERSION 2>/dev/null | sed 's/^glibc //')
+LD=/lib/ld-linux-aarch64.so.1
+gv=$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p')
+[ -n "$gv" ] || [ ! -x "$LD" ] || gv=$("$LD" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
 case $gv in
-2.3[5-9]* | 2.[4-9]* | [3-9].*) say "glibc" "$gv" ;;
-*) say "glibc" "${gv:-unknown} (the prebuilt FEX needs 2.35 or newer; 'tso-arm install' builds it from source here)" ;;
+2.3[5-9]* | 2.[4-9]* | [3-9].*) say "C library" "glibc $gv" ;;
+2.*) say "C library" "glibc $gv (the prebuilt FEX needs 2.35 or newer; 'tso-arm install --source' builds FEX here)" ;;
+*)
+    if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+        bad "C library" "musl (FEX needs glibc: a container of a distribution with glibc runs tso-arm)"
+    else
+        say "C library" "unknown (FEX needs glibc)"
+    fi
+    ;;
 esac
 # what only 'learn' needs, and only a build of FEX from source
 missing=""
@@ -80,6 +91,15 @@ if [ -f "$b" ]; then
     say "FEX with the tso-arm patches" "$fex ($(sed -n 's/^built //p' "$b"))"
 else
     say "FEX with the tso-arm patches" "${fex:-not installed yet ('tso-arm install')}"
+fi
+# whether it starts here: glibc's dynamic loader lists the libraries it lacks, and versions too old
+if [ -n "$fex" ]; then
+    if [ ! -x "$LD" ]; then
+        bad "FEX starts" "no: it needs glibc's dynamic loader ($LD)"
+    else
+        l=$("$LD" --list "$fex" 2>&1 | grep 'not found' | sed 's/^[[:space:]]*//; s/ (required by .*//' | tr '\n' ';')
+        [ -z "$l" ] && say "FEX starts" "yes" || bad "FEX starts" "no: ${l%;}"
+    fi
 fi
 [ $ok = 1 ] && echo "=> tso-arm can run here" || echo "=> missing requirements"
 
