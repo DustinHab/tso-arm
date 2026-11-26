@@ -453,6 +453,12 @@ cmd_run() {
     [ -s "$D/$app/exec" ] || die "$app is not installed with a program to start ('tso-arm app list')"
     rfs=$(rootfs_dir)
     prog=$rfs$(cat "$D/$app/exec")
+    # Discord's package holds only a starter, which fetches the Electron program into ~/.config/discord on its first
+    # start and starts it without the options it was given (its GPU process then tried the sandbox and did not start:
+    # "GPU process isn't usable"): once it is there, that program itself
+    if [ "$app" = discord ] && [ -x "${XDG_CONFIG_HOME:-$HOME/.config}/discord/Discord" ]; then
+        prog=${XDG_CONFIG_HOME:-$HOME/.config}/discord/Discord
+    fi
     if [ "${TSO_ARM_APP_SANDBOX:-0}" != 1 ] && [ -e "$D/$app/chromium" ]; then
         set -- --no-sandbox "$@"
     fi

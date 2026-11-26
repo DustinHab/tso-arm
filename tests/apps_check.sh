@@ -1,11 +1,12 @@
 #!/bin/sh
 # x86 desktop programs that have no Arm build for Linux, as a user gets them: 'tso-arm app install NAME' (from their
 # makers' own addresses), then 'tso-arm app run NAME' on an X server without a screen (Xvfb), up to its first window of
-# 300 by 300 pixels or more, for at most APPS_MINUTES each. Signing in is not tested. Needs the root file system
+# 300 by 300 pixels or more and until it draws in it (once more where the first start only fetched what the program
+# runs: Discord), for at most APPS_MINUTES each. Signing in is not tested. Needs the root file system
 # ('tso-arm rootfs', writable: the programs go into it), Xvfb, xwininfo (x11-utils), import (ImageMagick);
 # dbus-launch where there is one.
 #   tests/apps_check.sh [NAME...]     default: every program 'tso-arm app' knows by name
-#   APPS_MINUTES (default 5); APPS_EXPECT=window: exit status 1 unless each program showed a window; APPS_REMOVE=1:
+#   APPS_MINUTES (default 5); APPS_EXPECT=window: exit status 1 unless each program drew in a window; APPS_REMOVE=1:
 #   at the end every program removed again, and the root file system has to hold the files it held before
 # Into build/apps: summary.md (each program: its version, the install's seconds, the second of its first window and
 # its title), and per program NAME/: install.txt, console.txt, windows-SSSS.txt and shot-SSSS.png every 20 seconds,
@@ -46,8 +47,8 @@ fi
     echo "$(date -u '+%Y-%m-%d %H:%M UTC'), at most $min minutes each"
     echo '```'
     echo
-    echo "| program | version | install | first window | its title |"
-    echo "|---|---|---|---|---|"
+    echo "| program | version | install | first window | drawn | its title |"
+    echo "|---|---|---|---|---|---|"
 } >"$O/summary.md"
 
 failed=""
@@ -66,50 +67,65 @@ for n in "$@"; do
     if [ $st != 0 ]; then
         say "$n: the install failed (exit status $st)"
         tail -n 5 "$P/install.txt"
-        echo "| $n | - | failed | - | - |" >>"$O/summary.md"
+        echo "| $n | - | failed | - | - | - |" >>"$O/summary.md"
         failed="$failed $n"
         continue
     fi
     say "$n $ver installed in $inst s"
-    # the windows there before it (none but the root's own, usually)
-    xwininfo -root -tree 2>/dev/null | grep -o '^ *0x[0-9a-f]*' | tr -d ' ' | sort >"$P/before.txt"
-    setsid "$T" app run "$n" >"$P/console.txt" 2>&1 </dev/null &
-    pid=$!
-    start=$(date +%s)
-    win="" title=""
-    while :; do
-        now=$(($(date +%s) - start))
-        tag=$(printf '%04d' $now)
-        xwininfo -root -tree >"$P/windows-$tag.txt" 2>/dev/null || true
-        # a window that was not there before, 300 by 300 pixels or more, with a title
-        line=$(grep -v -F -f "$P/before.txt" "$P/windows-$tag.txt" | awk '/"[^"]+"/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
-            split($i, a, /[x+-]/); if (a[1] >= 300 && a[2] >= 300) { print; exit } } }')
-        if [ -n "$line" ]; then
-            win=$now
-            title=$(echo "$line" | sed -n 's/^[^"]*"\([^"]*\)".*/\1/p' | tr '|' '/')
-            # a few seconds for it to draw
-            sleep 8
-            import -window root "$P/window.png" 2>/dev/null || true
-            say "$n: a window after $win s: $title"
-            break
-        fi
-        [ $((now % 20)) -lt 5 ] && import -window root "$P/shot-$tag.png" 2>/dev/null || true
-        kill -0 $pid 2>/dev/null || {
-            say "$n ended after $now s without a window"
-            break
-        }
-        [ $now -lt $((min * 60)) ] || {
-            say "$n: no window in $min minutes"
-            break
-        }
-        sleep 5
+    # a second start for a program whose first fetches what it runs (Discord's starter) and then shows nothing
+    for attempt in 1 2; do
+        # the windows there before it (none but the root's own, usually)
+        xwininfo -root -tree 2>/dev/null | grep -o '^ *0x[0-9a-f]*' | tr -d ' ' | sort >"$P/before.txt"
+        setsid "$T" app run "$n" >>"$P/console.txt" 2>&1 </dev/null &
+        pid=$!
+        start=$(date +%s)
+        win="" title="" drawn=""
+        while :; do
+            now=$(($(date +%s) - start))
+            tag=$(printf '%04d' $now)
+            xwininfo -root -tree >"$P/windows-$tag.txt" 2>/dev/null || true
+            # a window that was not there before, 300 by 300 pixels or more, with a title
+            line=$(grep -v -F -f "$P/before.txt" "$P/windows-$tag.txt" | awk '/"[^"]+"/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
+                split($i, a, /[x+-]/); if (a[1] >= 300 && a[2] >= 300) { print; exit } } }')
+            if [ -n "$line" ] && [ -z "$win" ]; then
+                win=$now
+                title=$(echo "$line" | sed -n 's/^[^"]*"\([^"]*\)".*/\1/p' | tr '|' '/')
+                say "$n: a window after $win s: $title"
+            fi
+            if [ -n "$win" ]; then
+                # drawn: the screen holds more than one colour (a uniform one compresses to some hundred bytes)
+                import -window root "$P/window.png" 2>/dev/null || true
+                if [ "$(wc -c <"$P/window.png" 2>/dev/null || echo 0)" -gt 20000 ]; then
+                    drawn=$now
+                    say "$n: drawn after $drawn s"
+                    break
+                fi
+                [ $((now - win)) -lt 90 ] || {
+                    say "$n: its window drew nothing in 90 s"
+                    break
+                }
+            elif [ $((now % 20)) -lt 5 ]; then
+                import -window root "$P/shot-$tag.png" 2>/dev/null || true
+            fi
+            kill -0 $pid 2>/dev/null || {
+                say "$n ended after $now s${win:+ (a window at $win s)}"
+                break
+            }
+            [ $now -lt $((min * 60)) ] || {
+                say "$n: no window in $min minutes"
+                break
+            }
+            sleep 5
+        done
+        kill -TERM -- -$pid 2>/dev/null || true
+        pkill -TERM -s $pid 2>/dev/null || true
+        sleep 3
+        kill -KILL -- -$pid 2>/dev/null || true
+        pkill -KILL -s $pid 2>/dev/null || true
+        wait $pid 2>/dev/null || true
+        [ -n "$drawn" ] && break
+        [ $attempt = 1 ] && say "$n: started once more"
     done
-    kill -TERM -- -$pid 2>/dev/null || true
-    pkill -TERM -s $pid 2>/dev/null || true
-    sleep 3
-    kill -KILL -- -$pid 2>/dev/null || true
-    pkill -KILL -s $pid 2>/dev/null || true
-    wait $pid 2>/dev/null || true
     # only every fourth screenshot of the way there
     k=0
     for p in "$P"/shot-*.png; do
@@ -117,10 +133,10 @@ for n in "$@"; do
         k=$((k + 1))
         [ $((k % 4)) = 0 ] || rm -f "$p"
     done
-    if [ -n "$win" ]; then
-        echo "| $n | $ver | $inst s | $win s | $title |" >>"$O/summary.md"
+    if [ -n "$drawn" ]; then
+        echo "| $n | $ver | $inst s | $win s | $drawn s | $title |" >>"$O/summary.md"
     else
-        echo "| $n | $ver | $inst s | none | - |" >>"$O/summary.md"
+        echo "| $n | $ver | $inst s | ${win:-none}${win:+ s} | no | ${title:--} |" >>"$O/summary.md"
         failed="$failed $n"
         {
             echo
