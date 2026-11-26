@@ -3087,9 +3087,12 @@ is not FEX's signal path: `tests/faultrip.c` does what V8's handler does (the co
 address, the handler sets the instruction pointer to a landing pad with the load's address in r10), 2,000 times, in
 every mode, with the cache and without, and x86-64 Node.js 26 from nodejs.org (V8 with its trap handler, without
 V8's sandbox) catches the same WebAssembly access as a RuntimeError under full ordering and under the page protocol.
-What differs in Chromium is V8's sandbox, whose 1 TB the Pi's 39-bit address space cannot hold (FEX reports 48
-virtual address bits, so V8 tries and falls back to a sandbox it only partly reserves); `tests/chrome_check.sh`
-records whether the trap is caught, on GitHub's runner with 48 bits as well. Not looked into further yet.
+What differs in Chromium is V8's sandbox (and how Chromium installs V8's handler next to its own stack dump on a
+signal). Not the Pi's 39-bit address space, which holds only part of the sandbox's 1 TB: on GitHub's runner with 48
+bits the trap is not caught either (`tests/chrome_check.sh` records it), and FEX reporting the host's 39 bits in
+CPUID (V8 sizes its sandbox by them) made Chromium fail on every page. Only an access past a WebAssembly memory traps
+(V8 relies on guard regions, not on checks, for the accesses within it), which a correct program does not make. Not
+looked into further yet.
 ## 65. FEX's own descriptors, and a program that closes all of its own (2026-11-26)
 
 Steam's check of user namespaces still failed on GitHub's runner with the cache on (the writer ended for `unshare`,

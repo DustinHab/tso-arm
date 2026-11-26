@@ -43,8 +43,8 @@ anew.
   reservations failed), and the profile keeps the fallback, so later runs start without views. The headless shell
   renders a page with V8 and WebAssembly in its first run under the page protocol as under full ordering (4.4 and
   4.1 s on the Pi 5): `tests/chrome_check.sh` in the Compat workflow, `tests/bigmap.c` in CI. Open: a WebAssembly
-  access past its memory ends Chromium's renderer under FEX in every mode on the Pi (x86 Node.js catches it; notes
-  section 64). `tests/faultrip.c` (CI) checks what V8's and Java's handlers do with a fault's context.
+  access past its memory ends Chromium's renderer under FEX in every mode (x86 Node.js catches it; notes section
+  64). `tests/faultrip.c` (CI) checks what V8's and Java's handlers do with a fault's context.
 - Steam, with the fixes above, on GitHub's Arm runner: `tso-arm steam` comes up to its login window with FEX's disk
   cache on (after 5 minutes), and so it does under the page protocol (`TSO_ARM_MODE=tso`, after 7.5) and with
   Chromium's sandbox (`TSO_ARM_STEAM_SANDBOX=1`, after 5), which both showed no window before. `tso-arm steam` keeps
