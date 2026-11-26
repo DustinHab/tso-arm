@@ -190,9 +190,10 @@ that it gets past them:
   directory of its own, and FEX did not reach its server there ("Couldn't connect to FEXServer socket").
 
 Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_DISKCACHE=1`,
-`TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`; the client stopped with
-`surface_linux.cpp: Fatal assert`). Steam started with `tso-arm steam` waits for other x86 programs that run through
-tso-arm to end (one FEX server per user).
+`TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`): zenity's progress windows
+crashed, the 32-bit client stopped at `surface_linux.cpp (2002): Fatal assert`, steamwebhelper's GPU process with a
+segmentation fault, and Steam ended after 5.5 minutes. Steam started with `tso-arm steam` waits for other x86
+programs that run through tso-arm to end (one FEX server per user).
 
 ## Containers
 

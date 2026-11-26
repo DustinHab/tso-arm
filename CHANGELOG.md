@@ -40,6 +40,33 @@
   `tools/deb.sh` builds it from a release package with `dpkg-deb`; a workflow builds it from the newest release,
   has lintian report on it, and installs, runs, removes and purges it on Ubuntu 22.04 and 24.04 and in a Debian 12
   container.
+- **Steam, up to its login window.** `tso-arm steam` fetches Valve's launcher package (`steam-launcher` from
+  repo.steampowered.com, checked against Valve's package index) into `~/.local/share/tso-arm/steam`, without
+  installing it into the system, and starts it; Steam puts its client into `~/.local/share/Steam` and updates it from
+  Valve's servers as on an x86 computer. On GitHub's Arm runner (Xvfb, no GPU) the bootstrap is unpacked after 30 s,
+  the client downloaded and unpacked after 60 s, Steam's runtime container and steamwebhelper (its Chromium) run after
+  2.5 minutes, and the "Sign in to Steam" window appears after about 4; `.github/workflows/steam.yml` requires it, with
+  screenshots, windows, processes and Steam's logs as an artifact (`tests/steam_check.sh`). Signing in and games are
+  not tested. Four things stood in the way under FEX, which `tso-arm steam` steps around for now (docs/GUIDE.md,
+  "Steam"): FEX's disk cache writer is a thread of its own in every process, and Chromium's zygote
+  forks only when it is alone in `/proc/self/task` (`Check failed: IsSingleThreaded`; `tests/singlethread.c` sees two
+  tasks with the cache, one without), so the cache is off; under the page protocol the renderer, GPU and network
+  processes the zygote forks ended within seconds (Chromium's way of forking alone, `tests/forkstack.c`, keeps parent
+  and child apart under both orderings), so Steam runs with FEX's full ordering; with Chromium's sandbox no window
+  came either, so steamwebhelper runs without it; and steamwebhelper's sandboxed zygote, in Steam's runtime container
+  and a network namespace of its own, reached neither of FEX's server sockets, so `tso-arm steam` puts the server's
+  socket into the home directory (`FEX_SERVERSOCKETPATH`), as Valve's own build of FEX for Steam does.
+- `tso-arm userns [allow | remove]`: Steam requires user namespaces (its requirements check runs bubblewrap), which
+  AppArmor restricts on Ubuntu 23.10 and newer to programs with a profile of their own, and under tso-arm the program
+  that asks is FEX: Steam stopped with "Steam now requires user namespaces to be enabled". `sudo tso-arm userns allow`
+  puts an AppArmor profile in place that allows them to tso-arm's FEX alone (as Ubuntu's own profiles do for Chrome and
+  others), `remove` takes it away, `tso-arm check` shows the state, and `tso-arm uninstall` removes the profile of its
+  installation.
+- `tso-arm run` takes scripts (`#!`): FEX runs their interpreter from the root file system (Steam's launcher and
+  `steam.sh`, the start scripts of games); it said "not an x86 Linux program" before.
+- `tso-arm run` unsets an `XDG_RUNTIME_DIR` that names no writable directory (a session without a login manager,
+  another user's after `su`): FEX's server makes a socket there and did not start where it could not, and FEX with it
+  ("FEXServerClient: Failure to setup client").
 
 ## 0.4.7 (2026-11-26)
 
