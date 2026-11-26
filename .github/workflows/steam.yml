@@ -24,9 +24,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: diskcache-off
-            userns: 1
-            steam_env: TSO_ARM_DISKCACHE=0
           - name: diskcache-off-socket-in-home
             userns: 1
             steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
@@ -37,6 +34,10 @@ jobs:
           - name: userns-allow-diskcache-off-socket-in-home
             userns_allow: 1
             steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+          - name: diskcache-off-socket-in-home-cef-disable-gpu
+            userns: 1
+            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
+            steam_args: -cef-disable-gpu
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +45,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd strace \
-            cmake ninja-build clang lld python3
+            cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
           # FEX's thunks, where FEX has to be built (as the release builds them)
           g=$(gcc -dumpversion | cut -d. -f1)
           sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
@@ -62,6 +63,9 @@ jobs:
       - name: FEX (the newest release's prebuilt one where its patches are these, else built)
         if: steps.fex.outputs.cache-hit != 'true'
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
+
+      - name: x86 test program
+        run: mkdir -p build/steam && x86_64-linux-gnu-gcc -O2 -static -o build/steam/singlethread tests/singlethread.c
 
       - name: Machine
         run: bin/tso-arm version && bin/tso-arm check

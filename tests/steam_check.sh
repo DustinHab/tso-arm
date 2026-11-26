@@ -88,6 +88,14 @@ fi
         echo "tso-arm run SCRIPT, XDG_RUNTIME_DIR=/nonexistent/run: exit status $s $(echo "$o" | tail -n 1)"
         sleep 2
     fi
+    # the threads a program of one thread sees in /proc/self/task under tso-arm (Chromium's zygote forks with one
+    # only), with FEX's disk cache and without (tests/singlethread.c, built by the workflow)
+    if [ -x "$R/build/steam/singlethread" ]; then
+        for c in 1 0; do
+            o=$(TSO_ARM_DISKCACHE=$c "$T" run "$R/build/steam/singlethread" 2>&1) && s=0 || s=$?
+            echo "TSO_ARM_DISKCACHE=$c: $o (exit status $s)"
+        done
+    fi
     # what a process in user, network and PID namespaces of its own (Chromium's sandbox) sees of XDG_RUNTIME_DIR
     if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         : >"$XDG_RUNTIME_DIR/steam-check-probe"
@@ -163,14 +171,15 @@ while :; do
     # windows (xwininfo: 0x200007 "Title": ("instance" "class")  1280x800+0+0): the 32-bit client's own (its
     # updater), and steamwebhelper's of 200 by 200 pixels or more (it keeps small hidden ones as well)
     grep -q '("steam" "steam")' "$O/windows-$tag.txt" && mark client-window $now
+    # (its first window, 200 by 200 pixels, waits for the page to draw)
     if awk '/\("steamwebhelper"/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
-            split($i, a, /[x+-]/); if (a[1] >= 200 && a[2] >= 200) f = 1 } } END { exit !f }' "$O/windows-$tag.txt"; then
+            split($i, a, /[x+-]/); if (a[1] > 300 && a[2] > 300) f = 1 } } END { exit !f }' "$O/windows-$tag.txt"; then
         mark webhelper-window $now
         shown=$((shown + 1))
     fi
     grep -qi '"[^"]*sign in[^"]*"' "$O/windows-$tag.txt" && mark login-window $now
-    # once steamwebhelper has shown a window for a minute and a half, or Steam ended, or the time is up
-    [ $shown -ge 4 ] && break
+    # once steamwebhelper has shown a window of its own for a minute, or Steam ended, or the time is up
+    [ $shown -ge 3 ] && break
     kill -0 $pid 2>/dev/null || {
         mark ended $now
         break

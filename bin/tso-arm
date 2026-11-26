@@ -302,7 +302,7 @@ cmd_userns() {
 abi <abi/4.0>,
 include <tunables/global>
 
-profile tso-arm-fex {$dir/FEX,$dir/FEX-static} flags=(unconfined) {
+profile tso-arm-fex $dir/{FEX,FEX-static} flags=(unconfined) {
   userns,
 
   include if exists <local/tso-arm-fex>
