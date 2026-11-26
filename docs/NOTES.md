@@ -3010,3 +3010,12 @@ alone it stayed 0, so every block that addressed its own program's data RIP-rela
 program, a library's code that reaches its own data). Computed for the disk cache as well now: the static program's
 start 6.5 instead of 16.2 ms with the cache, zstd on a small input 19 instead of 59 ms, `python3 -c 0` 0.095 s, `git
 --version` 35 ms. A fault of FEX's own.
+**Two more start-up costs.** Without the views (full ordering, 32-bit programs, programs whose profile says full
+ordering), FEX freed the 8 MB it keeps in front of `brk` one page at a time at every start, 2,048 `munmap` calls:
+one call for the range now (a program that ends at once: 7.1 instead of 12 ms). And the disk cache's entries,
+mapped from the cache file, went through FEX's allocator for 32-bit programs: read with `pread` instead
+(`FEX_DISKCACHEFILEMAPPING=0` from `tso-arm run`), a 32-bit program that ends at once starts in 12 instead of 25 ms
+(21 without the cache). Still open there: some 3,250 failing `mmap` calls at every 32-bit start, 2,560 of them for
+the 128 MB guest stack (`MAP_GROWSDOWN`), whose candidate range moves down a page at a time past what the kernel keeps
+free around such a mapping (its guard gap, which `/proc/self/maps` does not show; marking the mapped pages from it did
+not help, taken out again).
