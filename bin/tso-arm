@@ -21,7 +21,8 @@ usage() {
 usage: tso-arm COMMAND [...]
 
   run [--mode MODE] [--aot LIBRARY | --no-aot] [--gpu] [--stats] PROGRAM [ARGS...]
-        run an x86-64 or 32-bit x86 Linux program. MODE: tso (default; x86 memory order kept, with the page
+        run an x86-64 or 32-bit x86 Linux program, or a script of them (#!: its interpreter from the root file
+        system, as Steam's steam.sh and the start scripts of games). MODE: tso (default; x86 memory order kept, with the page
         protocol and what 'learn' translated; a 32-bit program as with full), full (FEX's own full ordering),
         unordered (fastest, not correct for programs whose threads share data without locks). --aot: a library of translated functions other than the learned one;
         --no-aot: without what 'learn' translated.
@@ -282,7 +283,8 @@ fex() {
 # (static, pie, dynamic, or other), the first 8 bytes of its GNU build ID in hex (- without one), and whether it is an
 # AppImage (appimage or -: "AI" and its type after the ELF magic). The program headers and the build ID note sit at
 # the start of a file: its first KB is read (od is slow: 0.8 ms for it on a Pi 5), the first 64 KB if they lie
-# further.
+# further. A script (#!) is "x86-64 script": FEX runs its interpreter from the root file system (Steam's launcher
+# and steam.sh, the start scripts of games), and the scripts' own programs from there or beside them.
 elfinfo() {
     for lim in 1024 65536; do
         r=$(od -An -v -tu1 -N $lim "$1" 2>/dev/null | LC_ALL=C awk -v last=$([ $lim = 1024 ] && echo 0 || echo 1) '
@@ -290,6 +292,7 @@ elfinfo() {
         function u(o, len,   v, k) { v = 0; for (k = len - 1; k >= 0; k--) v = v * 256 + b[o + k]; return v }
         function out(m, k, id) { print m, k, id, (n > 10 && b[8] == 65 && b[9] == 73 && (b[10] == 1 || b[10] == 2)) ? "appimage" : "-" }
         END {
+            if (n >= 3 && b[0] == 35 && b[1] == 33) { print "x86-64 script - -"; exit }
             if (n < 52 || b[0] != 127 || b[1] != 69 || b[2] != 76 || b[3] != 70 || b[5] != 1) { out("other", "other", "-"); exit }
             c = b[4]; mach = u(18, 2); t = u(16, 2)
             m = mach == 62 ? "x86-64" : mach == 3 ? "i386" : "other"
@@ -416,15 +419,18 @@ cmd_run() {
     case $info in
     *" appimage") export APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-1} ;;
     esac
-    if [ "$k" = dynamic ] && ! has_rootfs; then
-        r=$(shared_rootfs) ||
+    if { [ "$k" = dynamic ] || [ "$k" = script ]; } && ! has_rootfs; then
+        r=$(shared_rootfs) || {
+            [ "$k" = script ] &&
+                die "$prog is a script, and its interpreter ($(sed -n '1s/^#![[:space:]]*//p' "$prog")) comes from an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
             die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
+        }
         export FEX_ROOTFS="$r"
     fi
     F=$(fex)
     # FEX takes the root file system from its server, which lives as long as programs it started run (and a second
     # after): one started with another root file system serves this program too, whatever FEX_ROOTFS says
-    if [ -n "$FEX_ROOTFS" ] && [ "$k" = dynamic ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
+    if [ -n "$FEX_ROOTFS" ] && [ "$k" != static ] && [ "$k" != pie ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
         r=$("$(dirname "$F")/FEXGetConfig" --current-rootfs 2>/dev/null)
         if [ "$(readlink -f "${r:-/nonexistent}")" != "$(readlink -f "$FEX_ROOTFS")" ]; then
             echo "tso-arm: FEX's server serves ${r:-no root file system} until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
@@ -549,6 +555,7 @@ cmd_learn() {
         fi
         echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, and those of its shared libraries (for every program that uses them)"
         ;;
+    script) die "$prog is a script: 'learn' translates a program, the one the script runs" ;;
     *) die "$prog is not an x86 Linux program" ;;
     esac
     for t in python3 clang perf readelf; do
