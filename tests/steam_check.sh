@@ -80,6 +80,14 @@ fi
         done
         sleep 2
     fi
+    # Chromium's way of forking its children (tests/forkstack.c), under the page protocol and FEX's full ordering
+    if [ -x "$R/build/steam/forkstack" ]; then
+        for m in tso full; do
+            o=$("$T" run --mode $m "$R/build/steam/forkstack" 50 2>&1 | tail -n 1) && s=0 || s=$?
+            echo "--mode $m: $o"
+        done
+        sleep 2
+    fi
     # what a process in user, network and PID namespaces of its own (Chromium's sandbox) sees of XDG_RUNTIME_DIR
     if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         : >"$XDG_RUNTIME_DIR/steam-check-probe"

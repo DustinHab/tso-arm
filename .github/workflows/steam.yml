@@ -22,17 +22,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: steam-no-cef-sandbox
+          - name: steam
             userns: 1
-            steam_args: -cef-disable-sandbox
-          - name: steam-no-cef-sandbox-no-gpu
+          - name: steam-mode-full
             userns: 1
-            steam_args: -cef-disable-sandbox -cef-disable-gpu
-          - name: steam-strace
+            steam_env: TSO_ARM_MODE=full
+          - name: steam-mode-full-no-cef-sandbox
             userns: 1
-            strace: 1
-          - name: steam-userns-allow-no-cef-sandbox
-            userns_allow: 1
+            steam_env: TSO_ARM_MODE=full
             steam_args: -cef-disable-sandbox
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +57,11 @@ jobs:
         if: steps.fex.outputs.cache-hit != 'true'
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
 
-      - name: x86 test program
-        run: mkdir -p build/steam && x86_64-linux-gnu-gcc -O2 -static -o build/steam/singlethread tests/singlethread.c
+      - name: x86 test programs
+        run: |
+          mkdir -p build/steam
+          x86_64-linux-gnu-gcc -O2 -static -o build/steam/singlethread tests/singlethread.c
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o build/steam/forkstack tests/forkstack.c
 
       - name: Machine
         run: bin/tso-arm version && bin/tso-arm check
