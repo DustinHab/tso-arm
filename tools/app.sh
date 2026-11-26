@@ -390,8 +390,10 @@ cmd_install() {
         round=0
         while [ $round -lt 8 ]; do
             round=$((round + 1))
-            for b in $(cat "$D/$app/exec") $(grep "^$pdir/[^/]*\$" "$D/$app/files" | grep -v '\.so'); do
-                [ -f "$rfs$b" ] && [ -x "$rfs$b" ] && [ "$(head -c 4 "$rfs$b" | tail -c 3)" = ELF ] || continue
+            # (its programs, and native Node modules: Slack's keyboard module loads libxkbfile, which the root file
+            # system lacks and Slack's package does not name; without it Slack's window stayed black)
+            for b in $(cat "$D/$app/exec") $(grep "^$pdir/[^/]*\$" "$D/$app/files" | grep -v '\.so') $(grep '\.node$' "$D/$app/files"); do
+                [ -f "$rfs$b" ] && [ "$(head -c 4 "$rfs$b" | tail -c 3)" = ELF ] || continue
                 "$T" run "$loader" --library-path "${own%:}" --list "$rfs$b" 2>&1 </dev/null | awk '/=> not found/ { print $1 }
                     /error while loading shared libraries: / { s = $0; sub(/.*error while loading shared libraries: /, "", s); sub(/:.*/, "", s); print s }'
             done | sort -u | grep -vxF -f "$work/tried" >"$work/sonames" || true

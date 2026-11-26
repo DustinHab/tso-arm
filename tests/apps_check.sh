@@ -84,8 +84,9 @@ for n in "$@"; do
             now=$(($(date +%s) - start))
             tag=$(printf '%04d' $now)
             xwininfo -root -tree >"$P/windows-$tag.txt" 2>/dev/null || true
-            # a window that was not there before, 300 by 300 pixels or more, with a title
-            line=$(grep -v -F -f "$P/before.txt" "$P/windows-$tag.txt" | awk '/"[^"]+"/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
+            # a window that was not there before, 300 by 300 pixels or more, with a title (not a starter's setup or
+            # update window: Discord's "Discord Setup" while it fetches Discord)
+            line=$(grep -v -F -f "$P/before.txt" "$P/windows-$tag.txt" | grep -v '"[^"]*\(Setup\|Updat\|Install\)[^"]*"' | awk '/"[^"]+"/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
                 split($i, a, /[x+-]/); if (a[1] >= 300 && a[2] >= 300) { print; exit } } }')
             if [ -n "$line" ] && [ -z "$win" ]; then
                 win=$now
