@@ -16,8 +16,8 @@
   Alpine's, Debian 11's and Amazon Linux 2023's images.
 - The installer finds the newest release through GitHub's release page where GitHub's API refuses (60 requests an
   hour from one address without a token), and says when no CA certificates are installed instead of only that
-  GitHub could not be reached. In a container, where binfmt_misc is read-only, an installation as root no longer
-  stops at its registration.
+  GitHub could not be reached. Where binfmt_misc cannot be written (read-only in a container that sees it), the
+  installation as root goes on without the registration and says so.
 - `tso-arm rootfs` names the command that installs curl and unsquashfs where they are missing (FEX's fetcher said
   only that one of its tools was required); `tso-arm run` says that FEX needs glibc where the shell said "not found".
 - `tso-arm check` and `report`: whether FEX starts here (its libraries found, in versions new enough), the C library

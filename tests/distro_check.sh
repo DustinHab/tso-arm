@@ -10,8 +10,11 @@
 #      installs what is missing; that command runs, without questions
 #   2. the same with curl: the newest release from GitHub, into /opt/tso-arm
 #   3. the package of this checkout over it; tso-arm version, check, run (threads, litmus tests without a forbidden
-#      outcome, 32-bit programs, a dynamically linked one without a root file system), report, uninstall
-# and steps 3 again as a user without privileges (~/.local/share/tso-arm). Exit status 1 if something failed.
+#      outcome, 32-bit programs, a dynamically linked one without a root file system), report, rootfs without its
+#      tools (it names them; that command runs), uninstall
+# and step 3 again as a user without privileges (~/.local/share/tso-arm), without rootfs. Where the installer is to
+# stop, the package's statically linked FEX alone runs the static programs afterwards, for the record. Exit status 1
+# if something failed.
 cd "$(dirname "$0")/.."
 fail() {
     echo "FAIL: $*"
