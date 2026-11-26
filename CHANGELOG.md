@@ -9,6 +9,9 @@
   keyed by that state; code of the awake page protocol depends on what the run shares and is translated anew. A fork
   child reads the cache but does not write it (FEX's cache left its locks to a child that has no writer thread).
   `tso-arm status` shows its size, `tso-arm forget --cache` empties it, `TSO_ARM_DISKCACHE=0` runs without.
+  FEX's cache, turned on, made the translated code itself 9 % slower in two ways (relocatable code everywhere, and
+  displacements and immediates loaded as patchable constants); neither is left, and the efficiency is 86 % (pigz 92,
+  xz 89, zstd 77 %), the page protocol alone 74 %.
 - i386 programs whose C library makes its system calls through AT_SYSINFO (glibc 2.35 and older: Ubuntu 22.04's, Debian
   11's, older games' runtimes) crashed at their first one where FEX has no VDSO (FEX linked statically, as in
   containers; a build without thunks; `tso-arm run` without `--gpu`): the page FEX makes for that entry was not
