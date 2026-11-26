@@ -6,6 +6,28 @@
   within its range are the ones it was translated with (they go into its guest code's hash), and not while the run has
   learned exit points of its own (rare). zstd starts in 46 instead of 63 ms on the Pi 5; efficiency 87 % (pigz 91, xz
   91, zstd 79 %). Litmus tests with the cache warm, three rounds: none forbidden.
+- **Installing on other distributions.** The one-line installer and a first run are tested on every change in the
+  container images of Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Fedora and openSUSE Tumbleweed, as root (the
+  installation for every user) and as a user: `tso-arm check`, x86-64 and 32-bit programs with their threads and
+  litmus tests, `tso-arm report`, `tso-arm uninstall` (`.github/workflows/distros.yml`, `tests/distro_check.sh`;
+  docs/GUIDE.md lists what each needs first). The installer names what a system lacks before it fetches anything,
+  with the command that installs it there (`apt-get install curl ca-certificates`, `zypper install gawk`, `dnf`,
+  `pacman`, `apk`), and after unpacking checks with glibc's dynamic loader that the prebuilt FEX finds its libraries.
+  It failed on a system without awk only when a program ran (openSUSE's image: "not an x86 Linux program"), and on
+  Alpine at the checksum (BusyBox's `sha256sum` has no `--quiet`) instead of at the C library; it says now that the
+  prebuilt FEX needs glibc and that a container of a distribution with glibc runs tso-arm. On Debian 11 and Amazon
+  Linux 2023 (glibc 2.31, 2.34) it says that FEX is built from source there. The tests check these messages in
+  Alpine's, Debian 11's and Amazon Linux 2023's images.
+- The installer finds the newest release through GitHub's release page where GitHub's API refuses (60 requests an
+  hour from one address without a token), and says when no CA certificates are installed instead of only that
+  GitHub could not be reached. Where binfmt_misc cannot be written (read-only in a container that sees it), the
+  installation as root goes on without the registration and says so.
+- `tso-arm rootfs` names the command that installs curl and unsquashfs where they are missing (FEX's fetcher said
+  only that one of its tools was required); `tso-arm run` says that FEX needs glibc where the shell said "not found".
+- `tso-arm check` and `report`: whether FEX starts here (its libraries found, in versions new enough), the C library
+  (musl as well; `ldd` is a bash script of glibc's), the cores' part numbers without lscpu, the virtual address bits
+  from the kernel's configuration where Fedora keeps it, else from the process's own addresses (in a container), and
+  the page size without getconf.
 
 ## 0.4.7 (2026-11-26)
 
