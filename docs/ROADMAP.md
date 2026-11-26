@@ -21,6 +21,7 @@ done.
 | 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | done (0.4.5): `tso-arm wine` under the page protocol |
 | 12 | fork after the views fell back to full ordering | done (0.4.5) |
 | 13 | i386 programs of glibc 2.35 and older crash at their first system call under FEX | done (0.4.6), FEX's own fault |
+| 14 | Start-up: every run translates a program's code anew | done (0.4.6): FEX's disk cache, bound to the page protocol's state |
 
 ## 1. 32-bit x86 programs
 
@@ -228,3 +229,25 @@ alone, so FEX's own tracking knew it as not executable, and FEX does not transla
 program died at its first system call. Done (0.4.6): the page is mapped executable for the guest and writable on the
 host only while its code goes in. `tests/vsyscall32.c` calls through AT_SYSINFO in `tests/ci.sh`; the release's checks
 build their 32-bit programs on Ubuntu 22.04 as well again. A fix for FEX itself.
+
+## 14. Start-up
+
+Every run translated a program's code anew: `python3 -c 0` from the root file system took 0.32 s on the Pi 5, most of
+it FEX translating, and short programs run again and again (shell scripts, build tools, `git`) pay it each time. FEX's older code cache crashed (notes section 56). Since the rebase FEX has a new one, its
+disk cache (`FEX_DISKCACHE`, off by default in FEX): translated blocks keyed by the guest's code (its file and offset,
+or a hash of anonymous code) and FEX's configuration, written by a thread of its own, files locked against other
+processes. Without the patches' views it worked as it was: `python3 -c 0` 0.11 instead of 0.33 s, `git --version`
+0.045 instead of 0.092 s, zstd's whole run some 3 % faster.
+
+What the page protocol makes of a block depends on more than FEX's configuration: with the views asleep (one thread)
+or fallen back to full ordering, guest memory is addressed directly and ordered as configured, alike in every run;
+with the views awake, through the views, ordered as this run's profile and faults escalated it, with the exit points
+it learned. Done (0.4.6): blocks of the first kind are cached under a key with that state (views on, asleep, fallen
+back, exact signals), awake ones are neither looked up nor stored, and an address with a handler of its own (a
+function translated ahead of time, a thunk's trampoline) is never taken from the cache. A fork while the cache's
+writer thread held its locks would have left them held in the child, which also has no writer thread: the locks are
+taken around a fork, and the child reads the cache without writing it (it shares the parent's descriptors and their
+file locks). `tso-arm run` turns the cache on, one directory per build of the patches (FEX's own version number does
+not change with them), and drops the old build's directory with the first run of a new one; `TSO_ARM_DISKCACHE=0`
+runs without it, `tso-arm forget --cache` empties it. Under the page protocol `python3 -c 0` 0.11 instead of 0.32 s;
+the litmus tests with the cache warm, under the page protocol and under full ordering, never forbidden.

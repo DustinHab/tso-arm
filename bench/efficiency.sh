@@ -45,7 +45,7 @@ run_config() {
     # tso-arm's configurations compile FEX's multiblock units of at most 150 instructions, as bin/tso-arm does
     # (FEX's own: 5000; notes section 43)
     # with the profile of earlier runs (the first round writes it)
-    protocol) set -- env FEX_MAXINST=150 TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
+    protocol) set -- env FEX_MAXINST=150 TSO_VIEWS=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$DC $FEXV $X/$w ;;
     # without any profile: everything learned in this run
     protocol-cold) set -- env FEX_MAXINST=150 TSO_VIEWS=1 TSO_VIEWS_PROFILE=none FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 $FEXV $X/$w ;;
     # the hot functions translated ahead of time (aot/), the rest by FEX: without ordering, and with the page
@@ -62,7 +62,7 @@ run_config() {
             set -- env FEX_MAXINST=150 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
         else
             set -- env FEX_MAXINST=150 TSO_VIEWS=1 TSO_VIEWS_PROFILE=$HOME/.cache/tso-arm/$w-aot.prof FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1 \
-                FEX_MULTIBLOCK=0 TSO_AOT=$lib $FEXV $X/$w
+                FEX_MULTIBLOCK=0 TSO_AOT=$lib FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$DC $FEXV $X/$w
         fi
         ;;
     esac
@@ -85,6 +85,10 @@ run_config() {
 trap 'sh tools/freq.sh restore >/dev/null; rm -f /dev/shm/eff-out /dev/shm/eff-time /dev/shm/eff-err' EXIT
 # Profiles start empty for every measurement
 rm -f $HOME/.cache/tso-arm/*.prof
+# FEX's disk cache as `tso-arm run` keeps it, for tso-arm's configurations with a profile (warm after their first
+# round), empty at the start of every measurement; the first run stands for a program's first start, without it
+DC=$PWD/out/diskcache/
+rm -rf "$DC"
 sh tools/freq.sh fix $KHZ >/dev/null
 # The test machine has no fan: start every run below COOL degrees (at most two minutes of waiting)
 cooldown() {
@@ -154,4 +158,5 @@ LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" 
     }
     printf "\nEfficiency = native time / time; 100 %% is native speed. Throttling flags after the run: %s.\n", thr;
     if (fexenv != "") printf "Every FEX configuration ran with %s.\n", fexenv;
+    if (cfgs ~ /(^| )(protocol|aot)( |$)/) printf "tso-arm with a profile ran with FEX'"'"'s disk cache as tso-arm run keeps it (warm after the first round).\n";
   }' $raw | tee out/efficiency.md

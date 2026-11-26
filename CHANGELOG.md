@@ -2,6 +2,13 @@
 
 ## 0.4.6 (not released yet)
 
+- **A program starts faster the second time.** `tso-arm run` turns on FEX's disk cache: code translated in an
+  earlier run of the same program and libraries is loaded instead of translated anew. On a Raspberry Pi 5
+  `python3 -c 0` starts in 0.11 instead of 0.32 s, `git --version` in 0.05 instead of 0.09 s. The patched FEX keeps
+  only code that every run translates alike (without the page protocol, or with its views asleep or fallen back),
+  keyed by that state; code of the awake page protocol depends on what the run shares and is translated anew. A fork
+  child reads the cache but does not write it (FEX's cache left its locks to a child that has no writer thread).
+  `tso-arm status` shows its size, `tso-arm forget --cache` empties it, `TSO_ARM_DISKCACHE=0` runs without.
 - i386 programs whose C library makes its system calls through AT_SYSINFO (glibc 2.35 and older: Ubuntu 22.04's, Debian
   11's, older games' runtimes) crashed at their first one where FEX has no VDSO (FEX linked statically, as in
   containers; a build without thunks; `tso-arm run` without `--gpu`): the page FEX makes for that entry was not

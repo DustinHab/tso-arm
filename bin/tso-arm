@@ -37,6 +37,7 @@ usage: tso-arm COMMAND [...]
         output is compared)
   status [PROGRAM]      what tso-arm has learned
   forget PROGRAM        drop what it learned about PROGRAM
+  forget --cache        empty the disk cache of code FEX translated in earlier runs (TSO_ARM_DISKCACHE=0: none)
   check                 whether this machine can run tso-arm
   install [--source | --generic]
         install FEX with the tso-arm patches into $PREFIX and the command into ~/.local/bin: the prebuilt FEX
@@ -442,6 +443,7 @@ cmd_run() {
         esac
     fi
     thunks "$F"
+    diskcache "$F"
     # an empty XDG_* variable counts as unset (XDG base directory specification); FEX took it as set and looked for
     # its configuration in /fex-emu/, and its server did not start
     for x in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
@@ -473,6 +475,27 @@ thunks() {
     # (LIBGL_ALWAYS_SOFTWARE) makes Zink take a CPU device, llvmpipe again
     [ "$m" = x86-64 ] && export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE-zink}"
     return 0
+}
+
+# FEX's disk cache: what an earlier run translated of the same code is loaded instead of translated anew (on the Pi 5
+# python3 -c 0 from the root file system starts in 115 instead of 330 ms; notes section 60). The patched FEX keeps
+# only code every run translates alike (without the page protocol, or with its views asleep or fallen back), keyed by
+# that state. One directory per build of the patches (BUILD's "patches"): FEX tells its own versions apart, not the
+# patches', and the first run of a new build drops the old one's. TSO_ARM_DISKCACHE=0 turns it off; FEX_DISKCACHE set
+# by hand is left alone, and a FEX without BUILD (not built by tso-arm) gets none.
+diskcache_dir() {
+    h=$(sed -n 's/^patches //p' "$(dirname "$(dirname "$1")")/BUILD" 2>/dev/null)
+    [ -n "$h" ] && echo "$CACHE/fex/$h"
+}
+diskcache() {
+    [ "${TSO_ARM_DISKCACHE:-1}" = 0 ] && return 0
+    [ -n "${FEX_DISKCACHE:-}" ] && return 0
+    d=$(diskcache_dir "$1") || return 0
+    if [ ! -d "$d" ]; then
+        rm -rf "$CACHE/fex"
+        mkdir -p "$d" 2>/dev/null || return 0
+    fi
+    export FEX_DISKCACHE=1 FEX_DISKCACHEPATH="$d/"
 }
 
 # what `learn` translated: the program's library (TSO_AOT, for this program only: programs it starts with execve look
@@ -572,10 +595,20 @@ cmd_status() {
         fi
     done
     echo "page protocol profiles: $(ls "$CACHE"/*.prof 2>/dev/null | wc -l)"
+    if [ "${TSO_ARM_DISKCACHE:-1}" = 0 ]; then
+        echo "disk cache: off (TSO_ARM_DISKCACHE=0)"
+    elif F=$(fex 2>/dev/null) && d=$(diskcache_dir "$F") && [ -d "$d" ]; then
+        echo "disk cache: $(du -sh "$d" | cut -f1) of code FEX translated ($d)"
+    fi
 }
 
 cmd_forget() {
-    [ $# -ge 1 ] || die "forget: which program?"
+    [ $# -ge 1 ] || die "forget: which program? (--cache: the disk cache)"
+    if [ "$1" = --cache ]; then
+        rm -rf "$CACHE/fex"
+        echo "tso-arm: emptied the disk cache"
+        return
+    fi
     # the program's own; libraries of its shared libraries serve other programs as well and stay
     rm -f "$CACHE/aot/$(key "$1").so" "$CACHE/aot/$(key "$1").so.slower" "$CACHE/aot/$(key "$1").so.list" \
         "$CACHE/aot/$(key "$1").so.multiblock" "$CACHE/aot/$(key "$1").so.libs" "$CACHE/aot/$(key "$1").c"
@@ -599,6 +632,13 @@ cmd_report() {
     fi
     F=$(fex 2>/dev/null) && [ -d "$(dirname "$(dirname "$F")")/lib/fex-emu/HostThunks" ] &&
         echo "thunks: built in, $([ "${TSO_ARM_THUNKS:-0}" = 1 ] && echo on || echo "off (--gpu, TSO_ARM_THUNKS=1)")"
+    if [ "${TSO_ARM_DISKCACHE:-1}" = 0 ]; then
+        echo "disk cache: off"
+    elif F=$(fex 2>/dev/null) && d=$(diskcache_dir "$F"); then
+        echo "disk cache: on$([ -d "$d" ] && echo ", $(du -sh "$d" | cut -f1)")"
+    else
+        echo "disk cache: none (a FEX not built by tso-arm)"
+    fi
     for v in $(env | sed -n 's/^\(FEX_[A-Z_]*\|TSO_[A-Z_]*\)=.*/\1/p'); do
         [ "$v=$(printenv "$v")" = FEX_MAXINST=150 ] && continue # tso-arm's own setting
         echo "set: $v=$(printenv "$v")"
