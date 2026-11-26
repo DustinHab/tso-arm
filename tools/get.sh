@@ -25,13 +25,15 @@ die() {
 distro=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-$ID}")
 distro=${distro:-this system}
 
-# The command that installs packages here, for the messages: "sudo apt-get install" and the like (with apt-get update
-# before it where apt has no package lists yet, as in a fresh container)
+# The command that installs packages here, for the messages: "sudo apt-get install" and the like (sudo also where
+# this runs under sudo; apt-get update before it where apt has no package lists yet, as in a fresh container: Ubuntu's
+# images keep them compressed, *_Packages.lz4)
 installer() {
-    s=$([ "$(id -u)" = 0 ] || echo "sudo ")
+    s="sudo "
+    [ "$(id -u)" = 0 ] && [ -z "${SUDO_USER:-}" ] && s=""
     if command -v apt-get >/dev/null 2>&1; then
         u=""
-        ls /var/lib/apt/lists/*_Packages >/dev/null 2>&1 || u="${s}apt-get update && "
+        ls /var/lib/apt/lists/*_Packages* >/dev/null 2>&1 || u="${s}apt-get update && "
         echo "${u}${s}apt-get install"
     elif command -v dnf >/dev/null 2>&1; then
         echo "${s}dnf install"
