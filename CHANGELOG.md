@@ -1,6 +1,10 @@
 # Changes
 
-## 0.4.7 (not released yet)
+## 0.4.7 (2026-11-26)
+
+Vulkan programs under `--gpu` work on Wayland desktops, Raspberry Pi OS's own among them, in the default ordering
+mode as well. Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`
+or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - `--gpu` on a Wayland desktop (Raspberry Pi OS's own): Vulkan programs that draw in a Wayland window or ask whether
   they could (vulkaninfo) stopped (`Too many bits for size_t`): with the root file system's x86 libwayland the host's
