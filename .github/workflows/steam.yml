@@ -3,8 +3,8 @@ name: Steam
 # Valve's Steam client for Linux under tso-arm on an Arm runner, as far as it gets without logging in
 # (tests/steam_check.sh): Valve's launcher package unpacked, started with 'tso-arm run' on Xvfb, the bootstrap, the
 # client's update, steamwebhelper and its windows recorded with screenshots and Steam's logs. Variants: as the runner
-# comes, with user namespaces allowed (pressure-vessel's bubblewrap needs them; Ubuntu 24.04's AppArmor restricts
-# them), and with tso-arm registered with binfmt_misc as well.
+# comes, with user namespaces allowed (Chromium's sandbox in steamwebhelper and pressure-vessel's bubblewrap need
+# them; Ubuntu 24.04's AppArmor restricts them), and that under FEX's full ordering (--mode full) for comparison.
 
 on:
   push:
@@ -24,9 +24,9 @@ jobs:
           - name: as-the-runner-comes
           - name: userns
             userns: 1
-          - name: userns-binfmt
+          - name: userns-full
             userns: 1
-            binfmt: 1
+            args: --mode full
     steps:
       - uses: actions/checkout@v4
 

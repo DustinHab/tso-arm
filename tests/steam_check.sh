@@ -65,6 +65,11 @@ fi
         v=$(sysctl -n $k 2>/dev/null) && echo "$k = $v"
     done
     unshare -Ur true 2>/dev/null && echo "user namespace: can be made" || echo "user namespace: cannot be made (unshare -Ur)"
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        [ -d "$XDG_RUNTIME_DIR" ] && echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" || echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR (no such directory)"
+    else
+        echo "XDG_RUNTIME_DIR unset"
+    fi
     [ -f /proc/sys/fs/binfmt_misc/tso-arm ] && echo "binfmt_misc: $(sed -n 's/^interpreter //p' /proc/sys/fs/binfmt_misc/tso-arm) ($(sed -n 's/^flags: //p' /proc/sys/fs/binfmt_misc/tso-arm))" ||
         echo "binfmt_misc: tso-arm not registered"
     echo '```'
