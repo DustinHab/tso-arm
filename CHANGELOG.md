@@ -28,6 +28,18 @@
   (musl as well; `ldd` is a bash script of glibc's), the cores' part numbers without lscpu, the virtual address bits
   from the kernel's configuration where Fedora keeps it, else from the process's own addresses (in a container), and
   the page size without getconf.
+- **A Debian package.** Each release brings `tso-arm_VERSION_arm64.deb` beside its tarballs (and in `SHA256SUMS`), for
+  Debian, Ubuntu and Raspberry Pi OS: `sudo apt install ./tso-arm_VERSION_arm64.deb` installs for every user as
+  `get.sh | sudo sh` does, into `/opt/tso-arm` with the command as `/usr/bin/tso-arm`, and registers x86 programs
+  with binfmt_misc (programs started directly, x86-64 containers); inside a container, where binfmt_misc is not
+  available, it says so and installs all the same. `apt remove` unregisters them, `apt purge` removes the root file
+  system `sudo tso-arm rootfs` fetched for every user as well. It depends on the C and C++ libraries of the prebuilt
+  FEX (glibc 2.35 or newer), recommends curl and squashfs-tools for `tso-arm rootfs` and suggests what `learn` needs.
+  It is not installed over an installation by `tools/get.sh` in `/opt/tso-arm` (it says how to remove that one),
+  and `tools/get.sh`, `tso-arm update` and `tso-arm uninstall` leave the package's installation to apt.
+  `tools/deb.sh` builds it from a release package with `dpkg-deb`; a workflow builds it from the newest release,
+  has lintian report on it, and installs, runs, removes and purges it on Ubuntu 22.04 and 24.04 and in a Debian 12
+  container.
 
 ## 0.4.7 (2026-11-26)
 

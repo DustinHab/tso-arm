@@ -49,6 +49,12 @@ uninstall` removes it. With `| sudo sh` instead it installs for every user: into
 as well, x86-64 containers too (`docker run --platform linux/amd64 IMAGE`); `sudo tso-arm rootfs` then fetches one
 root file system for all users.
 
+On Debian, Ubuntu and Raspberry Pi OS the same comes as a Debian package, from 0.4.8 on: `sudo apt install
+./tso-arm_VERSION_arm64.deb` with the file from the [releases](https://github.com/DustinHab/tso-arm/releases)
+installs for every user as `| sudo sh` does (into `/opt/tso-arm`, the command as `/usr/bin/tso-arm`, x86 programs
+started directly and in containers through binfmt_misc), a newer release's package updates it, `sudo apt remove
+tso-arm` removes it and `sudo apt purge tso-arm` the root file system for all users as well.
+
 From a git checkout instead: `git clone https://github.com/DustinHab/tso-arm && tso-arm/bin/tso-arm install`
 (FEX prebuilt where the release has one for exactly these patches, otherwise built from source), and `sudo
 bin/tso-arm binfmt register` for programs started directly. `tso-arm check` says whether a machine can run it.

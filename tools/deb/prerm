@@ -1,0 +1,19 @@
+#!/bin/sh
+# tso-arm's Debian package (tools/deb.sh), removed: x86 programs started directly no longer run through it, if it is
+# the one registered with binfmt_misc (another tso-arm installation's registration stays). Not on an upgrade: the new
+# version registers itself when it is configured.
+set -e
+D=/opt/tso-arm
+B=/proc/sys/fs/binfmt_misc
+C=/etc/binfmt.d/tso-arm.conf
+case $1 in
+remove | deconfigure)
+    if grep -qs "^interpreter $D/" "$B/tso-arm" "$B/tso-arm-i386"; then
+        "$D/current/bin/tso-arm" binfmt unregister ||
+            echo "tso-arm: could not unregister x86 programs from binfmt_misc" >&2
+    elif grep -qs ":$D/" "$C"; then
+        rm -f "$C"
+    fi
+    ;;
+esac
+exit 0

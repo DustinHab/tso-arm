@@ -1,0 +1,33 @@
+#!/bin/sh
+# tso-arm's Debian package (tools/deb.sh), purged: what its command made beside the package's own files goes as well,
+# the root file system 'sudo tso-arm rootfs' fetched for every user (/opt/tso-arm/rootfs), files left in a version's
+# directory (Python's caches of a 'learn' run as root), and the binfmt_misc configuration if prerm could not remove
+# it. What 'learn' translated and FEX's disk cache are each user's own, in ~/.cache/tso-arm, and stay.
+set -e
+D=/opt/tso-arm
+C=/etc/binfmt.d/tso-arm.conf
+case $1 in
+remove)
+    if [ -d "$D/rootfs" ]; then
+        echo "tso-arm: the root file system for every user stays in $D/rootfs; 'sudo apt purge tso-arm' removes it"
+    fi
+    ;;
+purge)
+    if grep -qs ":$D/" "$C"; then
+        rm -f "$C"
+    fi
+    # an installation by tools/get.sh made after the package was removed: its directory now, left to it
+    if [ -L "$D/current" ]; then
+        echo "tso-arm: $D holds another installation of tso-arm now ($(readlink "$D/current")), left as it is"
+        exit 0
+    fi
+    rm -rf "$D/rootfs"
+    for d in "$D"/[0-9]*/; do
+        [ -d "$d" ] && rm -rf "$d"
+    done
+    if [ -d "$D" ] && ! rmdir "$D" 2>/dev/null; then
+        echo "tso-arm: $D holds files that are not tso-arm's, left as it is"
+    fi
+    ;;
+esac
+exit 0

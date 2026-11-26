@@ -85,7 +85,13 @@ installed_dir() {
     [ -L "$d/current" ] && [ "$(readlink -f "$d/current")" = "$REPO" ] && echo "$d"
 }
 
+# An installation from the Debian package (tools/deb.sh), which dpkg updates and removes
+packaged() {
+    [ -f "$REPO/PACKAGE" ]
+}
+
 cmd_update() {
+    packaged && die "this tso-arm is installed from its Debian package: a newer release's tso-arm_VERSION_arm64.deb updates it (sudo apt install ./tso-arm_VERSION_arm64.deb; https://github.com/DustinHab/tso-arm/releases)"
     d=$(installed_dir) || {
         if [ -e "$REPO/.git" ]; then
             die "this is a git checkout ($REPO): 'git -C $REPO pull' and then 'tso-arm install' bring it up to date"
@@ -97,7 +103,9 @@ cmd_update() {
 }
 
 cmd_uninstall() {
-    if inst=$(installed_dir) && [ -n "$inst" ]; then
+    if inst=$(installed_dir) && [ -n "$inst" ] && packaged; then
+        echo "tso-arm: $inst is installed from the Debian package: 'sudo apt remove tso-arm' removes it ('sudo apt purge tso-arm' the root file system for every user as well)" >&2
+    elif [ -n "$inst" ]; then
         # installed by tools/get.sh: the whole directory, the command's link, and binfmt_misc where it points here
         [ -w "$inst" ] || die "$inst belongs to another user: 'sudo tso-arm uninstall'"
         if [ "$(id -u)" = 0 ] && grep -qs "$inst/" /proc/sys/fs/binfmt_misc/tso-arm /proc/sys/fs/binfmt_misc/tso-arm-i386; then

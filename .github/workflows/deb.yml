@@ -1,0 +1,159 @@
+name: Debian package
+
+# The .deb that tools/deb.sh makes, from the newest release's package: with this commit's files where that release's
+# FEX was built from this commit's patches (the next release's package then), as it is otherwise. lintian reports on
+# it; on both Arm runners it is not installed over an installation by tools/get.sh, then installed, run, removed and
+# purged; in a Debian 12 container, where binfmt_misc is missing, it is installed and run.
+
+on:
+  push:
+    # not for what changes only words or the diagnosis workflows run by hand
+    paths-ignore: ['docs/**', '**.md', '.github/workflows/*-diag.yml', '.github/workflows/profile.yml', '.github/ISSUE_TEMPLATE/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deb:
+    name: Debian package on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04-arm, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+
+      - name: The newest release's package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir rel dist
+          gh release download --repo DustinHab/tso-arm -p 'tso-arm-[0-9]*-linux-arm64.tar.gz' -D rel
+          pkg=$(ls rel/tso-arm-[0-9]*-linux-arm64.tar.gz)
+          tar -xzf "$pkg" -C rel
+          p=$(ls -d rel/tso-arm-[0-9]*/)fex/prebuilt
+          if grep -qx "patches $(cat fex/patches/*tso-arm-stage*.patch | sha256sum | cut -c1-16)" "$p/BUILD"; then
+            # its FEX with this commit's files, put together as the release workflow does
+            mkdir rel/fex-src && cp "$p/licenses/FEX" rel/fex-src/LICENSE
+            sh tools/package.sh "$p" dist rel/fex-src
+            echo "OWN=1" >>"$GITHUB_ENV"
+            echo "this commit's files with the FEX of $(basename "$pkg")"
+          else
+            cp "$pkg" dist/
+            echo "$(basename "$pkg") as it is: its FEX was built from other patches than this commit has"
+          fi
+          echo "TARBALL=$(ls "$PWD"/dist/tso-arm-[0-9]*-linux-arm64.tar.gz)" >>"$GITHUB_ENV"
+
+      - name: Debian package
+        run: |
+          sh tools/deb.sh "$TARBALL" deb
+          echo "DEB=$(ls "$PWD"/deb/tso-arm_*_arm64.deb)" >>"$GITHUB_ENV"
+
+      - name: lintian (a report)
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          sudo apt-get install -y -q lintian
+          lintian "$DEB" >lintian.txt 2>&1 || true
+          cat lintian.txt
+          { echo '### lintian'; echo '```'; sed 's/ \[.*//' lintian.txt | sort | uniq -c | sort -rn; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Not installed over an installation by tools/get.sh
+        run: |
+          v=$(dpkg-deb -f "$DEB" Version)
+          sudo TSO_ARM_TARBALL="$TARBALL" sh tools/get.sh
+          if sudo apt-get install -y -q "$DEB"; then
+            echo "the package was installed over the installation by tools/get.sh"
+            exit 1
+          fi
+          if dpkg-query -W -f='${Status}\n' tso-arm 2>/dev/null | grep -q ' installed$'; then exit 1; fi
+          test "$(readlink /opt/tso-arm/current)" = "$v"
+          grep -qx 'interpreter /opt/tso-arm/current/fex/prebuilt/bin/FEX-static' /proc/sys/fs/binfmt_misc/tso-arm
+          /usr/local/bin/tso-arm version
+          sudo /usr/local/bin/tso-arm uninstall
+          test ! -e /opt/tso-arm && test ! -e /usr/local/bin/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm
+
+      - name: Installed from the Debian package
+        run: |
+          v=$(dpkg-deb -f "$DEB" Version)
+          sudo apt-get install -y -q "$DEB"
+          dpkg-query -W -f='${Status}\n' tso-arm | grep -qx 'install ok installed'
+          test "$(command -v tso-arm)" = /usr/bin/tso-arm
+          test "$(readlink -f /usr/bin/tso-arm)" = "/opt/tso-arm/$v/bin/tso-arm"
+          test "$(readlink /opt/tso-arm/current)" = "$v"
+          tso-arm version
+          tso-arm version | grep -q '^FEX: .*, patches '
+          tso-arm check
+          tso-arm check | grep -qx '=> tso-arm can run here'
+          tso-arm binfmt
+          for e in tso-arm tso-arm-i386; do
+            grep -qx 'interpreter /opt/tso-arm/current/fex/prebuilt/bin/FEX-static' /proc/sys/fs/binfmt_misc/$e
+          done
+          grep -q '^flags: PF' /proc/sys/fs/binfmt_misc/tso-arm
+          grep -q ':/opt/tso-arm/current/fex/prebuilt/bin/FEX-static:PF$' /etc/binfmt.d/tso-arm.conf
+
+      - name: An x86-64 program, started directly and through tso-arm run
+        run: |
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o threads tests/threads.c
+          ./threads 4 | tee direct.txt
+          grep -q 'wrong 0' direct.txt
+          tso-arm run ./threads 4 | tee run.txt
+          grep -q 'wrong 0' run.txt
+
+      - name: tools/get.sh as root leaves the package's installation to apt
+        run: |
+          if sudo TSO_ARM_TARBALL="$TARBALL" sh tools/get.sh; then
+            echo "tools/get.sh installed over the package"
+            exit 1
+          fi
+          sudo dpkg --verify tso-arm
+
+      - name: tso-arm update and uninstall leave it to apt
+        if: env.OWN == '1'
+        run: |
+          if sudo tso-arm update; then
+            echo "tso-arm update went on"
+            exit 1
+          fi
+          sudo tso-arm uninstall
+          test -L /opt/tso-arm/current && test -e /usr/bin/tso-arm
+          sudo dpkg --verify tso-arm
+
+      - name: Removed, then purged
+        run: |
+          other=$(tso-arm binfmt | grep -c 'another handler' || true)
+          # what 'sudo tso-arm rootfs' leaves beside the package's files (not fetched here: 2 GB)
+          sudo mkdir -p /opt/tso-arm/rootfs/RootFS/Ubuntu_24_04/usr
+          sudo apt-get remove -y -q tso-arm
+          test ! -e /proc/sys/fs/binfmt_misc/tso-arm && test ! -e /proc/sys/fs/binfmt_misc/tso-arm-i386
+          test ! -e /etc/binfmt.d/tso-arm.conf
+          test ! -e /usr/bin/tso-arm && test ! -e /opt/tso-arm/current
+          test -d /opt/tso-arm/rootfs
+          if [ "$other" = 0 ] && ./threads 4 2>/dev/null; then
+            echo "an x86-64 program still started directly after the removal"
+            exit 1
+          fi
+          dpkg-query -W -f='${Status}\n' tso-arm | grep -qx 'deinstall ok config-files'
+          sudo apt-get purge -y -q tso-arm
+          test ! -e /opt/tso-arm
+          if dpkg-query -W -f='${Status}\n' tso-arm 2>/dev/null | grep -q 'config-files'; then exit 1; fi
+
+      - name: In a Debian 12 container, without binfmt_misc
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          # what Depends brings, nothing it recommends
+          docker run --rm -v "$PWD:/w:ro" -w /w debian:bookworm sh -c '
+            set -e
+            apt-get update -q >/dev/null
+            apt-get install -y -q --no-install-recommends /w/deb/tso-arm_*_arm64.deb >/tmp/apt.txt 2>&1 || { cat /tmp/apt.txt; exit 1; }
+            cat /tmp/apt.txt
+            grep -q "binfmt_misc is not available here" /tmp/apt.txt
+            tso-arm version
+            tso-arm run ./threads 4 | tail -n 1 | grep "wrong 0"
+            apt-get purge -y -q tso-arm >/dev/null
+            test ! -e /opt/tso-arm'
