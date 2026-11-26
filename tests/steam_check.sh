@@ -7,8 +7,9 @@
 # xwininfo (x11-utils), import (ImageMagick), dpkg-deb; dbus-launch where there is one.
 #   tests/steam_check.sh NAME [OPTIONS of tso-arm run]        tests/steam_check.sh gpu --gpu
 #   STEAM_MINUTES (default 20); STEAM_KEEP=1 keeps the Steam installation of an earlier run (~/.local/share/Steam);
-#   STEAM_ARGS: options for Steam (-cef-...); STEAM_STRACE=1: the system calls of every process that failed, as the
-#   host's strace sees them (FEX's own), into strace.txt
+#   STEAM_ARGS: options for Steam (-cef-...); STEAM_ENV: options of env for it (-u XDG_RUNTIME_DIR); STEAM_STRACE=1:
+#   the system calls of every process that failed, and how each process ended, as the host's strace sees them (FEX's
+#   own), into strace.txt
 # Into build/steam/NAME: summary.md (the stages with the second each was reached, the first errors), console.txt
 # (stdout and stderr of the launcher and what it started), logs/ (Steam's), shot-SSSS.png, windows-SSSS.txt and
 # ps-SSSS.txt (with the sockets of FEX's server) every 30 seconds. Exit status 0 when it ran; how far Steam got is in
@@ -87,6 +88,15 @@ fi
         echo "tso-arm run SCRIPT, XDG_RUNTIME_DIR=/nonexistent/run: exit status $s $(echo "$o" | tail -n 1)"
         sleep 2
     fi
+    # what a process in user, network and PID namespaces of its own (Chromium's sandbox) sees of XDG_RUNTIME_DIR
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        : >"$XDG_RUNTIME_DIR/steam-check-probe"
+        o=$(unshare --user --map-current-user --net --pid --fork sh -c "ls -ld '$XDG_RUNTIME_DIR' && ls '$XDG_RUNTIME_DIR' | head -n 5" 2>&1 | tr '\n' ' ') || true
+        echo "in new user (uid kept), network and PID namespaces: $o"
+        o=$(unshare -Urnp --fork sh -c "ls -ld '$XDG_RUNTIME_DIR' && ls '$XDG_RUNTIME_DIR' | head -n 5" 2>&1 | tr '\n' ' ') || true
+        echo "the same as root of the user namespace: $o"
+        rm -f "$XDG_RUNTIME_DIR/steam-check-probe"
+    fi
     echo '```'
 } >"$O/summary.md"
 
@@ -113,9 +123,9 @@ fi
 start=$(date +%s)
 wrap=""
 if [ "${STEAM_STRACE:-0}" = 1 ]; then
-    wrap="strace -f -Z -qq --seccomp-bpf -e signal=none -e trace=%process,%memory,%ipc,%network -o $O/strace.txt"
+    wrap="strace -f -Z -q --seccomp-bpf -e signal=none -e trace=%process,%memory,%ipc,%network -o $O/strace.txt"
 fi
-setsid $wrap "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
+setsid $wrap env ${STEAM_ENV:-} "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
 pid=$!
 say "started: ${wrap:+$wrap }tso-arm run $opts $L/usr/lib/steam/bin_steam.sh ${STEAM_ARGS:-}(session $pid), at most $min minutes"
 
@@ -209,6 +219,12 @@ done
         echo
         echo '```'
         sed -n 's/^[0-9][0-9]* *\([a-z0-9_]*\)(.*= -1 \([A-Z0-9]*\).*/\1 \2/p' "$O/strace.txt" | sort | uniq -c | sort -rn | head -n 30
+        echo '```'
+        echo
+        echo "How processes ended other than with exit status 0 (how often):"
+        echo
+        echo '```'
+        grep -E '\+\+\+ (killed by|exited with [1-9])' "$O/strace.txt" | sed 's/^[0-9]* *//' | sort | uniq -c | sort -rn | head -n 20
         echo '```'
         echo
         echo "Of them clone, clone3, fork, vfork (the first 20):"
