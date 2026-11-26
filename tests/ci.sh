@@ -51,6 +51,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/singlethread tests/singlethread.c
     $CC -O2 -static -pthread -o $B/userns tests/userns.c
     $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
+    $CC -O2 -static -o $B/faultrip tests/faultrip.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -180,6 +181,13 @@ for m in tso full unordered; do
         out=$(last env TSO_VIEWS_PROFILE=none timeout 120 $T run --mode $m $B/bigmap $a) || fail "bigmap $a, $m: $out"
         ok "$m: $out${a:+ (threads first)}"
     done
+done
+
+# a fault's instruction pointer in the guest's handler, changed there to a landing pad (V8's WebAssembly traps,
+# Java's implicit null checks), in every mode
+for m in tso full unordered; do
+    out=$(last timeout 60 $T run --mode $m $B/faultrip 2000) || fail "faultrip, $m: $out"
+    ok "$m: $out"
 done
 
 # a program's own threads in /proc/self/task and no thread of FEX's (its disk cache's writer, on here as it is by

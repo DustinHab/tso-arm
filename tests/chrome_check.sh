@@ -80,4 +80,25 @@ run "page protocol, profile learned" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE="$p"
 run "page protocol, with the profile" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE="$p"
 run "FEX's full ordering" TSO_ARM_MODE=full
 rm -f "$p"
+
+# for the record, not required (notes section 64): a WebAssembly access past its memory, which V8 catches with its
+# handler of SIGSEGV and turns into a RuntimeError
+cat >"$D/trap.html" <<'EOF'
+<html><body><p id=out>not run</p><script>
+const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,6,1,2,108,100,0,0,10,9,1,7,0,32,0,40,2,0,11]);
+const ld = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.ld;
+let w; try { ld(65536 * 4); w = 'no trap'; } catch (e) { w = (e instanceof WebAssembly.RuntimeError) ? 'trap' : 'other: ' + e; }
+document.getElementById('out').textContent = 'wasm ' + w;
+</script></body></html>
+EOF
+rm -rf "$D/profile-trap"
+st=0
+TSO_ARM_MODE=full timeout 60 "$T" run "$S" --no-sandbox --user-data-dir="$D/profile-trap" --dump-dom "file://$D/trap.html" \
+    >"$D/trap.out" 2>"$D/trap.err" || st=$?
+if grep -q 'wasm trap' "$D/trap.out"; then
+    echo "  (for the record) WebAssembly's trap under full ordering: caught"
+else
+    echo "  (for the record) WebAssembly's trap under full ordering: not caught (exit status $st; $(grep -m1 'Received signal' "$D/trap.err"))"
+fi
+rm -rf "$D/profile-trap"
 exit $fail
