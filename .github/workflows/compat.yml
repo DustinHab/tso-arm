@@ -85,6 +85,16 @@ jobs:
           cat graphics.txt
           { echo; echo '```'; cat graphics.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s
+      # Chromium: Google's headless shell (Chrome for Testing) renders a page with V8's compilers and WebAssembly,
+      # under the page protocol (its first run falls back: Chromium reserves more than the views' window holds) and
+      # under full ordering
+      - name: Chromium (Google's headless shell)
+        run: |
+          s=0
+          sh tests/chrome_check.sh >chrome.txt 2>&1 || s=$?
+          cat chrome.txt
+          { echo; echo '```'; cat chrome.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $s
       # rare failures: multi-threaded programs of it, 5 runs each in three settings, outputs against full ordering
       - name: Multi-threaded programs, many runs
         run: |

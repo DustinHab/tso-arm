@@ -49,6 +49,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/forkeintr tests/forkeintr.c
     $CC -O2 -static -pthread -o $B/lastexit tests/lastexit.c
     $CC -O2 -static -pthread -o $B/singlethread tests/singlethread.c
+    $CC -O2 -static -pthread -o $B/userns tests/userns.c
+    $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -161,6 +163,23 @@ for m in tso full unordered; do
         [ $st = 7 ] || fail "lastexit $a, $m: exit status $st (7 expected): $out"
     done
     ok "$m: lastexit: the last thread's exit ends the process"
+done
+
+# unshare(CLONE_NEWUSER) with FEX's disk cache on: allowed (or not permitted here), not EINVAL for FEX's writer thread;
+# with a second thread of the program's own EINVAL, as natively
+for a in "" thread; do
+    out=$(timeout 60 $T run $B/userns $a 2>&1) || fail "userns $a: $out"
+    ok "$out"
+done
+
+# mappings larger than the views' window (Chromium reserves 32 GB at its start), made after the fallback outside it:
+# written, discarded, forked, unmapped in parts, grown, code in them rewritten, threads counting in them, in every
+# mode, alone and with threads running before (the views awake); no profile, so that each run falls back itself
+for m in tso full unordered; do
+    for a in "" threads; do
+        out=$(last env TSO_VIEWS_PROFILE=none timeout 120 $T run --mode $m $B/bigmap $a) || fail "bigmap $a, $m: $out"
+        ok "$m: $out${a:+ (threads first)}"
+    done
 done
 
 # a program's own threads in /proc/self/task and no thread of FEX's (its disk cache's writer, on here as it is by

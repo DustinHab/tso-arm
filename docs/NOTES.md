@@ -3020,6 +3020,7 @@ the 128 MB guest stack (`MAP_GROWSDOWN`), whose candidate range moves down a pag
 free around such a mapping (its guard gap, which `/proc/self/maps` does not show). The loop was FEX's ELF loader's,
 which tried the stack's hint a page lower after each failure: in steps of 256 pages now, 799 `mmap` calls at a
 32-bit start instead of 3,349.
+
 ## 63. FEX's own threads in /proc/self/task (2026-11-26)
 
 Chromium's zygote (Steam's steamwebhelper) forks only when it is alone in its process:
@@ -3032,3 +3033,54 @@ is this process's `/proc/self/task` (device and inode of a `stat` of it, looked 
 links than three). A listing of the directory (`getdents64`) and the `Threads:` line of `/proc/self/status` still
 show the writer: nothing seen to depend on them. `tests/singlethread.c` counts with all three calls, alone and with a
 second thread: 1 and 2 in both orderings, with the cache and without.
+
+**User namespaces.** With the cache on for Steam, Steam's check of user namespaces failed on GitHub's runner ("Steam
+now requires user namespaces to be enabled"): Linux lets only a process without other threads enter a new user
+namespace (`unshare(CLONE_NEWUSER)`, `setns` into one: EINVAL, checked before the permission), and the writer is such
+a thread. For those two calls, where the guest has one thread, the writer ends now (its queue written out; the call
+waits until the kernel has let the thread go from the thread group, which `/proc/self/task` read on the host shows,
+at most 50 ms) and a new one starts after the call; in a fork's child, which has no writer, nothing changes.
+`tests/userns.c`: allowed or not permitted (AppArmor), never EINVAL, with one thread; EINVAL with a second, as
+natively. `unshare -Ur` of the root file system runs with the cache as without, given a server socket FEX reaches in
+the new namespace (`FEX_SERVERSOCKETPATH`, as `tso-arm steam` sets it).
+
+## 64. Chromium under the page protocol: mappings larger than the window (2026-11-26)
+
+Google's headless shell (Chrome for Testing 158) under the page protocol ended after 0.2 s with a breakpoint trap,
+under full ordering it rendered the page in 5.5 s. The views' log (`TSO_VIEWS_LOG`) showed the last `mmap` before
+the end: 32 GB without access, with a hint, which failed with ENOMEM. That is PartitionAlloc reserving its pools at
+the start (Chromium's allocator; it stops with a trap when it cannot), and the guest window is 16 GB, 12 of them for
+mappings (section 10). V8's sandbox and Oilpan's heap cage reserve as much again later.
+
+**Outside the window.** A mapping the window has no room for (non-fixed with no gap left, or fixed beyond the window)
+now starts the fallback to full ordering, whose translated code addresses guest memory directly, and the host makes
+the mapping where it has room, as without views (`MmapOutside`). No view maps it; `Outside` keeps such mappings apart
+from the window's ranges: `munmap`, `mprotect` and `madvise` (natively, `MADV_DONTNEED` included) work on them,
+`mremap` moves and grows them outside the window, a fixed mapping goes only over memory of the guest's own there or
+where nothing is (never over the views' reservations or FEX's memory: `MAP_FIXED_NOREPLACE` otherwise), a fork
+copies them as the kernel does, and FEX's write protection of code it translated from them works as without views (a
+fault there is not taken for an access through a view to the host's memory, which repeated the instruction for ever).
+With the views asleep (one thread) the translated code addresses guest memory directly already and stays; awake, all
+of it goes, and every other thread is sent out of its old block before the guest has the new address (the fork's
+hold signal, whose handler now traps the boundaries of the block the thread runs in): an old block's access through a
+view to the new memory would reach whatever lies at the view's base plus that address. The profile keeps the
+fallback, so later runs start without views.
+
+**The views' address space.** With that, the renderer stopped at "Oilpan: Out of memory (Oilpan: CagedHeap
+reservation.)": on the Pi's 39-bit address space (512 GB) the views of 11 slots take three quarters, and what was
+left did not hold Chromium's reservations. In the fallback nobody needs the views of a slot without a thread: they go
+back to the host when it starts, and a new thread shares a slot in use (`ShareSlot`, sound in the fallback, section
+26) instead of taking a free one.
+
+Chromium now renders the page under the page protocol in its first run as under full ordering (4.4 and 4.1 s on the
+Pi; the process falls back at once, and the renderer, GPU and network processes of its zygote start from that).
+`tests/chrome_check.sh` (Compat workflow) fetches the headless shell, renders a page with V8's compilers and
+WebAssembly in the first run, with the profile and under full ordering; `tests/bigmap.c` (CI) does what Chromium does
+with such a mapping, in every mode, alone and with threads running before.
+
+**Open: WebAssembly's trap.** A WebAssembly access past its memory (which V8 compiles without a bounds check and
+catches with its handler of SIGSEGV) ends the renderer under FEX in every mode, without views as well. The fault is at
+the expected address (the memory's base plus the index, `SEGV_ACCERR`), but the instruction pointer in the context
+FEX hands the guest's handler is not the faulting instruction in V8's code (an address outside the program and V8's
+code, with the same low twelve bits in every run): V8's handler does not take the fault as its own and passes it on to
+Chromium's crash handler. Not looked into further yet.

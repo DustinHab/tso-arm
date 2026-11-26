@@ -90,6 +90,10 @@ tso-arm run ./program args...   # an x86 program, as it would run on an x86 comp
   user, `sudo tso-arm rootfs` fetches one for all of them.
 - **AppImages** run as they are: `tso-arm run ./App.AppImage`.
 - **32-bit programs** run too, a little slower than 64-bit ones (every memory access is ordered for them).
+- **Chromium and programs built on it** (Electron programs, Steam's windows) run as well: Google's headless Chrome
+  renders pages under tso-arm in all modes. They reserve more memory than the page protocol's window holds and run
+  with FEX's full ordering, which tso-arm switches to by itself at their start (and from the first start on after
+  that). Chromium's sandbox needs user namespaces (see Steam below); `--no-sandbox` runs without it.
 - With the installation for every user (or `sudo tso-arm binfmt register`), x86 programs start directly:
   `./program`, from scripts, from a file manager.
 - **The second start is faster.** FEX keeps the code it translated in a cache on disk (`~/.cache/tso-arm/fex`), and a

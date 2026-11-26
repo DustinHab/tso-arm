@@ -9,6 +9,20 @@
   `stat`, `fstatat` and `statx` of the directory, for 32-bit programs as well; `tso-arm steam` keeps the cache on, and
   Steam's programs start faster from their second run. `tests/singlethread.c` (in CI) counts with all three, with one
   thread and with two.
+- User namespaces with FEX's disk cache: Linux lets only a process with one thread enter a new user namespace, and
+  the cache's writer made `unshare(CLONE_NEWUSER)` fail with EINVAL (Steam: "Steam now requires user namespaces to be
+  enabled"). FEX ends the writer for `unshare` and `setns` into a user namespace and starts a new one after the call
+  (`tests/userns.c` in CI).
+- **Chromium and programs built on it under the page protocol.** Chromium's allocator reserves 32 GB at its start,
+  more than the page protocol's 16 GB guest window holds, and Chromium stopped at once with a breakpoint trap (Google's
+  headless shell; Steam's steamwebhelper under the page protocol, Electron programs). A mapping the window has no room
+  for now starts the fallback to full ordering and is made outside the window, as without views (`munmap`,
+  `mprotect`, `madvise`, `mremap`, forks and self-modifying code in it work as natively), the views of slots without
+  a thread go back to the host then (on a 39-bit address space they took three quarters, and Chromium's next
+  reservations failed), and the profile keeps the fallback, so later runs start without views. The headless shell
+  renders a page with V8 and WebAssembly in its first run under the page protocol as under full ordering (4.4 and
+  4.1 s on the Pi 5): `tests/chrome_check.sh` in the Compat workflow, `tests/bigmap.c` in CI. Open: a WebAssembly
+  access past its memory ends the renderer under FEX in every mode (notes section 64).
 
 ## 0.4.9 (2026-11-26)
 
