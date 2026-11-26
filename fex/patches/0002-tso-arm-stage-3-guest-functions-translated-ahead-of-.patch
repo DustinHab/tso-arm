@@ -1,4 +1,4 @@
-From 12f58b52e989ee162de5d2695bc32f4827552b02 Mon Sep 17 00:00:00 2001
+From ae485ed00e22dfbdb092968254e7006d60c18be3 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -44,7 +44,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  106 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  105 +-
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  217 ++-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  236 +++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1238 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  184 ++-
@@ -55,7 +55,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 51 files changed, 4165 insertions(+), 294 deletions(-)
+ 51 files changed, 4184 insertions(+), 294 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
@@ -3117,7 +3117,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..1d039129e298ac61f025baf5b81a187c
  }
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..c420b4eb21a6d2caadb218a9d1bd302c81ad07eb 100644
+index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..35d2ed5a56a9e03491781f9ec4adb63400b70d6d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -3476,6 +3476,32 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..c420b4eb21a6d2caadb218a9d1bd302c
    return Result;
  }
  
+@@ -856,6 +1033,25 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
+         } else if (CheckForElfFileDiskCache) {
+           auto ELFResult = ReadELFHeaders(fd, std::span {reinterpret_cast<std::byte*>(addr), length});
+           Resource->MappedFile->FileId = ComputeCodeMapId(Resource->MappedFile->Filename, &ELFResult.BuildID);
++          // tso-arm: the image's extent, as for the code cache above: the disk cache's relocation filter lets a block's
++          // references into the same image (its data, its read-only data) through only with it. Without it every block
++          // that addressed its own program's data RIP-relatively was not stored: a static program's start missed 91 of
++          // its 165 blocks in every run.
++          uint64_t MinAddress = 0;
++          uint64_t MaxAddress = 0;
++          for (auto& ProgramHeader : ELFResult.ProgramHeaders) {
++            if (ProgramHeader.p_type == PT_LOAD) {
++              if (!MinAddress && !MaxAddress) {
++                MinAddress = ProgramHeader.p_vaddr;
++                MaxAddress = ProgramHeader.p_vaddr + ProgramHeader.p_memsz;
++              }
++              MinAddress = std::min(MinAddress, ProgramHeader.p_vaddr);
++              MaxAddress = std::max(MaxAddress, ProgramHeader.p_vaddr + ProgramHeader.p_memsz);
++            }
++          }
++          if (MaxAddress > MinAddress) {
++            Resource->MappedFile->MappedSize = MaxAddress - MinAddress;
++          }
+         } else {
+           Resource->MappedFile->FileId = ComputeCodeMapId(Resource->MappedFile->Filename);
+         }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
 index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba57678b1b1 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp

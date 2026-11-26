@@ -3001,3 +3001,12 @@ one's own processes, FEX relinked with symbols): before the drain mostly FEX tra
 code emission 4 %, the IR 4 %, the decoder 6 %). A program that ends at once takes FEX some 16 ms (native 0.9 ms),
 zstd on a small input 33 ms with the cache; `strace` counts some 2,100 `munmap` per run with or without the cache,
 without views as well (not looked into yet).
+**The relocation filter and the image's extent.** After the drain, a static program that ends at once still missed
+91 of its 165 blocks in every run, and the cache did not grow: they were never stored. With
+`FEX_DISKCACHERELOCATIONFILTER=0` none missed. The filter keeps a block out whose relocated guest addresses point
+outside its code region, unless they lie within the same ELF image, which it knows from the mapped file's extent; FEX
+computed that extent (`MappedSize`, from the program headers) only for its older code cache, and with the disk cache
+alone it stayed 0, so every block that addressed its own program's data RIP-relatively was dropped (most of a static
+program, a library's code that reaches its own data). Computed for the disk cache as well now: the static program's
+start 6.5 instead of 16.2 ms with the cache, zstd on a small input 19 instead of 59 ms, `python3 -c 0` 0.095 s, `git
+--version` 35 ms. A fault of FEX's own.

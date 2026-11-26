@@ -10,6 +10,10 @@
   nice 19 and its queue was thrown away at the exit, so zstd -T4 missed 424 of its 714 blocks in every run. The queue is
   written out before `exit_group` and `execve` now; the cache grows in the first run only, and zstd on a small input
   starts in 33 instead of 59 ms. `TSO_DISKCACHE_LOG=1` prints each lookup of the cache with its state and outcome.
+- The disk cache stored no block that addressed its own program's data: FEX knew an image's extent only for its older
+  code cache, and the cache's relocation filter took such references for addresses outside the image (a static
+  program's start missed 91 of 165 blocks in every run). A fault of FEX's own. Now a program that ends at once starts in
+  6.5 instead of 16 ms with the cache, zstd on a small input in 19 instead of 59 ms, `python3 -c 0` in 0.095 s.
 - **Installing on other distributions.** The one-line installer and a first run are tested on every change in the
   container images of Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Fedora and openSUSE Tumbleweed, as root (the
   installation for every user) and as a user: `tso-arm check`, x86-64 and 32-bit programs with their threads and

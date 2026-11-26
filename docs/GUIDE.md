@@ -82,7 +82,7 @@ tso-arm run ./program args...   # an x86 program, as it would run on an x86 comp
   `./program`, from scripts, from a file manager.
 - **The second start is faster.** FEX keeps the code it translated in a cache on disk (`~/.cache/tso-arm/fex`), and a
   later run of the same program and libraries loads it instead of translating it again: on a Raspberry Pi 5
-  `python3 -c 0` starts in 0.11 instead of 0.32 s, `git --version` in 0.05 instead of 0.09 s. Most of a
+  `python3 -c 0` starts in 0.095 instead of 0.32 s, `git --version` in 0.035 instead of 0.09 s. Most of a
   multi-threaded program's own work is translated anew each time (the page protocol's code depends on what that run
   shares). `tso-arm status` shows the cache's size, `tso-arm forget --cache` empties it, `TSO_ARM_DISKCACHE=0`
   runs without it.
