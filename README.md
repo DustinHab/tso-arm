@@ -18,7 +18,7 @@ xz and zstd; the full table is below):
 
 | | efficiency |
 |---|---|
-| **tso-arm**, with functions translated ahead of time | **86 %** (pigz 92 %, xz 91 %, zstd 78 %) |
+| **tso-arm**, with functions translated ahead of time | **85 %** (pigz 92 %, xz 91 %, zstd 73 %) |
 | tso-arm, page protocol alone | 76 % |
 | FEX, full TSO | 66 % |
 | Box64, TSO mode (`BOX64_DYNAREC_STRONGMEM=4`) | 23 % |
@@ -165,20 +165,20 @@ section 55). FEX's telemetry file, written with an `fsync` at every exit, is off
 section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-26T05:41, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-26T20:10, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 1.00 s, 100 % | 1.07 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 80 % | 0.57 s, 86 % | 85 % |
-| tso-arm build, TSO off | no | 1.14 s, 88 % | 1.36 s, 79 % | 0.58 s, 84 % | 84 % |
-| FEX default | no | 1.57 s, 64 % | 1.51 s, 71 % | 0.67 s, 73 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.65 s, 61 % | 1.54 s, 69 % | 0.71 s, 69 % | 66 % |
-| tso-arm, first run | yes | 1.36 s, 74 % | 1.54 s, 69 % | 0.86 s, 57 % | 66 % |
-| tso-arm, with profile | yes | 1.24 s, 81 % | 1.47 s, 73 % | 0.66 s, 74 % | 76 % |
-| ahead of time, TSO off | no | 1.06 s, 94 % | 1.16 s, 92 % | 0.54 s, 91 % | 92 % |
-| ahead of time, all ordered | yes, except stack accesses through RSP | 1.76 s, 57 % | 1.55 s, 69 % | 0.69 s, 71 % | 65 % |
-| ahead of time + tso-arm, with profile | yes | 1.09 s, 92 % | 1.18 s, 91 % | 0.63 s, 78 % | 86 % |
+| native Arm | - | 0.99 s, 100 % | 1.08 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.35 s, 80 % | 0.57 s, 86 % | 84 % |
+| tso-arm build, TSO off | no | 1.14 s, 87 % | 1.35 s, 80 % | 0.57 s, 86 % | 84 % |
+| FEX default | no | 1.57 s, 63 % | 1.51 s, 72 % | 0.68 s, 72 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 60 % | 1.53 s, 71 % | 0.72 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.36 s, 73 % | 1.58 s, 68 % | 0.86 s, 57 % | 66 % |
+| tso-arm, with profile | yes | 1.25 s, 79 % | 1.45 s, 74 % | 0.66 s, 74 % | 76 % |
+| ahead of time, TSO off | no | 1.06 s, 93 % | 1.17 s, 92 % | 0.54 s, 91 % | 92 % |
+| ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.54 s, 70 % | 0.70 s, 70 % | 65 % |
+| ahead of time + tso-arm, with profile | yes | 1.08 s, 92 % | 1.19 s, 91 % | 0.67 s, 73 % | 85 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
@@ -186,7 +186,7 @@ tso-arm with a profile ran with FEX's disk cache as tso-arm run keeps it (warm a
 <!-- efficiency:end -->
 
 zstd spreads more than the others from session to session with the same code: ahead of time with tso-arm its best of
-five was 0.62 to 0.66 s this week (73 to 77 %).
+five was 0.62 to 0.67 s this week (73 to 78 %).
 
 **Programs as distributions ship them** (`bench/distro.sh`, notes section 40): the x86-64 builds of Ubuntu 24.04
 from `tso-arm rootfs`, dynamically linked, their work mostly in shared libraries, against the host's own Arm builds
