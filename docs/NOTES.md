@@ -3017,5 +3017,6 @@ mapped from the cache file, went through FEX's allocator for 32-bit programs: re
 (`FEX_DISKCACHEFILEMAPPING=0` from `tso-arm run`), a 32-bit program that ends at once starts in 12 instead of 25 ms
 (21 without the cache). Still open there: some 3,250 failing `mmap` calls at every 32-bit start, 2,560 of them for
 the 128 MB guest stack (`MAP_GROWSDOWN`), whose candidate range moves down a page at a time past what the kernel keeps
-free around such a mapping (its guard gap, which `/proc/self/maps` does not show; marking the mapped pages from it did
-not help, taken out again).
+free around such a mapping (its guard gap, which `/proc/self/maps` does not show). The loop was FEX's ELF loader's,
+which tried the stack's hint a page lower after each failure: in steps of 256 pages now, 799 `mmap` calls at a
+32-bit start instead of 3,349.

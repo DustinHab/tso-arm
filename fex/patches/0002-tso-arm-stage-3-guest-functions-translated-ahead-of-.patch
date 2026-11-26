@@ -1,4 +1,4 @@
-From 2bc615b8e33f9152370ff9011733f264c0f4d2b3 Mon Sep 17 00:00:00 2001
+From 46b7a3f2dfe4d992b42ccb35f120863ada59c786 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -35,7 +35,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  Source/Common/FDUtils.h                       |   32 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
- Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   10 +-
+ Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   16 +-
  .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  106 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
  .../LinuxSyscalls/FileManagement.cpp          |   16 +-
@@ -56,7 +56,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 52 files changed, 4192 insertions(+), 300 deletions(-)
+ 52 files changed, 4196 insertions(+), 302 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
@@ -1707,10 +1707,23 @@ index 9e15947ae184fa0c8b7d295f6255ce9c0cce30ed..4491df685c4f025dec5ffcb7434de5ac
    if (NOT USE_LEGACY_BINFMTMISC)
      # Just restart the systemd service
 diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
-index 9cedb6087d0e534cab158def792069aee38a3670..71a689e2698c7ff1f5658cd3dd4e6df3f09f440f 100644
+index 9cedb6087d0e534cab158def792069aee38a3670..e23eab603853df84d3945fa7388044c386145bbc 100644
 --- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
 +++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
-@@ -662,14 +662,20 @@ public:
+@@ -481,8 +481,10 @@ public:
+       // Allocate the base of the full 128MB stack range.
+       StackPointerBase = Handler->GuestMmap(Thread, reinterpret_cast<void*>(StackHint), FULL_STACK_SIZE, PROT_NONE,
+                                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+-      // Scan-downward until we fit.
+-      StackHint -= PageSize;
++      // Scan-downward until we fit. tso-arm: in steps of the gap the kernel keeps free next to a MAP_GROWSDOWN
++      // mapping (stack_guard_gap, 256 pages by default): a page at a time, the stack of every 32-bit program took
++      // 2,560 failing mmap calls at its start (some 5 ms), its hint 10 MB too high
++      StackHint -= 256 * PageSize;
+     } while (FEX::HLE::HasSyscallError(StackPointerBase) && static_cast<int64_t>(StackHint) > 0);
+ 
+     if (FEX::HLE::HasSyscallError(StackPointerBase)) {
+@@ -662,14 +664,20 @@ public:
        if (!VSyscallEntry) [[unlikely]] {
          // If the VDSO thunk doesn't exist then we might not have a vsyscall entry.
          // Newer glibc requires vsyscall to exist now. So let's allocate a buffer and stick a vsyscall in to it.

@@ -5,7 +5,8 @@
 - Faster starts without the page protocol and for 32-bit programs: FEX freed the 8 MB it keeps in front of `brk` one
   page at a time at every start (2,048 system calls; a program that ends at once 7.1 instead of 12 ms under full
   ordering), and the disk cache's entries are read rather than mapped, which went through FEX's allocator for 32-bit
-  programs (12 instead of 25 ms for one that ends at once).
+  programs (12 instead of 25 ms for one that ends at once). The main stack of a 32-bit program is placed in steps of the
+  kernel's guard gap instead of a page at a time (2,560 failing `mmap` calls at every start).
 
 ## 0.4.8 (2026-11-26)
 
