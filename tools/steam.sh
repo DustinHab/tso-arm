@@ -69,6 +69,9 @@ fi
 # FEX's disk cache off: its writer is a second thread in every process, and Chromium's zygote (steamwebhelper's)
 # forks only with one ('Check failed: IsSingleThreaded'), so steamwebhelper started no GPU process and drew nothing
 export TSO_ARM_DISKCACHE=${TSO_ARM_DISKCACHE:-0}
+# FEX's full ordering: under the page protocol the processes steamwebhelper's zygote forks (renderer, GPU, network)
+# ended within seconds, and it drew nothing (games Steam starts inherit this as well)
+export TSO_ARM_MODE=${TSO_ARM_MODE:-full}
 # FEX's server socket in the home directory, as Valve's build of FEX for Steam has it: steamwebhelper runs in Steam's
 # runtime container, which has an XDG_RUNTIME_DIR of its own, and its sandboxed zygote in a network namespace of its
 # own; there FEX reached neither its abstract socket nor the one in XDG_RUNTIME_DIR ("Couldn't connect to FEXServer
@@ -94,4 +97,7 @@ if [ -z "${FEX_SERVERSOCKETPATH:-}" ]; then
         export FEX_SERVERSOCKETPATH="$s"
     fi
 fi
+# steamwebhelper without Chromium's sandbox: with it, under full ordering as well, it showed no window
+# (TSO_ARM_STEAM_SANDBOX=1 keeps it)
+[ "${TSO_ARM_STEAM_SANDBOX:-0}" = 1 ] || set -- -cef-disable-sandbox "$@"
 exec "$R/bin/tso-arm" run "$D/current/usr/lib/steam/bin_steam.sh" "$@"

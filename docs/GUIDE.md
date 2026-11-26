@@ -153,6 +153,47 @@ hundred thousand wrong without ordering. `tso-arm wine` keeps that order with th
 does; if a Windows program misbehaves, try `TSO_ARM_MODE=full tso-arm wine program.exe` (FEX's full ordering) and
 report it if that helps.
 
+## Steam
+
+```sh
+tso-arm rootfs                  # once, if not done yet
+sudo tso-arm userns allow       # once, on Ubuntu 23.10 and newer (below)
+tso-arm steam                   # Valve's Steam client; the first time fetches Valve's launcher and the client
+```
+
+`tso-arm steam` fetches Valve's own launcher package (`steam-launcher` from repo.steampowered.com, checked against
+Valve's package index) into `~/.local/share/tso-arm/steam`, without installing it into the system, and starts it;
+Steam then puts its client into `~/.local/share/Steam` and keeps it up to date as on an x86 computer. Measured on
+GitHub's Arm runner (4 Neoverse N2 cores, an X server without a screen, no GPU; `.github/workflows/steam.yml`): the
+bootstrap after 30 s, the client downloaded and unpacked after 60 s, Steam's runtime container and steamwebhelper
+(the Chromium that draws Steam's windows) after 2.5 minutes, the "Sign in to Steam" window after about 4 minutes.
+Signing in and games are not tested yet.
+
+**User namespaces.** Steam does not start without them ("Steam now requires user namespaces to be enabled"). Ubuntu
+23.10 and newer let AppArmor restrict them to programs with a profile of their own, and under tso-arm the program
+that asks is FEX: `sudo tso-arm userns allow` puts a profile in place that allows them to tso-arm's FEX alone,
+`tso-arm userns` shows the state, `sudo tso-arm userns remove` takes it away. Lifting the restriction for every
+program (`sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`) works as well.
+
+**What `tso-arm steam` sets, and why.** Steam's windows come from steamwebhelper, which forks its renderer, GPU and
+network processes from a "zygote"; under FEX that went wrong in four places, and `tso-arm steam` runs Steam so
+that it gets past them:
+
+- FEX's disk cache off (`TSO_ARM_DISKCACHE=0`): its writer is a second thread in every process, and the zygote
+  forks only when it is alone in `/proc/self/task` (otherwise it stops at `Check failed: IsSingleThreaded`, and no
+  window comes). Steam's programs start slower without it.
+- FEX's full ordering (`TSO_ARM_MODE=full`): under the page protocol the processes the zygote forks ended within
+  seconds and were started again, and the window stayed empty. Games started from Steam inherit this: they run
+  correctly, but with every access ordered (as `--mode full`).
+- steamwebhelper without Chromium's sandbox (`-cef-disable-sandbox`): with it, no window came either.
+- FEX's server socket in the home directory: steamwebhelper runs in Steam's runtime container, which has a runtime
+  directory of its own, and FEX did not reach its server there ("Couldn't connect to FEXServer socket").
+
+Each of these can be set otherwise for trying (`TSO_ARM_MODE=tso tso-arm steam`, `TSO_ARM_DISKCACHE=1`,
+`TSO_ARM_STEAM_SANDBOX=1`). Not working yet: `--gpu` (`TSO_ARM_THUNKS=1 tso-arm steam`; the client stopped with
+`surface_linux.cpp: Fatal assert`). Steam started with `tso-arm steam` waits for other x86 programs that run through
+tso-arm to end (one FEX server per user).
+
 ## Containers
 
 With the installation for every user (or `sudo tso-arm binfmt register`), x86-64 container images run as well:

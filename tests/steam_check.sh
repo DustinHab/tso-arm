@@ -10,11 +10,11 @@
 #   STEAM_MINUTES (default 20); STEAM_KEEP=1 keeps the Steam installation of an earlier run (~/.local/share/Steam);
 #   STEAM_ARGS: options for Steam (-cef-...); STEAM_ENV: options of env for it (NAME=VALUE, -u NAME); STEAM_STRACE=1:
 #   the system calls of every process that failed, and how each process ended, as the host's strace sees them (FEX's
-#   own), into strace.txt
+#   own), into strace.txt; STEAM_EXPECT=login: exit status 1 unless Steam's login window appeared
 # Into build/steam/NAME: summary.md (the stages with the second each was reached, the first errors), console.txt
 # (stdout and stderr of the launcher and what it started), logs/ (Steam's), shot-SSSS.png, windows-SSSS.txt and
-# ps-SSSS.txt (with the sockets of FEX's server) every 30 seconds. Exit status 0 when it ran; how far Steam got is in
-# summary.md.
+# ps-SSSS.txt (with the sockets of FEX's server) every 30 seconds. Exit status 0 when it ran (and reached what
+# STEAM_EXPECT asks for); how far Steam got is in summary.md.
 set -e
 cd "$(dirname "$0")/.."
 R=$PWD
@@ -260,3 +260,9 @@ for p in "$O"/shot-*.png; do
     [ $((n % 2)) = 0 ] || [ "$p" = "$(ls "$O"/shot-*.png | tail -n 1)" ] || rm -f "$p"
 done
 cat "$O/summary.md"
+# STEAM_EXPECT=login: the login window has to have appeared
+if [ "${STEAM_EXPECT:-}" = login ] && ! reached login-window; then
+    say "Steam's login window did not appear"
+    exit 1
+fi
+exit 0

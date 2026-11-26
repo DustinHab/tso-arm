@@ -1,11 +1,11 @@
 name: Steam
 
-# Valve's Steam client for Linux under tso-arm on an Arm runner, as far as it gets without logging in
-# (tests/steam_check.sh): 'tso-arm steam' on Xvfb, the bootstrap, the client's update, steamwebhelper and its windows
-# recorded with screenshots and Steam's logs. Steam requires user namespaces (its requirements check runs
-# bubblewrap, and steamwebhelper's sandbox makes them), which Ubuntu 24.04's AppArmor restricts: with the restriction
-# lifted (sysctl) or with 'tso-arm userns allow' (a profile for FEX alone). Variants: with steamwebhelper's sandbox
-# (Chromium's) and without it, without its GPU process, and with the processes' ends traced.
+# Valve's Steam client for Linux under tso-arm on an Arm runner, up to its login window (tests/steam_check.sh):
+# 'tso-arm steam' on Xvfb, as a user of Ubuntu 24.04 starts it after 'sudo tso-arm userns allow' (Steam requires user
+# namespaces, which Ubuntu's AppArmor restricts to programs with a profile of their own); the bootstrap, the client's
+# update, steamwebhelper and its windows recorded with screenshots and Steam's logs, and the login window has to
+# appear. Run by hand, also what does not work yet, for the record: --gpu (FEX's thunks), the page protocol instead of
+# FEX's full ordering, steamwebhelper's own sandbox (Chromium's).
 
 on:
   push:
@@ -21,23 +21,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: steam
-            userns: 1
-          - name: steam-mode-full
-            userns: 1
-            steam_env: TSO_ARM_MODE=full
-          - name: steam-mode-full-no-cef-sandbox
-            userns: 1
-            steam_env: TSO_ARM_MODE=full
-            steam_args: -cef-disable-sandbox
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '[{"name":"steam","expect":"login"},{"name":"gpu","env":"TSO_ARM_THUNKS=1"},{"name":"page-protocol","env":"TSO_ARM_MODE=tso"},{"name":"cef-sandbox","env":"TSO_ARM_STEAM_SANDBOX=1"}]' || '[{"name":"steam","expect":"login"},{"name":"gpu","env":"TSO_ARM_THUNKS=1"},{"name":"page-protocol","env":"TSO_ARM_MODE=tso"},{"name":"cef-sandbox","env":"TSO_ARM_STEAM_SANDBOX=1"}]') }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd strace \
+          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd \
             cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
           # FEX's thunks, where FEX has to be built (as the release builds them)
           g=$(gcc -dumpversion | cut -d. -f1)
@@ -57,6 +48,8 @@ jobs:
         if: steps.fex.outputs.cache-hit != 'true'
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
 
+      # what 'tso-arm steam' works around, for the record: a thread of FEX's own in /proc/self/task (its disk cache),
+      # and Chromium's way of forking (both in the summary)
       - name: x86 test programs
         run: |
           mkdir -p build/steam
@@ -69,40 +62,27 @@ jobs:
       - name: Root file system as a user fetches it
         run: bin/tso-arm rootfs >/dev/null
 
-      - name: User namespaces allowed for every program (sysctl)
-        if: matrix.userns
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      - name: User namespaces allowed for FEX alone (sudo tso-arm userns allow)
-        if: matrix.userns_allow
+      - name: User namespaces for tso-arm's FEX (sudo tso-arm userns allow)
         run: |
           bin/tso-arm userns
           sudo bin/tso-arm userns allow
           bin/tso-arm userns
           cat /etc/apparmor.d/tso-arm-fex
 
-      # FEX passes an x86 program a program executes to the kernel only where binfmt_misc has entries of its own names
-      # (FEX-x86_64, FEX-x86); otherwise it starts itself again through /proc/self/exe
-      - name: binfmt_misc under FEX's own names, to the FEX tso-arm runs
-        if: matrix.fexbinfmt
-        run: |
-          F=$HOME/.local/opt/tso-arm/bin/FEX
-          mask='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
-          echo ":FEX-x86_64:M:0:\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:$mask:$F:POCF" |
-            sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null
-          echo ":FEX-x86:M:0:\\x7fELF\\x01\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x03\\x00:$mask:$F:POCF" |
-            sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null
-          head -n 3 /proc/sys/fs/binfmt_misc/FEX-x86_64 /proc/sys/fs/binfmt_misc/FEX-x86
-
       - name: Steam
         timeout-minutes: 40
         env:
-          STEAM_STRACE: ${{ matrix.strace }}
-          STEAM_ARGS: ${{ matrix.steam_args }}
-          STEAM_ENV: ${{ matrix.steam_env }}
+          STEAM_ENV: ${{ matrix.env }}
+          STEAM_EXPECT: ${{ matrix.expect }}
         run: |
-          STEAM_MINUTES=25 sh tests/steam_check.sh ${{ matrix.name }} ${{ matrix.args }}
+          s=0
+          STEAM_MINUTES=25 sh tests/steam_check.sh ${{ matrix.name }} || s=$?
           cat build/steam/${{ matrix.name }}/summary.md >>"$GITHUB_STEP_SUMMARY"
+          exit $s
+
+      - name: User namespaces as before (sudo tso-arm userns remove)
+        if: always()
+        run: sudo bin/tso-arm userns remove && bin/tso-arm userns
 
       - uses: actions/upload-artifact@v4
         if: always()
