@@ -3116,3 +3116,45 @@ limit on open files (`MoveFEXFD`, section 49) and registered as FEX's (`FEX::Pro
 closes the range around them. `tests/closeall.c`: no byte of FEX's in the program's files, 0.4 s, in both orderings,
 and the cache is taken in the next run; bubblewrap with `--unshare-net` and a cold cache, 20 runs, none slower than
 3 s. A `dup2` onto one of those numbers would still replace it (not seen).
+## 66. Desktop programs from their makers' packages; /proc/self/exe inside the root file system (2026-11-26)
+
+**Where they go.** Discord, Spotify, Slack, Signal, Zoom and Microsoft Edge have Linux builds for x86-64 only,
+shipped as Debian packages that put their files in `/opt` or `/usr/lib` and refer to them by those absolute paths
+(Zoom's launcher starts `/opt/zoom/zoom`, Slack's `/usr/bin/slack` is a link to `/usr/lib/slack/slack`). Unpacked
+elsewhere, those paths would name nothing. FEX lays the root file system over `/` for x86 programs, and the one
+`tso-arm rootfs` fetches is an unpacked directory of the user's: `tso-arm app` (`tools/app.sh`) puts a package's
+files there, never over a file the root file system has (those stay, and are not listed), and lists each file it
+adds; `remove` takes the list away and the directories it leaves empty. The libraries a package's Depends names that
+the root file system lacks come from Ubuntu 24.04's archive (noble, its updates and security fixes, main and
+universe): Packages.xz checked against InRelease, InRelease against Ubuntu's keyring from the root file system with
+`gpgv`, each package against the index; only library packages (`lib*`), with their own dependencies. The root file
+system's package list is not to be trusted for what is there: FEX's root file system is trimmed, and its list names
+libatomic1 while the library is missing (Spotify and Zoom need it without saying so). The libraries a package's
+programs need are found with the root file system's own dynamic loader (`ld.so --library-path <the package's library
+directories> --list`, under tso-arm), which names the first library it misses and stops; again after each fetch, at
+most eight rounds, the package named after the library by Debian's rule (libatomic.so.1 in libatomic1) or its 64-bit
+`time_t` name of Ubuntu 24.04. A library another program fetched stays until the last program goes (a program lists
+only what it fetched, not what was there already). Menu entries go to `~/.local/share/applications` with `Exec` set to
+`tso-arm app run NAME` and the icon's path in the root file system. On the Pi, against a hard-linked copy of the root
+file system: Discord (whose package is only a starter: it fetches the Electron program into the home directory and
+starts it), Slack, Signal, Spotify and Edge get as far as looking for a display without one, Zoom as far as Qt's abort
+without one; installs take 3 to 90 s, Zoom 809 files and 2 libraries, Spotify 115 files and 6.
+
+**/proc/self/exe.** Edge's network service ended at once and was started again and again, with "/proc/self/exe: 1:
+Syntax error: ")" unexpected": Chromium starts its zygote, renderers and services with `execve("/proc/self/exe")`,
+FEX's execve answered ENOEXEC, and glibc's `execvp` fell back to running the file through `/bin/sh`. Google's
+headless shell behaved the same once copied into the root file system. FEX takes `/proc/self/exe` in an execve as the
+program's own path, which for a program inside the root file system is its path there, without the root file
+system's own (what a readlink of `/proc/self/exe` shows the program), and looked for that on the host, where nothing
+is. Looked up in the root file system first now, as an absolute pathname is. `tests/selfexec.c` (a program that
+starts itself through `/proc/self/exe`) inside the root file system: ENOEXEC before, started again now;
+`tests/chrome_check.sh` renders its page from inside the root file system as well.
+
+**Their sandbox.** Chromium and Electron programs need a sandbox or `--no-sandbox`: unpacked, their setuid helper
+(`chrome-sandbox`) has no root rights, so they use the namespace sandbox where user namespaces are allowed. Under FEX
+its zygote, started in user, PID and network namespaces of its own, sends no hello ("Zygote process exited
+prematurely", "Failed to receive hello message from zygote"; Chromium's verbose log: "Lacking support for seccomp-bpf
+sandbox"). FEX's server, whose abstract socket is one per network namespace, is in the home directory for every
+program `tso-arm run` starts now (`server_socket` in `bin/tso-arm`), which bubblewrap with `--unshare-net` needed, but
+the zygote still does not come up; not looked into further yet. `tso-arm app run` starts these programs with
+`--no-sandbox` meanwhile.

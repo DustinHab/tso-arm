@@ -158,6 +158,14 @@ user does (Ubuntu's wine64 packed into a root file system of its own did not fin
 Programs with a window: `tests/graphics_check.sh` in the Compat workflow runs glxinfo, glxgears and vkcube from
 the root file system on Xvfb, with the x86 Mesa and with `--gpu`.
 
+Desktop programs without an Arm build for Linux (after 0.4.10): `tso-arm app install NAME` installs Discord,
+Microsoft Edge, Signal, Slack, Spotify and Zoom from their makers' packages into the root file system, with the
+libraries they need from Ubuntu 24.04's archive and a menu entry; the Apps workflow starts each on GitHub's Arm
+runner up to its first window. On the way: Chromium under the page protocol (notes section 64), FEX's descriptors
+and the cache (section 65), a program inside the root file system starting itself through `/proc/self/exe` (section
+66). Open: Chromium's and Electron's own sandbox under FEX (their zygote in namespaces of its own sends no hello; the
+programs run with `--no-sandbox`), and WebAssembly's trap in Chromium (section 64).
+
 ## 8. The page protocol for 32-bit programs
 
 32-bit programs run with FEX's full ordering (item 1). The views would need 4 GB windows per thread instead of 16 GB

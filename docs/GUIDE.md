@@ -169,6 +169,35 @@ hundred thousand wrong without ordering. `tso-arm wine` keeps that order with th
 does; if a Windows program misbehaves, try `TSO_ARM_MODE=full tso-arm wine program.exe` (FEX's full ordering) and
 report it if that helps.
 
+## Desktop programs without an Arm build
+
+```sh
+tso-arm rootfs                  # once, if not done yet
+tso-arm app install spotify     # by name: discord, edge, signal, slack, spotify, zoom
+tso-arm app install ./some-program_amd64.deb    # or any x86 Debian package, a file or an https address
+tso-arm app list                # what is installed so
+tso-arm app run spotify         # or its entry in the desktop's menu
+tso-arm app remove spotify
+```
+
+Programs whose makers ship Linux builds for x86 only (Discord, Spotify, Slack, Signal, Zoom, Microsoft Edge, and
+many others) come as Debian packages. `tso-arm app install` fetches one from its maker's own address (by name, for
+the programs above; a package index's entry is checked against the index's checksum), puts its files into the root
+file system of `tso-arm rootfs` (FEX lays that over `/` for x86 programs, so the program finds itself where its
+package put it: `/opt/zoom`, `/usr/lib/slack`), fetches the libraries it needs that the root file system lacks from
+Ubuntu 24.04's archive (checked against Ubuntu's signed index), and adds an entry to the desktop's menu that starts it
+through tso-arm. It replaces no file the root file system has, lists every file it adds, and `remove` takes exactly
+those away again; the package's own install scripts do not run, and it updates by installing again (Discord and others
+update themselves). A root file system installed for every user is not writable for a user: `tso-arm rootfs` fetches
+one of your own.
+
+Chromium and Electron programs (Discord, Slack, Signal, Spotify's player, Edge) start with `--no-sandbox`: unpacked,
+their sandbox helper has no root rights, and their namespace sandbox does not start under FEX yet; they run, without
+the sandbox's protection of their renderers. `TSO_ARM_APP_SANDBOX=1` tries the sandbox. They reserve more address
+space than the page protocol's window holds and run with FEX's full ordering from their start. What the tests cover:
+each of the six programs installed and started on GitHub's Arm runner up to its first window (`.github/workflows/apps.yml`,
+weekly, with screenshots); signing in and using them is not tested.
+
 ## Steam
 
 ```sh

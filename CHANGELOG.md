@@ -1,5 +1,31 @@
 # Changes
 
+## Unreleased
+
+- **`tso-arm app`: x86 desktop programs from their makers' Debian packages.** `tso-arm app install NAME` installs
+  Discord, Microsoft Edge, Signal, Slack, Spotify or Zoom from their makers' own addresses (a package index's entry
+  checked against its checksum), `tso-arm app install FILE.deb` or an https address any other x86 package. Its files
+  go into the root file system of `tso-arm rootfs`, where FEX lays them over `/` for x86 programs, so the absolute
+  paths a program uses are there (`/opt/zoom`, `/usr/lib/slack`); no file the root file system has is replaced, every
+  file added is listed, and `tso-arm app remove` takes exactly those away again. The libraries a package depends on
+  that the root file system lacks come from Ubuntu 24.04's archive, checked against its index and that against
+  Ubuntu's signed InRelease (with the root file system's keyring), and so do those its programs need without
+  naming them (Spotify's and Zoom's libatomic, found with the root file system's dynamic loader). A menu entry starts
+  the program through tso-arm (`tso-arm app run NAME`); Chromium and Electron programs run with `--no-sandbox` for
+  now (`TSO_ARM_APP_SANDBOX=1` tries their sandbox). `tests/apps_check.sh` and `.github/workflows/apps.yml` (weekly
+  and by hand) install the six on GitHub's Arm runner, start each up to its first window on Xvfb with screenshots,
+  and remove them again, the root file system as before.
+- A program inside the root file system that starts itself again through `/proc/self/exe` (Chromium's zygote,
+  renderers and services; Microsoft Edge) got ENOEXEC: FEX named it by its path there, without the root file
+  system's own, and looked for that on the host; glibc then ran the program as a shell script ("/proc/self/exe: 1:
+  Syntax error"). FEX looks such a path up in the root file system first now, as any absolute path
+  (`tests/selfexec.c`; `tests/chrome_check.sh` runs Chromium from inside the root file system as well).
+- FEX's server socket in the home directory for every program `tso-arm run` starts (as `tso-arm steam` had it, and
+  Valve's build of FEX for Steam): a program in a network namespace of its own (Chromium's and Electron's sandbox,
+  bubblewrap with `--unshare-net`) reached neither FEX's abstract socket nor the one in `XDG_RUNTIME_DIR`, and FEX
+  did not start there. While a server with the usual sockets runs (programs started before an update), FEX keeps to
+  those; `TSO_ARM_SERVER_SOCKET=0` keeps to them as well.
+
 ## 0.4.10 (2026-11-26)
 
 A fix that matters for every installation of 0.4.6 to 0.4.9: a program that closes all of its descriptors no longer

@@ -82,6 +82,23 @@ run "page protocol, with the profile" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE="$p"
 run "FEX's full ordering" TSO_ARM_MODE=full
 rm -f "$p"
 
+# from inside the root file system, where 'tso-arm app' installs programs: Chromium starts its zygote, renderers and
+# services through /proc/self/exe, which FEX named there without the root file system's own path, and the execve
+# failed with ENOEXEC (Microsoft Edge's network service ran as a shell script)
+rfs=$("$T" app rootfs 2>/dev/null) || rfs=
+if [ -n "$rfs" ] && [ -w "$rfs/opt" ]; then
+    rm -rf "$rfs/opt/tso-arm-check"
+    mkdir -p "$rfs/opt/tso-arm-check"
+    cp -a "$D/chrome-headless-shell-linux64" "$rfs/opt/tso-arm-check/"
+    outside=$S
+    S=$rfs/opt/tso-arm-check/chrome-headless-shell-linux64/chrome-headless-shell
+    run "from inside the root file system, full ordering" TSO_ARM_MODE=full
+    S=$outside
+    rm -rf "$rfs/opt/tso-arm-check"
+else
+    echo "  (no writable root file system: not run from inside one)"
+fi
+
 # for the record, not required (notes section 64): a WebAssembly access past its memory, which V8 catches with its
 # handler of SIGSEGV and turns into a RuntimeError
 cat >"$D/trap.html" <<'EOF'

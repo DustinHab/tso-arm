@@ -309,7 +309,9 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Chromium** and programs built on it: Google's headless shell renders pages with V8 and WebAssembly under the page
   protocol and under full ordering (`tests/chrome_check.sh` in the Compat workflow). Chromium reserves more address
   space than the views' window holds, so its processes fall back to full ordering at their start (notes section 64).
-  **Steam** (`tso-arm steam`) comes up to its login window on GitHub's Arm runner.
+  **Steam** (`tso-arm steam`) comes up to its login window on GitHub's Arm runner. **Desktop programs** without an
+  Arm build for Linux install from their makers' packages with `tso-arm app install` (Discord, Spotify, Slack,
+  Signal, Zoom, Microsoft Edge; the Apps workflow starts each up to its first window).
 - **Containers:** `docker run --platform linux/amd64 IMAGE` runs x86-64 images once `binfmt register` (the
   installation for every user does it) has registered a statically linked FEX with binfmt_misc's `F` flag: in a
   container it runs the program itself, without FEX's server and on the container's own files, with x86 order kept;
@@ -358,6 +360,7 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) and x86-64 containers run through tso-arm; register and unregister need root |
 | `tso-arm userns [allow \| remove]` | user namespaces for x86 programs (Steam requires them) where AppArmor restricts them (Ubuntu 23.10 and newer): a profile for tso-arm's FEX alone; need root |
 | `tso-arm steam [ARGS]` | Valve's Steam client, from Valve's launcher package (fetched on first use), up to its login window as tested |
+| `tso-arm app install NAME \| FILE.deb` | an x86 desktop program from its maker's Debian package (by name: discord, edge, signal, slack, spotify, zoom) into the root file system, with the libraries it lacks from Ubuntu's archive and a menu entry; `app list`, `app run NAME`, `app remove NAME` |
 | `tso-arm version` | the version, and the FEX it uses |
 | `tso-arm report [PROGRAM [ARGS]]` | what a bug report needs, as one block to paste |
 

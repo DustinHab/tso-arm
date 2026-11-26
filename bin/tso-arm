@@ -62,6 +62,10 @@ usage: tso-arm COMMAND [...]
         Valve's Steam client: Valve's launcher package, fetched from repo.steampowered.com into
         ~/.local/share/tso-arm/steam on first use, started with the settings it needs under FEX; needs the root
         file system ('tso-arm rootfs') and user namespaces ('tso-arm userns')
+  app [install NAME | install PACKAGE.deb | install https://URL | list | run NAME [ARGS...] | remove NAME]
+        an x86 program from its maker's Debian package (by name: discord, edge, signal, slack, spotify, zoom):
+        its files into the root file system ('tso-arm rootfs'), the libraries it needs that the root file system
+        lacks from Ubuntu 24.04's archive, and a menu entry that starts it through tso-arm
   version               this version and the FEX it uses
   report [PROGRAM [ARGS...]]
         what a bug report needs, to paste: versions, machine, root file system; with a program, what tso-arm knows
@@ -564,11 +568,34 @@ cmd_run() {
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && { [ ! -d "$XDG_RUNTIME_DIR" ] || [ ! -w "$XDG_RUNTIME_DIR" ]; }; then
         unset XDG_RUNTIME_DIR
     fi
+    server_socket
     # without glibc's dynamic loader (musl) the shell would say no more than "FEX: not found"
     [ -x /lib/ld-linux-aarch64.so.1 ] || case $F in *-static) ;; *)
         die "FEX ($F) needs glibc, and this system has none ($(libc)); 'tso-arm check' says more" ;;
     esac
     exec "$F" "$prog" "$@"
+}
+
+# FEX's server socket in the home directory, as Valve's build of FEX for Steam has it: a program in a network namespace
+# of its own (Chromium's and Electron's sandbox, bubblewrap with --unshare-net, Steam's runtime container) reached
+# neither FEX's abstract socket, which is one per network namespace, nor the one in XDG_RUNTIME_DIR, which such a
+# sandbox has its own of, and FEX did not start there ("Couldn't connect to FEXServer socket"; Chromium: "Zygote process
+# exited prematurely"). FEX runs one server per user, whatever its socket: while one with the usual sockets runs (x86
+# programs started before, or not through tso-arm), this one could not start, and FEX keeps to the usual ones then.
+# Looked at only while the socket is not there yet (a server of ours runs once it is). FEX_SERVERSOCKETPATH set is left
+# alone; TSO_ARM_SERVER_SOCKET=0: the usual sockets.
+server_socket() {
+    [ -z "${FEX_SERVERSOCKETPATH:-}" ] && [ "${TSO_ARM_SERVER_SOCKET:-1}" != 0 ] || return 0
+    s=${XDG_CACHE_HOME:-$HOME/.cache}/tso-arm/server/$(id -u).FEXServer.Socket
+    [ ${#s} -lt 108 ] || return 0
+    if [ ! -S "$s" ]; then
+        command -v pgrep >/dev/null || return 0
+        for p in $(pgrep -u "$(id -u)" -x FEXServer 2>/dev/null); do
+            tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -qx "FEX_SERVERSOCKETPATH=$s" || return 0
+        done
+        mkdir -p "${s%/*}" 2>/dev/null || return 0
+    fi
+    export FEX_SERVERSOCKETPATH="$s"
 }
 
 # The GPU (--gpu, TSO_ARM_THUNKS=1), where FEX was built with its thunks: an x86 program's Vulkan calls go to the
@@ -832,6 +859,7 @@ update) shift && cmd_update "$@" ;;
 report) shift && cmd_report "$@" ;;
 wine) shift && exec sh "$REPO/tools/wine.sh" "$@" ;;
 steam) shift && exec sh "$REPO/tools/steam.sh" "$@" ;;
+app) shift && exec sh "$REPO/tools/app.sh" "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
 binfmt) shift && cmd_binfmt "$@" ;;
 userns) shift && cmd_userns "$@" ;;
