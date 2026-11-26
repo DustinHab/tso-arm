@@ -3090,3 +3090,26 @@ V8's sandbox) catches the same WebAssembly access as a RuntimeError under full o
 What differs in Chromium is V8's sandbox, whose 1 TB the Pi's 39-bit address space cannot hold (FEX reports 48
 virtual address bits, so V8 tries and falls back to a sandbox it only partly reserves); `tests/chrome_check.sh`
 records whether the trap is caught, on GitHub's runner with 48 bits as well. Not looked into further yet.
+## 65. FEX's own descriptors, and a program that closes all of its own (2026-11-26)
+
+Steam's check of user namespaces still failed on GitHub's runner with the cache on (the writer ended for `unshare`,
+section 63): `steam-runtime-check-requirements` killed its test after a few seconds. Bubblewrap from Ubuntu 24.04's
+package (x86-64) under tso-arm on the Pi hung the same way with `--unshare-net` and a cold cache, in every mode; a
+backtrace of FEX (relinked with symbols, gdb) showed the main thread in `exit_group`, waiting for the cache's writer
+to finish its queue (section 62), and the writer in a store, retrying the file lock once a millisecond for a second
+per store. Nobody held the lock (`/proc/locks`), and no process had the cache's files open any more: bubblewrap had
+closed every descriptor from 3 up, FEX's with them, and `flock` failed on a closed descriptor.
+
+Worse where the program opens files after that: they get the lowest free numbers, FEX's old ones. `tests/closeall.c`
+calls `close_range(3, ~0)`, opens 16 files and runs code FEX has not translated yet: with a cold cache the writer
+wrote 381 KB of its blocks into the program's files, and the run took 47.7 s (the exit's drain). Every release with
+the cache on (0.4.6 to 0.4.9) did that to a program that cleans up its descriptors so; the root file system's and
+`/proc`'s directories and the server's socket, which FEX keeps open as well, were closed alike.
+
+Now FEX's long-lived descriptors (the disk cache's files, which FEXCore hands to the frontend through a hook when it
+opens them; the root file system's and `/proc`'s directories; the server's socket) are in FEX's own range below the
+limit on open files (`MoveFEXFD`, section 49) and registered as FEX's (`FEX::ProtectFD`): a listing of
+`/proc/self/fd` leaves them out, `close` on one gives EBADF as for a descriptor that is not open, and `close_range`
+closes the range around them. `tests/closeall.c`: no byte of FEX's in the program's files, 0.4 s, in both orderings,
+and the cache is taken in the next run; bubblewrap with `--unshare-net` and a cold cache, 20 runs, none slower than
+3 s. A `dup2` onto one of those numbers would still replace it (not seen).

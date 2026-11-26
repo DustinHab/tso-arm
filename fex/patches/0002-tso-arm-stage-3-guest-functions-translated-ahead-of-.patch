@@ -1,4 +1,4 @@
-From 7d6bd65e6712717280522b00bc907cbce959ed62 Mon Sep 17 00:00:00 2001
+From b7a8ef4b82db27f2677fc8ee5fca8a94cd282168 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -9,7 +9,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
  FEXCore/Source/Interface/Core/Core.cpp        |  167 +-
- FEXCore/Source/Interface/Core/DiskCache.cpp   |  102 +-
+ FEXCore/Source/Interface/Core/DiskCache.cpp   |  116 +-
  FEXCore/Source/Interface/Core/DiskCache.h     |   12 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
  FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
@@ -29,16 +29,18 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Utils/AllocatorHooks.cpp       |   41 +
  FEXCore/include/FEXCore/Core/Context.h        |   16 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
+ .../FEXCore/Core/DiskCacheFileMapper.h        |    5 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   86 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |    2 +
+ FEXCore/include/FEXCore/Utils/File.h          |    5 +
  Source/Common/Config.cpp                      |   28 +-
- Source/Common/FDUtils.h                       |   32 +
+ Source/Common/FDUtils.h                       |   62 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   16 +-
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  106 +-
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  113 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   12 +
- .../LinuxSyscalls/FileManagement.cpp          |  193 ++-
+ .../LinuxSyscalls/FileManagement.cpp          |  237 ++-
  .../LinuxSyscalls/FileManagement.h            |    1 +
  .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
  .../LinuxSyscalls/SignalDelegator.cpp         |  462 +++++-
@@ -59,7 +61,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 55 files changed, 4630 insertions(+), 375 deletions(-)
+ 57 files changed, 4734 insertions(+), 376 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f0ad56699 100644
@@ -517,7 +519,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..d7524010071568695ef3e48856303c09
    const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
    auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d26feaf934 100644
+index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..cdbafaf2b845fd2b77e734c10f50b71872405a12 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
 @@ -8,6 +8,7 @@
@@ -528,7 +530,42 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/HLE/SyscallHandler.h>
-@@ -484,6 +485,91 @@ namespace DiskCache {
+@@ -55,6 +56,7 @@ namespace DiskCache {
+   };
+ 
+   static FileMapperFunc FileMapper = nullptr;
++  static FDHookFunc FDHook = nullptr;
+ 
+   bool FOZFile::Open(const fextl::string& FOZFileName, bool ReadOnly) {
+     FileName = FOZFileName;
+@@ -69,6 +71,15 @@ namespace DiskCache {
+       FD.reset();
+       return false;
+     }
++#ifndef _WIN32
++    // tso-arm: a descriptor of FEX's own, which a program that closes every descriptor it has (close_range from 3 on,
++    // as bubblewrap does) must not close: the writer stored its blocks into the files the program opened next with
++    // those numbers, or waited a second for each store at the exit where nothing had them (Steam's check of user
++    // namespaces stopped there)
++    if (FDHook) {
++      FD->ReplaceHandle(FDHook(FD->GetHandle()));
++    }
++#endif
+ 
+     bool Valid = false;
+     bool TookLock = false;
+@@ -356,6 +367,10 @@ namespace DiskCache {
+     return true;
+   }
+ 
++  FEX_DEFAULT_VISIBILITY void SetFDHook(FDHookFunc Func) {
++    FDHook = Func;
++  }
++
+   FEX_DEFAULT_VISIBILITY void SetFileMapper(FileMapperFunc Func) {
+     FileMapper = Func;
+   }
+@@ -484,6 +499,91 @@ namespace DiskCache {
      }
    }
  
@@ -620,7 +657,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
    uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
      struct __attribute__((packed)) {
        uint64_t CodeKey;
-@@ -503,6 +589,8 @@ namespace DiskCache {
+@@ -503,6 +603,8 @@ namespace DiskCache {
      if (MonoBackpatcher) {
        BlobKeyBytes.Flags |= 1 << 3;
      }
@@ -629,7 +666,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
  
      return XXH3_64bits(&BlobKeyBytes, sizeof(BlobKeyBytes));
    }
-@@ -707,7 +795,7 @@ namespace DiskCache {
+@@ -707,7 +809,7 @@ namespace DiskCache {
            for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
              XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
            }
@@ -638,7 +675,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
            LastFootprintHashed = CurrentFootprint;
            FirstHash = false;
          }
-@@ -832,7 +920,10 @@ namespace DiskCache {
+@@ -832,7 +934,10 @@ namespace DiskCache {
      }
  
      if (StoreInMemory && MemoryLRUCurrentSize > MemoryLRUMaxSize + MemoryLRUEvictThreshold) {
@@ -650,7 +687,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
      }
  
      HitData.HostCode = {HitData.Blob.data() + BlobOffset, Header.HostSize};
-@@ -973,6 +1064,7 @@ namespace DiskCache {
+@@ -973,6 +1078,7 @@ namespace DiskCache {
        }
  
        if (KeepEntryInMemory && Self->MemoryLRUCurrentSize > Self->MemoryLRUMaxSize + Self->MemoryLRUEvictThreshold) {
@@ -658,7 +695,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
          Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
        }
      }
-@@ -1179,7 +1271,7 @@ namespace DiskCache {
+@@ -1179,7 +1285,7 @@ namespace DiskCache {
        for (uint32_t i = 0; i < ExactGuestCodeExtents.size(); i += 2) {
          XXH3_128bits_update(&HashState, GuestCode.data() + ExactGuestCodeExtents[i], ExactGuestCodeExtents[i + 1]);
        }
@@ -667,7 +704,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..a4ef087355c4f94165bf2970655ec3d2
      }
      memcpy(BlobData + HeaderOffset, &Header, sizeof(Header));
  
-@@ -1248,6 +1340,10 @@ namespace DiskCache {
+@@ -1248,6 +1354,10 @@ namespace DiskCache {
      }
  
      // hand the rest off to the writer thread
@@ -1363,6 +1400,20 @@ index 5129f9ea6564ed511a8be91ed5036586662224ef..e41cdbc6a781812f6020757a872a8120
  #ifdef _WIN32
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
+diff --git a/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h b/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
+index 6e32c07bfc7dc6b96123a259f1a7e75cb2453cdd..68b49e03b00679862e49ead96411a6edbe8babee 100644
+--- a/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
++++ b/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
+@@ -8,4 +8,9 @@ namespace FEXCore::DiskCache {
+ using FileMapperFunc = void* (*)(FEXCore::File::File::FileHandleType Handle, uint64_t MapSize);
+ 
+ FEX_DEFAULT_VISIBILITY void SetFileMapper(FileMapperFunc Func);
++
++// tso-arm: called with the descriptor of each file of the cache FEX opens; returns the descriptor to keep (the
++// frontend moves it to FEX's own range and keeps the guest from closing it)
++using FDHookFunc = int (*)(int FD);
++FEX_DEFAULT_VISIBILITY void SetFDHook(FDHookFunc Func);
+ } // namespace FEXCore::DiskCache
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
 index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..ebc20501346aea1417315b8ec46930ae9d867b3d 100644
 --- a/FEXCore/include/FEXCore/Core/TSOViews.h
@@ -1519,6 +1570,22 @@ index c4cadf40aa8a54b5caa792d51a39a1810793c3d7..54c679d5b51d4de6af765ff33c349b2f
  #else
  void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
  #endif
+diff --git a/FEXCore/include/FEXCore/Utils/File.h b/FEXCore/include/FEXCore/Utils/File.h
+index f33ae7b1e6a9d7f1db9557a5919e63bcd067fb8f..1e481bc63f33ee537828f2e7c817a02e504f9688 100644
+--- a/FEXCore/include/FEXCore/Utils/File.h
++++ b/FEXCore/include/FEXCore/Utils/File.h
+@@ -102,6 +102,11 @@ public:
+     return Handle;
+   }
+ 
++  // tso-arm: the same file under another handle (a duplicate the caller made; this one is closed then)
++  void ReplaceHandle(FileHandleType New) {
++    Handle = New;
++  }
++
+   /**
+    * @brief Write Bytes to File
+    *
 diff --git a/Source/Common/Config.cpp b/Source/Common/Config.cpp
 index 8d72358bc9fb24c36e2812d1a52e1988014a5456..df69e7a5c5fdb59f3b6f968dd795a6904350d54f 100644
 --- a/Source/Common/Config.cpp
@@ -1580,21 +1647,22 @@ index 8d72358bc9fb24c36e2812d1a52e1988014a5456..df69e7a5c5fdb59f3b6f968dd795a690
  
    auto HomeDir = GetHomeDirectory();
 diff --git a/Source/Common/FDUtils.h b/Source/Common/FDUtils.h
-index f4e1d6bb424f903c136b336a10d00756d8dacc37..943374fd9ad95d215276393b7048725358958025 100644
+index f4e1d6bb424f903c136b336a10d00756d8dacc37..d733b5439b70cf77f399036bc0040f3a2571eb25 100644
 --- a/Source/Common/FDUtils.h
 +++ b/Source/Common/FDUtils.h
-@@ -3,8 +3,10 @@
+@@ -3,8 +3,11 @@
  
  #include <FEXCore/fextl/fmt.h>
  
 +#include <algorithm>
++#include <atomic>
  #include <fcntl.h>
  #include <linux/limits.h>
 +#include <sys/resource.h>
  #include <unistd.h>
  
  namespace FEX {
-@@ -15,4 +17,34 @@ inline int get_fdpath(int fd, char* SymlinkPath) {
+@@ -15,4 +18,63 @@ inline int get_fdpath(int fd, char* SymlinkPath) {
    return readlinkat(AT_FDCWD, Path.c_str(), SymlinkPath, PATH_MAX);
  }
  
@@ -1628,9 +1696,38 @@ index f4e1d6bb424f903c136b336a10d00756d8dacc37..943374fd9ad95d215276393b70487253
 +  return High;
 +}
 +
++// tso-arm: FEX's own descriptors that live as long as FEX does (the disk cache's files, the root file system's and
++// /proc's directories, the server's socket): the guest does not see them in /proc/self/fd and cannot close them
++// (close gives EBADF, close_range leaves them out). A program that cleans up what it inherited with close_range from
++// 3 on closed them all: FEX then wrote its cache into the program's files and lost its root file system. Stored as
++// descriptor + 1 (0: free).
++inline std::atomic<int> ProtectedFDs[16] {};
++
++inline int ProtectFD(int FD) {
++  if (FD < 0) {
++    return FD;
++  }
++  for (auto& Slot : ProtectedFDs) {
++    int Free = 0;
++    if (Slot.compare_exchange_strong(Free, FD + 1)) {
++      break;
++    }
++  }
++  return FD;
++}
++
++inline bool IsProtectedFD(int FD) {
++  for (auto& Slot : ProtectedFDs) {
++    if (Slot.load(std::memory_order_relaxed) == FD + 1) {
++      return true;
++    }
++  }
++  return false;
++}
++
  } // namespace FEX
 diff --git a/Source/Common/FEXServerClient.cpp b/Source/Common/FEXServerClient.cpp
-index 0680323785932da0c45f60bbf37fdc92a612c950..baa1a0e986fe2df7d17f4fbf3b18cb7ec87df264 100644
+index 0680323785932da0c45f60bbf37fdc92a612c950..8412b5bafdbf6bc49aa3543c79d0c94a30db6515 100644
 --- a/Source/Common/FEXServerClient.cpp
 +++ b/Source/Common/FEXServerClient.cpp
 @@ -13,8 +13,10 @@
@@ -1666,7 +1763,7 @@ index 0680323785932da0c45f60bbf37fdc92a612c950..baa1a0e986fe2df7d17f4fbf3b18cb7e
  
  bool SetupClient(std::string_view InterpreterPath) {
 -  ServerFD = FEXServerClient::ConnectToAndStartServer(InterpreterPath);
-+  ServerFD = FEX::MoveFEXFD(FEXServerClient::ConnectToAndStartServer(InterpreterPath));
++  ServerFD = FEX::ProtectFD(FEX::MoveFEXFD(FEXServerClient::ConnectToAndStartServer(InterpreterPath)));
    if (ServerFD == -1) {
      return false;
    }
@@ -1787,10 +1884,18 @@ index 9cedb6087d0e534cab158def792069aee38a3670..e23eab603853df84d3945fa7388044c3
        }
  
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924f605d30b 100644
+index bed03b914c97204dfaadc24771b96fc9bc4163bc..e426e2bca129daff49f48d6e365944c35f8ce5f6 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-@@ -22,6 +22,7 @@ $end_info$
+@@ -9,6 +9,7 @@ $end_info$
+ #include "Common/ArgumentLoader.h"
+ #include "Common/FEXServerClient.h"
+ #include "Common/Config.h"
++#include "Common/FDUtils.h"
+ #include "Common/HostFeatures.h"
+ #include "Common/Linux/LinuxVersion.h"
+ #include "Common/Linux/SBRKAllocations.h"
+@@ -22,6 +23,7 @@ $end_info$
  #include "LinuxSyscalls/x32/Syscalls.h"
  #include "LinuxSyscalls/x64/Syscalls.h"
  #include "LinuxSyscalls/SignalDelegator.h"
@@ -1798,7 +1903,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
  #include "Linux/Utils/ELFContainer.h"
  #include "Thunks.h"
  
-@@ -29,6 +30,7 @@ $end_info$
+@@ -29,6 +31,7 @@ $end_info$
  #include <FEXCore/Core/Context.h>
  #include <FEXCore/Core/CoreState.h>
  #include <FEXCore/Core/DiskCacheFileMapper.h>
@@ -1806,7 +1911,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
  #include <FEXCore/Utils/Allocator.h>
  #include <FEXCore/Utils/FileLoading.h>
  #include <FEXCore/Utils/LogManager.h>
-@@ -49,6 +51,7 @@ $end_info$
+@@ -49,6 +52,7 @@ $end_info$
  #include <cstdint>
  #include <cstdio>
  #include <cstdlib>
@@ -1814,7 +1919,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
  #include <cstring>
  #include <elf.h>
  #include <fcntl.h>
-@@ -162,6 +165,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
+@@ -162,6 +166,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
  
  fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
    if (Is64Bit) {
@@ -1823,7 +1928,19 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
      return {};
    }
  
-@@ -382,7 +387,82 @@ static int StealFEXFDFromEnv(const char* Env) {
+@@ -202,6 +208,11 @@ static void* DiskCacheFilemapper(FEXCore::File::File::FileHandleType Handle, uin
+   return Result;
+ }
+ 
++// tso-arm: the disk cache's files go to FEX's own range of descriptors, out of the guest's reach (FEX::ProtectFD)
++static int DiskCacheFD(int FD) {
++  return FEX::ProtectFD(FEX::MoveFEXFD(FD));
++}
++
+ bool InterpreterHandler(fextl::string* Filename, const fextl::string& RootFS, fextl::vector<fextl::string>* args) {
+   int FD {-1};
+ 
+@@ -382,7 +393,82 @@ static int StealFEXFDFromEnv(const char* Env) {
    return FEXFD;
  }
  
@@ -1907,7 +2024,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
    auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
    FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
  
-@@ -439,7 +519,12 @@ int main(int argc, char** argv, char** const envp) {
+@@ -439,7 +525,12 @@ int main(int argc, char** argv, char** const envp) {
  
    // Ensure FEXServer is setup before config options try to pull CONFIG_ROOTFS
    auto SelfPath = FEX::GetSelfPath();
@@ -1920,7 +2037,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
      LogMan::Msg::EFmt("FEXServerClient: Failure to setup client");
      return -1;
    }
-@@ -492,6 +577,12 @@ int main(int argc, char** argv, char** const envp) {
+@@ -492,6 +583,12 @@ int main(int argc, char** argv, char** const envp) {
  
    ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
    FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
@@ -1933,7 +2050,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
  
    if (!Loader.ELFWasLoaded()) {
      // Loader couldn't load this program for some reason
-@@ -535,6 +626,16 @@ int main(int argc, char** argv, char** const envp) {
+@@ -535,10 +632,21 @@ int main(int argc, char** argv, char** const envp) {
      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
    }
  
@@ -1950,7 +2067,12 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..df98dd22e31a4e6e9dac309becded924
    // Setup Thread handlers, so FEXCore can create threads.
    auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
  
-@@ -617,6 +718,9 @@ int main(int argc, char** argv, char** const envp) {
+   FEXCore::DiskCache::SetFileMapper(DiskCacheFilemapper);
++  FEXCore::DiskCache::SetFDHook(DiskCacheFD);
+ 
+   auto MemoryRegions = FEX::Allocator::InitMemoryRegions(Loader.Is64BitMode());
+   auto Allocator = FEX::Allocator::InitAllocator(Loader.Is64BitMode());
+@@ -617,6 +725,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  
@@ -1991,7 +2113,7 @@ index 02bb6bfef5053101164bef99371c3990cf3075ef..2e1d44a03d582caeb5a1dec776f1c7e5
  
    // Arm64 doesn't have a red zone
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
-index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4eb9b2728 100644
+index 71724606e2794bdc0bae1f4d9a137dae32aa013c..486596520cdb7422629636ddb90423c13f4ca5c7 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -2023,7 +2145,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  
    if (!LDPath().empty()) {
 -    RootFSFD = open(LDPath().c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC);
-+    RootFSFD = FEX::MoveFEXFD(open(LDPath().c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC));
++    RootFSFD = FEX::ProtectFD(FEX::MoveFEXFD(open(LDPath().c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC)));
      if (RootFSFD == -1) {
        RootFSFD = AT_FDCWD;
      } else {
@@ -2032,14 +2154,53 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  
    // Keep an fd open for /proc, to bypass chroot-style sandboxes
 -  ProcFD = open("/proc", O_RDONLY | O_CLOEXEC);
-+  ProcFD = FEX::MoveFEXFD(open("/proc", O_RDONLY | O_CLOEXEC));
++  ProcFD = FEX::ProtectFD(FEX::MoveFEXFD(open("/proc", O_RDONLY | O_CLOEXEC)));
    if (ProcFD != -1) {
      // Track the st_dev of /proc, to check for inode equality
      struct stat Buffer;
-@@ -719,37 +722,76 @@ uint64_t FileManager::CloseRange(unsigned int first, unsigned int last, unsigned
-   return ::syscall(SYSCALL_DEF(close_range), first, last, flags);
+@@ -695,6 +698,11 @@ uint64_t FileManager::Open(const char* pathname, int flags, uint32_t mode) {
  }
  
+ uint64_t FileManager::Close(int fd) {
++  // tso-arm: not the guest's (FEX::ProtectFD)
++  if (FEX::IsProtectedFD(fd)) {
++    errno = EBADF;
++    return -1;
++  }
+ #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
+   if (CheckIfFDInTrackedSet(fd)) {
+     LogMan::Msg::EFmt("{} closing FEX FD {}", __func__, fd);
+@@ -716,40 +724,102 @@ uint64_t FileManager::CloseRange(unsigned int first, unsigned int last, unsigned
+   }
+ #endif
+ 
+-  return ::syscall(SYSCALL_DEF(close_range), first, last, flags);
++  // tso-arm: the range without FEX's own descriptors (FEX::ProtectFD), in pieces around them
++  int Own[std::size(FEX::ProtectedFDs)];
++  size_t Count = 0;
++  for (auto& Slot : FEX::ProtectedFDs) {
++    const int FD = Slot.load(std::memory_order_relaxed) - 1;
++    if (FD >= 0 && unsigned(FD) >= first && unsigned(FD) <= last) {
++      Own[Count++] = FD;
++    }
++  }
++  if (Count == 0) {
++    return ::syscall(SYSCALL_DEF(close_range), first, last, flags);
++  }
++  std::sort(Own, Own + Count);
++  uint64_t Start = first;
++  for (size_t i = 0; i <= Count; ++i) {
++    const uint64_t End = i < Count ? uint64_t(Own[i]) : uint64_t(last) + 1;
++    if (Start < End) {
++      if (::syscall(SYSCALL_DEF(close_range), unsigned(Start), unsigned(End - 1), flags) == -1) {
++        return -1;
++      }
++    }
++    Start = End + 1;
++  }
++  return 0;
++}
++
 +// tso-arm: FEX's own threads (the disk cache's writer) are not the guest's. A program that counts its threads by the
 +// links of its /proc/self/task directory, two and one per thread, saw them: Chromium's zygote forks only with one
 +// ("Check failed: IsSingleThreaded"), and Steam's steamwebhelper drew nothing. A stat of that directory leaves them out.
@@ -2073,8 +2234,8 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
 +    HideInternalThreads(Result, buf->stx_mode, makedev(buf->stx_dev_major, buf->stx_dev_minor), buf->stx_ino, buf->stx_nlink);
 +  }
 +  return Result;
-+}
-+
+ }
+ 
  uint64_t FileManager::Stat(const char* pathname, void* buf) {
 -  auto NewPath = GetSelf(pathname);
 -  const char* SelfPath = NewPath ? NewPath->data() : nullptr;
@@ -2135,7 +2296,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  }
  
  uint64_t FileManager::Access(const char* pathname, [[maybe_unused]] int mode) {
-@@ -984,24 +1026,26 @@ uint64_t FileManager::Openat2(int dirfs, const char* pathname, FEX::HLE::open_ho
+@@ -984,24 +1054,26 @@ uint64_t FileManager::Openat2(int dirfs, const char* pathname, FEX::HLE::open_ho
  }
  
  uint64_t FileManager::Statx(int dirfd, const char* pathname, int flags, uint32_t mask, struct statx* statxbuf) {
@@ -2177,7 +2338,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  }
  
  uint64_t FileManager::Mknod(const char* pathname, mode_t mode, dev_t dev) {
-@@ -1031,43 +1075,47 @@ uint64_t FileManager::Statfs(const char* path, void* buf) {
+@@ -1031,43 +1103,47 @@ uint64_t FileManager::Statfs(const char* path, void* buf) {
  }
  
  uint64_t FileManager::NewFSStatAt(int dirfd, const char* pathname, struct stat* buf, int flag) {
@@ -2253,7 +2414,7 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  }
  
  uint64_t FileManager::Setxattr(const char* path, const char* name, const void* value, size_t size, int flags) {
-@@ -1296,6 +1344,15 @@ void FileManager::UpdatePID(uint32_t PID) {
+@@ -1296,6 +1372,15 @@ void FileManager::UpdatePID(uint32_t PID) {
      ProcFDInode = 0;
      return;
    }
@@ -2269,12 +2430,26 @@ index 71724606e2794bdc0bae1f4d9a137dae32aa013c..873e926ba727b40c97020bef0eb9c8e4
  }
  
  bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
-@@ -1307,6 +1364,8 @@ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
+@@ -1307,6 +1392,22 @@ bool FileManager::IsProtectedFile(int ParentDirFD, uint64_t inode) const {
      Match = "/proc";
    } else if (inode == CodeMapInode) {
      Match = "code map";
 +  } else if (ServerSocketInode && inode == ServerSocketInode) {
 +    Match = "server socket";
++  } else if (ProcFD != -1) {
++    // tso-arm: FEX's other own descriptors (FEX::ProtectFD: the disk cache's files), by the inode of their entry
++    for (auto& Slot : FEX::ProtectedFDs) {
++      const int FD = Slot.load(std::memory_order_relaxed) - 1;
++      if (FD < 0 || FD == RootFSFD || FD == ProcFD) {
++        continue;
++      }
++      struct stat Entry;
++      const auto Path = fextl::fmt::format("self/fd/{}", FD);
++      if (fstatat(ProcFD, Path.c_str(), &Entry, AT_SYMLINK_NOFOLLOW) == 0 && Entry.st_ino == inode) {
++        Match = "disk cache";
++        break;
++      }
++    }
    }
    if (Match) {
      struct stat Buffer;

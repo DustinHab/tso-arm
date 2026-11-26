@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A program that closes its descriptors no longer gets FEX's cache written into its files.** A program that
+  closes every descriptor from 3 up at its start (`close_range`, as bubblewrap and other tools that clean up what
+  they inherited do) closed FEX's as well, the disk cache's files among them: files the program opened afterwards got
+  their numbers, and FEX's cache writer wrote its translated blocks into them (`tests/closeall.c`: 381 KB in 16 files
+  of its own), or, where nothing had the numbers, waited a second for each store when the program ended (47.7 instead
+  of 0.4 s; Steam's check of user namespaces stopped there with the cache on). In 0.4.6 to 0.4.9, which keep the
+  cache on, `TSO_ARM_DISKCACHE=0` steps around it. FEX's long-lived descriptors (the disk cache's files, the root file
+  system's and `/proc`'s directories, the server's socket) are FEX's own now: in its range of descriptors, left out
+  of `/proc/self/fd`, and neither `close` nor `close_range` closes them (`tests/closeall.c` in CI, with a cold cache).
 - Steam with FEX's disk cache: a program no longer sees FEX's own threads in its `/proc/self/task`. The cache's
   writer is a thread of FEX's in every process, and a program that counts its threads by the links of that
   directory counted it as well; Chromium's zygote, which forks only when it is alone there, stopped at `Check failed:

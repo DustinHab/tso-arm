@@ -52,6 +52,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/userns tests/userns.c
     $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
     $CC -O2 -static -o $B/faultrip tests/faultrip.c
+    $CC -O2 -static -o $B/closeall tests/closeall.c -lm
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -181,6 +182,20 @@ for m in tso full unordered; do
         out=$(last env TSO_VIEWS_PROFILE=none timeout 120 $T run --mode $m $B/bigmap $a) || fail "bigmap $a, $m: $out"
         ok "$m: $out${a:+ (threads first)}"
     done
+done
+
+# a program that closes every descriptor from 3 up at its start (close_range), with a cold disk cache: FEX's own
+# descriptors survive it and none of the cache's stores reaches the program's files (they took all of them, and the
+# exit waited a second per store where nothing had those numbers)
+for m in tso full; do
+    dc=$(mktemp -d)
+    st=0
+    s=$(date +%s)
+    out=$(FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$dc/ FEX_DISKCACHEFILEMAPPING=0 timeout 120 $T run --mode $m $B/closeall 2>&1) || st=$?
+    secs=$(($(date +%s) - s))
+    rm -rf "$dc"
+    [ $st = 0 ] && [ $secs -lt 10 ] || fail "closeall, $m: exit status $st after $secs s: $out"
+    ok "$m: $(echo "$out" | tail -n 1)"
 done
 
 # a fault's instruction pointer in the guest's handler, changed there to a landing pad (V8's WebAssembly traps,
