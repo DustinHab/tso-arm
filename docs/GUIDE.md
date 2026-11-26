@@ -67,7 +67,10 @@ Vulkan goes through FEX's thunk to the computer's own Vulkan driver, OpenGL thro
 onto the same: on a Raspberry Pi 5 an x86 program's OpenGL then runs on the Pi's GPU (`zink Vulkan 1.3(V3D 7.1…)`).
 It covers much but not all of Vulkan: try a program with and without `--gpu`. OpenGL in a window needs an X server
 with DRI3 (desktops have it, Wayland's Xwayland too; Xvfb and some VNC servers do not): without it, leave `--gpu`
-off, or Vulkan programs only. 32-bit programs keep drawing with the x86 Mesa (FEX has no 32-bit Vulkan thunk). To have it for
+off, or Vulkan programs only. On a Wayland desktop (Raspberry Pi OS's own), a Vulkan program that draws in a Wayland
+window, or asks whether it could (vulkaninfo), stops under `--gpu` for now: FEX's Vulkan thunk hands the computer's
+driver the program's own Wayland connection, which the driver cannot read. X11 windows (Xwayland) work: start the
+program for X11 where it has a setting for it (SDL: `SDL_VIDEODRIVER=x11`). 32-bit programs keep drawing with the x86 Mesa (FEX has no 32-bit Vulkan thunk). To have it for
 programs started directly, set `TSO_ARM_THUNKS=1` in the environment (for example in `~/.profile`); `TSO_ARM_MODE`
 does the same for the ordering mode.
 

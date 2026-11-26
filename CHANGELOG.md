@@ -36,7 +36,10 @@ or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt 
   memory report, a list of drivers to load) are taken out of the chain for the call now and put back after it, and a
   messenger a program makes itself gets FEX's host function also where the program took the function that makes it
   from `vkGetInstanceProcAddr` (vulkaninfo does; it went to the loader as it was). Faults of FEX's own;
-  `tests/vkproc.c` does both, and the graphics check runs vulkaninfo and it with and without `--gpu`.
+  `tests/vkproc.c` does both, and the graphics check runs vulkaninfo and it with and without `--gpu`. Still open: on a
+  desktop with a Wayland compositor, a Vulkan program that asks about Wayland windows (vulkaninfo does) hands the host's
+  driver its x86 `wl_display` (FEX's Wayland thunk is not selected) and stops (`Too many bits for size_t`); without
+  a Wayland display vulkaninfo runs through on the Pi's V3D.
 - `--gpu`: no line on the terminal any more for each Vulkan function a program looks up that FEX's thunk has no
   signature for (vulkaninfo had ten, DXVK more); the program gets a null pointer for it, as before.
   `TSO_ARM_VULKAN_UNKNOWN=1` prints them.

@@ -86,7 +86,11 @@ only the older debug report structure out of such chains. Now every structure th
 back after it. vulkaninfo also makes a messenger of its own with the function `vkGetInstanceProcAddr` gives, which was
 the loader's own rather than FEX's replacement (that one puts in a host function): `vkGetInstanceProcAddr` answers
 with FEX's for the messengers' functions now. `tests/vkproc.c` does both, for every severity, and the graphics check
-runs it and `vulkaninfo --summary` with and without `--gpu`. Faults of FEX's own.
+runs it and `vulkaninfo --summary` with and without `--gpu`. Faults of FEX's own. Open: on a Wayland desktop
+(the Pi's), vulkaninfo connects to the compositor with the x86 libwayland of the root file system and asks the host's
+driver about that connection, which reads it as its own (`Too many bits for size_t` from the host's libwayland,
+SIGABRT); without a Wayland display it runs through on the V3D. FEX's Wayland thunk, selected as well, stopped with
+`Permission denied`.
 
 ## 5. Installing for every user, and updating
 
