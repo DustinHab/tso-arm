@@ -1,6 +1,12 @@
 # Changes
 
-## 0.4.6 (not released yet)
+## 0.4.6 (2026-11-26)
+
+Programs start much faster from their second run on: `tso-arm run` keeps what FEX translated in a cache on disk,
+for the patched FEX's own states only, so x86 order stays kept. Vulkan programs that chain a debug messenger, among
+them vulkaninfo, run under `--gpu` now, and 32-bit programs of older distributions start. Three of the four faults
+fixed are FEX's own. Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`
+or `tso-arm update`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **A program starts faster the second time.** `tso-arm run` turns on FEX's disk cache: code translated in an
   earlier run of the same program and libraries is loaded instead of translated anew. On a Raspberry Pi 5
