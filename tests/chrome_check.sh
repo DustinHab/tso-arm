@@ -33,7 +33,8 @@ print([x["url"] for x in d["channels"]["Stable"]["downloads"]["chrome-headless-s
     curl -fsSL --retry 2 -o "$D/shell.zip" "$url"
     rm -rf "$D/chrome-headless-shell-linux64"
     python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$D/shell.zip" "$D"
-    chmod +x "$S" "$D/chrome-headless-shell-linux64/chrome_crashpad_handler"
+    # (the zip's file modes are not kept: the shell is the one program in it)
+    chmod +x "$S"
     rm -f "$D/shell.zip"
 fi
 echo "chrome_check: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["channels"]["Stable"]["version"])' "$D/versions.json" 2>/dev/null || echo "headless shell") in $D"
