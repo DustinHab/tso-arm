@@ -17,8 +17,17 @@ else
     bad "page size" "$([ -n "$ps" ] && echo "$((ps / 1024)) KB" || echo unknown) (FEX and the views need a 4 KB-page kernel)"
     sh tools/pages_hint.sh | sed 's/^/    /'
 fi
-cfg=/boot/config-$(uname -r)
-va=$( (cat $cfg 2>/dev/null || zcat /proc/config.gz 2>/dev/null) | sed -n 's/^CONFIG_ARM64_VA_BITS=//p')
+# the kernel's configuration where distributions keep it (Debian, openSUSE; Fedora; Arch), else the highest address
+# this process has (its stack's: 0xffff... with 48 bits, 0x7f... with 39), as in a container
+r=$(uname -r)
+va=$( (cat /boot/config-$r /lib/modules/$r/config 2>/dev/null; zcat /proc/config.gz 2>/dev/null) | sed -n 's/^CONFIG_ARM64_VA_BITS=//p' | head -n 1)
+if [ -z "$va" ]; then
+    top=$(sed -n '$s/^[0-9a-f]*-\([0-9a-f]*\) .*/\1/p' /proc/self/maps)
+    case $top in
+    [1]*) b=1 ;; [23]*) b=2 ;; [4-7]*) b=3 ;; [89a-f]*) b=4 ;; *) b="" ;;
+    esac
+    [ -n "$b" ] && va="$((4 * (${#top} - 1) + b)), from this process's addresses"
+fi
 say "virtual address bits" "${va:-unknown} (39 or more: 15 threads with views of their own, more share them in the fallback)"
 model=$(lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | sort -u | tr '\n' ' ')
 # without lscpu (util-linux): the cores' part numbers, which lscpu turns into names

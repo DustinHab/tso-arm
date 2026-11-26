@@ -5,7 +5,8 @@ server, a Rockchip board. This page is for using it; the README says how it work
 
 ## Installing
 
-On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS):
+On 64-bit Arm Linux with 4 KB pages and glibc 2.35 or newer (Ubuntu 22.04 and newer, Debian 12 and newer, Fedora,
+openSUSE Tumbleweed, Raspberry Pi OS; the list below says what each needs first):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh
@@ -30,6 +31,25 @@ sudo reboot
 ```
 
 `tso-arm check` tells whether a computer can run tso-arm, and what to change if not.
+
+### Distributions
+
+The installer names what a system lacks, with the command that installs it there, before it fetches anything. These
+distributions are tested on every change (`.github/workflows/distros.yml`), from their own container images, which
+come with less than an installed system; what each needs before the one-line install:
+
+| Distribution | Before the installer |
+|---|---|
+| Debian 12 and 13, Raspberry Pi OS | `sudo apt-get install curl ca-certificates` (where curl is missing) |
+| Ubuntu 22.04, 24.04 and 26.04 | `sudo apt-get install curl ca-certificates` (where curl is missing) |
+| Fedora | nothing |
+| openSUSE Tumbleweed | `sudo zypper install gawk` (where awk is missing) |
+| Alpine (musl) | does not run there: the prebuilt FEX needs glibc. A container of a distribution with glibc (`podman run -it debian:13`) runs tso-arm |
+| Debian 11, Amazon Linux 2023 (glibc 2.31, 2.34; RHEL 9 and its rebuilds have 2.34 as well) | the prebuilt FEX needs glibc 2.35 or newer: FEX is built from source there (`tso-arm install --source` in a clone of the repository) |
+
+In each, as root and as a user, the tests install, run `tso-arm check`, x86-64 and 32-bit programs with their threads
+and litmus tests, `tso-arm report` and `tso-arm uninstall`. `tso-arm rootfs` needs curl and unsquashfs as well
+(`squashfs-tools`, on openSUSE `squashfs`), which it names where they are missing.
 
 ## Running programs
 

@@ -48,6 +48,37 @@ expect=${3:-runs}
 . /etc/os-release
 echo "== $PRETTY_NAME ($(uname -m)), as $(id -un)"
 
+# The command a message of tso-arm's names on its own indented line ("  apt-get install curl"), run without questions;
+# WHAT says what the message was about. Fails if there is none or it fails.
+named() {
+    cmd=$(printf '%s\n' "$1" | sed -n 's/^  \([a-z].*\(install\|apk add\).*\)$/\1/p' | tail -n 1)
+    [ -n "$cmd" ] || fail "$2: no command named to install what is missing"
+    ok "$2: it names $cmd"
+    cmd=$(echo "$cmd" | sed 's/apt-get install/apt-get install -y -q/; s/\(dnf\|yum\) install/\1 install -y -q/;
+        s/zypper install/zypper -n -q install/; s/pacman -S/pacman -S --noconfirm/')
+    log=$(DEBIAN_FRONTEND=noninteractive sh -c "$cmd" 2>&1) || {
+        show "$(echo "$log" | tail -n 20)"
+        fail "$cmd"
+    }
+    ok "installed with: $cmd"
+}
+
+# Where the installer stops: whether the statically linked FEX of the package (which binfmt_misc starts in
+# containers) runs the static test programs here all the same, started as there; for the record, it fails nothing
+static_fex() {
+    command -v tar >/dev/null && command -v gzip >/dev/null || {
+        echo "      no tar and gzip here: the statically linked FEX not tried"
+        return 0
+    }
+    d=$(mktemp -d)
+    tar -xzf "$PKG" -C "$d" && S=$(echo "$d"/tso-arm-*/fex/prebuilt/bin/FEX-static) && [ -x "$S" ] || return 0
+    for p in "threads 8" "mp mp 100000" "threads32 8" "mp32 mp 100000"; do
+        o=$(TSO_ARM_HANDOVER=1 timeout 300 "$S" $B/$p 2>&1) && s=0 || s=$?
+        echo "      statically linked FEX alone, $p: exit status $s, $(printf '%s\n' "$o" | tail -n 1)"
+    done
+    rm -rf "$d"
+}
+
 # what tso-arm says and does once installed; T is the command
 checks() {
     out=$($T version) || fail "tso-arm version: $out"
@@ -96,21 +127,13 @@ if [ "$step" = root ]; then
         old-glibc) echo "$out" | grep -q 'has glibc 2\.[0-9]*; the prebuilt FEX needs 2.35 or newer' || fail "the installer did not name glibc" ;;
         esac
         ok "the installer stops: $(echo "$out" | head -n 1)"
+        static_fex
         exit 0
         ;;
     esac
     if [ $s != 0 ]; then
         [ ! -e /opt/tso-arm/current ] || fail "the installer stopped and left an installation"
-        # the command it named, without questions
-        cmd=$(printf '%s\n' "$out" | sed -n 's/^  \([a-z].*\(install\|apk add\).*\)$/\1/p' | tail -n 1)
-        [ -n "$cmd" ] || fail "the installer stopped without naming what to install"
-        ok "the installer names what is missing: $cmd"
-        cmd=$(echo "$cmd" | sed 's/apt-get install/apt-get install -y -q/; s/\(dnf\|yum\) install/\1 install -y -q/; s/zypper install/zypper -n -q install/; s/pacman -S/pacman -S --noconfirm/')
-        log=$(DEBIAN_FRONTEND=noninteractive sh -c "$cmd" 2>&1) || {
-            show "$(echo "$log" | tail -n 20)"
-            fail "$cmd"
-        }
-        ok "installed with: $cmd"
+        named "$out" "the installer stops"
     else
         ok "the installer installs as the image comes"
     fi
@@ -131,6 +154,15 @@ if [ "$step" = root ]; then
     ok "installed from $PKG into /opt/tso-arm"
     T=tso-arm
     checks
+    # 'tso-arm rootfs' where its tools are missing (not fetched here: about 1 GB from FEX's server)
+    if ! command -v unsquashfs >/dev/null; then
+        s=0
+        out=$($T rootfs 2>&1) || s=$?
+        show "$out"
+        [ $s != 0 ] || fail "tso-arm rootfs without unsquashfs"
+        named "$out" "tso-arm rootfs without unsquashfs"
+        command -v unsquashfs >/dev/null || fail "no unsquashfs after that"
+    fi
     out=$($T uninstall) || fail "tso-arm uninstall: $out"
     show "$out"
     [ ! -e /opt/tso-arm ] && [ ! -e /usr/local/bin/tso-arm ] || fail "tso-arm uninstall left files behind"

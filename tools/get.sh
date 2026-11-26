@@ -12,7 +12,8 @@
 #   TSO_ARM_DEST      another directory than the default for the installation
 #   TSO_ARM_BINFMT=0  as root: leave binfmt_misc as it is
 # What the system lacks for it (a downloader, tar, awk, a C library the prebuilt FEX runs on) is named before anything
-# is fetched, with the command that installs it on this distribution.
+# is fetched, with the command that installs it on this distribution. tso-arm's own messages of that kind come from
+# here as well: tools/get.sh --missing WHAT COMMAND... (exit status 1)
 set -e
 REPO_URL=https://github.com/DustinHab/tso-arm
 
@@ -21,9 +22,6 @@ die() {
     echo "tso-arm: $*" >&2
     exit 1
 }
-
-[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] ||
-    die "tso-arm runs on 64-bit Arm Linux; this is $(uname -s) on $(uname -m)"
 distro=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-$ID}")
 distro=${distro:-this system}
 
@@ -54,6 +52,7 @@ package() {
     case $1 in
     od | sha256sum | mktemp) echo coreutils ;;
     awk) echo gawk ;;
+    unsquashfs) case $(installer) in *zypper*) echo squashfs ;; *) echo squashfs-tools ;; esac ;;
     libstdc++.so.6)
         case $(installer) in
         *apt-get* | *zypper*) echo libstdc++6 ;;
@@ -110,6 +109,13 @@ cacerts() {
     done
     return 1
 }
+if [ "${1:-}" = --missing ]; then
+    shift
+    missing "$@"
+fi
+
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] ||
+    die "tso-arm runs on 64-bit Arm Linux; this is $(uname -s) on $(uname -m)"
 
 # The C library: the prebuilt FEX is linked against glibc 2.35 (Ubuntu 22.04's) and its C++ library, and starts
 # through glibc's dynamic loader

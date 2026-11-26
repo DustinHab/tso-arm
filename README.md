@@ -31,8 +31,9 @@ libraries translated ahead of time: 82 % of the host's own Arm builds, against 6
 [docs/GUIDE.md](docs/GUIDE.md) is the guide for using it: installing, programs with libraries, AppImages, graphics,
 Windows programs, containers, what to do when a program does not run.
 
-On 64-bit Arm Linux with 4 KB pages (Ubuntu 22.04 and newer, Debian 12 and newer, Raspberry Pi OS with the 4 KB
-kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and `tso-arm check` names the line that changes that):
+On 64-bit Arm Linux with 4 KB pages and glibc 2.35 or newer (Ubuntu 22.04 and newer, Debian 12 and newer, Fedora,
+openSUSE Tumbleweed, Raspberry Pi OS with the 4 KB kernel; on a Pi 5 Raspberry Pi OS starts a 16 KB one, and
+`tso-arm check` names the line that changes that; the installer names what else a system lacks):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh

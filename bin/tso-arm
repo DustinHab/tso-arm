@@ -314,8 +314,7 @@ elfinfo() {
     # nothing at all: no od or no awk (openSUSE's container image comes without awk)
     if [ -z "$r" ]; then
         for t in od awk; do
-            command -v $t >/dev/null 2>&1 ||
-                die "tso-arm reads programs with od and awk, and $t is missing here (package $([ $t = od ] && echo coreutils || echo gawk))"
+            command -v $t >/dev/null 2>&1 || sh "$REPO/tools/get.sh" --missing "reading a program's ELF header needs" $t || exit 1
         done
     fi
     echo "${r:-other other - -}"
@@ -685,7 +684,16 @@ cmd_rootfs() {
     [ -x "$fetcher" ] || die "FEXRootFSFetcher not found next to $F"
     # without options: Ubuntu 24.04, unpacked, without questions (what tso-arm is tested with); with options, the
     # fetcher's own (--help)
-    [ $# -gt 0 ] || set -- -y -x --distro-name=ubuntu --distro-version=24.04
+    if [ $# = 0 ]; then
+        # the fetcher downloads with curl and offers the SquashFS images where unsquashfs can unpack them (the EroFS
+        # ones where erofsfuse and fsck.erofs can); most minimal systems have neither
+        m=""
+        command -v curl >/dev/null 2>&1 || m="$m curl"
+        command -v unsquashfs >/dev/null 2>&1 || { command -v erofsfuse >/dev/null 2>&1 && command -v fsck.erofs >/dev/null 2>&1; } ||
+            m="$m unsquashfs"
+        [ -z "$m" ] || sh "$REPO/tools/get.sh" --missing "'tso-arm rootfs' needs" $m || exit 1
+        set -- -y -x --distro-name=ubuntu --distro-version=24.04
+    fi
     # as root in an installation for every user: one root file system for all of them, beside the versions
     # (FEX_APP_DATA_LOCATION: where the fetcher puts it; the configuration it writes goes nowhere, tso-arm run finds it)
     if [ "$(id -u)" = 0 ] && d=$(installed_dir) && [ -z "$FEX_APP_DATA_LOCATION" ]; then
