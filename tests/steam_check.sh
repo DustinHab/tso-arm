@@ -6,10 +6,13 @@
 # screenshots, the windows and processes, and Steam's logs. Needs the root file system ('tso-arm rootfs'), Xvfb,
 # xwininfo (x11-utils), import (ImageMagick), dpkg-deb; dbus-launch where there is one.
 #   tests/steam_check.sh NAME [OPTIONS of tso-arm run]        tests/steam_check.sh gpu --gpu
-#   STEAM_MINUTES (default 20); STEAM_KEEP=1 keeps the Steam installation of an earlier run (~/.local/share/Steam)
+#   STEAM_MINUTES (default 20); STEAM_KEEP=1 keeps the Steam installation of an earlier run (~/.local/share/Steam);
+#   STEAM_ARGS: options for Steam (-cef-...); STEAM_STRACE=1: the system calls of every process that failed, as the
+#   host's strace sees them (FEX's own), into strace.txt
 # Into build/steam/NAME: summary.md (the stages with the second each was reached, the first errors), console.txt
 # (stdout and stderr of the launcher and what it started), logs/ (Steam's), shot-SSSS.png, windows-SSSS.txt and
-# ps-SSSS.txt every 30 seconds. Exit status 0 when it ran; how far Steam got is in summary.md.
+# ps-SSSS.txt (with the sockets of FEX's server) every 30 seconds. Exit status 0 when it ran; how far Steam got is in
+# summary.md.
 set -e
 cd "$(dirname "$0")/.."
 R=$PWD
@@ -72,6 +75,18 @@ fi
     fi
     [ -f /proc/sys/fs/binfmt_misc/tso-arm ] && echo "binfmt_misc: $(sed -n 's/^interpreter //p' /proc/sys/fs/binfmt_misc/tso-arm) ($(sed -n 's/^flags: //p' /proc/sys/fs/binfmt_misc/tso-arm))" ||
         echo "binfmt_misc: tso-arm not registered"
+    # FEX itself (no server running yet) with an XDG_RUNTIME_DIR that names no directory, and tso-arm run so
+    F=$HOME/.local/opt/tso-arm/bin/FEX
+    if [ -x "$F" ]; then
+        o=$(XDG_RUNTIME_DIR=/nonexistent/run "$F" /bin/true 2>&1) && s=0 || s=$?
+        echo "FEX /bin/true, XDG_RUNTIME_DIR=/nonexistent/run: exit status $s $(echo "$o" | tail -n 1)"
+        sleep 2
+        printf '#!/bin/sh\necho "$(uname -m) from a script"\n' >"$O/script.sh"
+        chmod +x "$O/script.sh"
+        o=$(XDG_RUNTIME_DIR=/nonexistent/run "$T" run "$O/script.sh" 2>&1) && s=0 || s=$?
+        echo "tso-arm run SCRIPT, XDG_RUNTIME_DIR=/nonexistent/run: exit status $s $(echo "$o" | tail -n 1)"
+        sleep 2
+    fi
     echo '```'
 } >"$O/summary.md"
 
@@ -96,9 +111,13 @@ fi
 
 # Steam, in a session of its own (for stopping all of it at the end)
 start=$(date +%s)
-setsid "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" >"$O/console.txt" 2>&1 </dev/null &
+wrap=""
+if [ "${STEAM_STRACE:-0}" = 1 ]; then
+    wrap="strace -f -Z -qq --seccomp-bpf -e signal=none -e trace=%process,%memory,%ipc,%network -o $O/strace.txt"
+fi
+setsid $wrap "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
 pid=$!
-say "started: tso-arm run $opts $L/usr/lib/steam/bin_steam.sh (session $pid), at most $min minutes"
+say "started: ${wrap:+$wrap }tso-arm run $opts $L/usr/lib/steam/bin_steam.sh ${STEAM_ARGS:-}(session $pid), at most $min minutes"
 
 # the stages, each with the second it was first seen
 stages=""
@@ -117,7 +136,11 @@ shown=0
 while :; do
     now=$(($(date +%s) - start))
     tag=$(printf '%04d' $now)
-    ps -eo pid,ppid,etimes,rss,args >"$O/ps-$tag.txt" 2>/dev/null || true
+    {
+        ps -eo pid,ppid,etimes,rss,args
+        echo "FEX's server sockets:"
+        ls -la "${XDG_RUNTIME_DIR:-/nonexistent}" "${TMPDIR:-/tmp}" 2>&1 | grep -i 'fex\|^/\|cannot'
+    } >"$O/ps-$tag.txt" 2>/dev/null || true
     xwininfo -root -tree >"$O/windows-$tag.txt" 2>/dev/null || true
     import -window root "$O/shot-$tag.png" 2>/dev/null || true
     [ -x "$S/steam.sh" ] && mark bootstrap $now
@@ -126,7 +149,7 @@ while :; do
     [ -d "$S/ubuntu12_64/steam-runtime-steamrt" ] && mark runtime-unpacked $now
     grep -q 'ubuntu12_32/steam ' "$O/ps-$tag.txt" && mark client-running $now
     grep -q 'steamwebhelper' "$O/ps-$tag.txt" && mark steamwebhelper $now
-    grep -q 'pressure-vessel\|pv-bwrap\|srt-bwrap' "$O/ps-$tag.txt" && mark container $now
+    awk '{ print $5 }' "$O/ps-$tag.txt" | grep -q 'pressure-vessel\|pv-bwrap\|srt-bwrap' && mark container $now
     # windows (xwininfo: 0x200007 "Title": ("instance" "class")  1280x800+0+0): the 32-bit client's own (its
     # updater), and steamwebhelper's of 200 by 200 pixels or more (it keeps small hidden ones as well)
     grep -q '("steam" "steam")' "$O/windows-$tag.txt" && mark client-window $now
@@ -181,6 +204,21 @@ done
         grep -iE 'error|fail|cannot|can.t|not found|unable|abort|crash|signal|denied|unsupported' | head -n 40
     echo '```'
     echo
+    if [ -f "$O/strace.txt" ]; then
+        echo "System calls that failed (strace -f -Z: name, error, how often):"
+        echo
+        echo '```'
+        sed -n 's/^[0-9][0-9]* *\([a-z0-9_]*\)(.*= -1 \([A-Z0-9]*\).*/\1 \2/p' "$O/strace.txt" | sort | uniq -c | sort -rn | head -n 30
+        echo '```'
+        echo
+        echo "Of them clone, clone3, fork, vfork (the first 20):"
+        echo
+        echo '```'
+        grep -E '^[0-9]+ +(clone|clone3|fork|vfork)\(' "$O/strace.txt" | head -n 20 | cut -c1-300
+        echo '```'
+        echo
+        gzip -9 "$O/strace.txt"
+    fi
     echo "Last lines of console.txt:"
     echo
     echo '```'

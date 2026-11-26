@@ -2,9 +2,10 @@ name: Steam
 
 # Valve's Steam client for Linux under tso-arm on an Arm runner, as far as it gets without logging in
 # (tests/steam_check.sh): Valve's launcher package unpacked, started with 'tso-arm run' on Xvfb, the bootstrap, the
-# client's update, steamwebhelper and its windows recorded with screenshots and Steam's logs. Variants: as the runner
-# comes, with user namespaces allowed (Chromium's sandbox in steamwebhelper and pressure-vessel's bubblewrap need
-# them; Ubuntu 24.04's AppArmor restricts them), and that under FEX's full ordering (--mode full) for comparison.
+# client's update, steamwebhelper and its windows recorded with screenshots and Steam's logs. Steam requires user
+# namespaces (its requirements check runs bubblewrap, and steamwebhelper's sandbox makes them), which Ubuntu 24.04's
+# AppArmor restricts: variants with the restriction lifted (sysctl), with an AppArmor profile that allows them to FEX
+# alone, with the failed system calls traced, and with options for steamwebhelper.
 
 on:
   push:
@@ -21,19 +22,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: as-the-runner-comes
           - name: userns
             userns: 1
-          - name: userns-full
+          - name: apparmor-profile
+            apparmor: 1
+          - name: userns-strace
             userns: 1
-            args: --mode full
+            strace: 1
+          - name: userns-cef-options
+            userns: 1
+            steam_args: -cef-in-process-gpu -cef-disable-gpu-compositing
     steps:
       - uses: actions/checkout@v4
 
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd \
+          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd strace \
             cmake ninja-build clang lld python3
           # FEX's thunks, where FEX has to be built (as the release builds them)
           g=$(gcc -dumpversion | cut -d. -f1)
@@ -59,16 +64,28 @@ jobs:
       - name: Root file system as a user fetches it
         run: bin/tso-arm rootfs >/dev/null
 
-      - name: User namespaces allowed
+      - name: User namespaces allowed for every program (sysctl)
         if: matrix.userns
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: x86 programs started directly (binfmt_misc)
-        if: matrix.binfmt
-        run: sudo bin/tso-arm binfmt register && bin/tso-arm binfmt
+      - name: User namespaces allowed for FEX alone (AppArmor profile)
+        if: matrix.apparmor
+        run: |
+          sudo tee /etc/apparmor.d/tso-arm-fex >/dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile tso-arm-fex $HOME/.local/opt/tso-arm/bin/{FEX,FEX-static} flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/tso-arm-fex
+          sudo aa-status 2>/dev/null | grep -A1 -i 'tso-arm' || true
 
       - name: Steam
         timeout-minutes: 40
+        env:
+          STEAM_STRACE: ${{ matrix.strace }}
+          STEAM_ARGS: ${{ matrix.steam_args }}
         run: |
           STEAM_MINUTES=25 sh tests/steam_check.sh ${{ matrix.name }} ${{ matrix.args }}
           cat build/steam/${{ matrix.name }}/summary.md >>"$GITHUB_STEP_SUMMARY"

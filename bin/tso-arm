@@ -469,11 +469,10 @@ cmd_run() {
     for x in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
         eval "[ -n \"\${$x-unset}\" ] || unset $x"
     done
-    # FEX's server listens on an abstract socket, which a process in a network namespace of its own does not reach
-    # (Chromium's sandbox makes one: Steam's steamwebhelper), and on a socket in XDG_RUNTIME_DIR; where that names no
-    # directory (a session without a login manager, as on CI runners and in containers), the second socket was
-    # missing and FEX did not start there. Unset, FEX puts it into TMPDIR or /tmp.
-    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    # FEX's server makes a socket in XDG_RUNTIME_DIR besides its abstract one, and does not start where it cannot
+    # (an XDG_RUNTIME_DIR that names no directory, or another user's after su): FEX did not start then. Unset, FEX puts
+    # it into TMPDIR or /tmp.
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && { [ ! -d "$XDG_RUNTIME_DIR" ] || [ ! -w "$XDG_RUNTIME_DIR" ]; }; then
         unset XDG_RUNTIME_DIR
     fi
     # without glibc's dynamic loader (musl) the shell would say no more than "FEX: not found"
