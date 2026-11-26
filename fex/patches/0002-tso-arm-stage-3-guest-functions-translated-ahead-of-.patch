@@ -1,15 +1,15 @@
-From 858a02e9022a39f2b6164fac074dd455c8176b8f Mon Sep 17 00:00:00 2001
+From f47b0ff8ff0eb5ea9cbffccdbac1258b0702bbff Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
- FEXCore/Source/Interface/Context/Context.h    |    4 +
+ FEXCore/Source/Interface/Context/Context.h    |   10 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |   28 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
- FEXCore/Source/Interface/Core/Core.cpp        |  138 +-
- FEXCore/Source/Interface/Core/DiskCache.cpp   |   32 +
+ FEXCore/Source/Interface/Core/Core.cpp        |  156 ++-
+ FEXCore/Source/Interface/Core/DiskCache.cpp   |   49 +-
  FEXCore/Source/Interface/Core/DiskCache.h     |    4 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
  FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
@@ -29,7 +29,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  FEXCore/Source/Utils/AllocatorHooks.cpp       |   41 +
  FEXCore/include/FEXCore/Core/Context.h        |   10 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
- FEXCore/include/FEXCore/Core/TSOViews.h       |   76 +-
+ FEXCore/include/FEXCore/Core/TSOViews.h       |   86 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |    2 +
  Source/Common/Config.cpp                      |   28 +-
  Source/Common/FDUtils.h                       |   32 +
@@ -55,10 +55,10 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 51 files changed, 4064 insertions(+), 291 deletions(-)
+ 51 files changed, 4113 insertions(+), 293 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
+index 18f08b861e4b979c9b12b6317138519dccccb50b..c4ad396840f23ee014adbccefc7a2d9904f959bc 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
 @@ -238,6 +238,10 @@ public:
@@ -72,6 +72,19 @@ index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569
  
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
+@@ -513,6 +517,12 @@ private:
+   fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
+   // tso-arm: guest instructions translated ordered (all others plain) when views are on; under CodeInvalidationMutex
+   IntervalList<uint64_t> TSOEscalated;
++public:
++  // tso-arm: how often the escalations changed, and a hash of those within [Begin, End), relative to Begin (the disk
++  // cache's check of code translated with the views awake)
++  std::atomic<uint64_t> TSOEscalationGeneration {0};
++  uint64_t TSOEscalationFingerprint(uint64_t Begin, uint64_t End) const;
++private:
+   mutable std::shared_mutex TSOEscalatedMutex; // own lock: escalations are recorded without invalidating code
+   // tso-arm: trapped instruction starts of left-behind blocks, host PC -> guest RIP
+   std::mutex TSOTrapMutex;
 diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
 index 8b060b10e13eaf36400782122352f5842143c1fa..83334b3a47efee9455259f71b914b4f41aabfad7 100644
 --- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
@@ -192,7 +205,7 @@ index 87a110c845921e3d5bd7dd5f22b0f97d95aa9ba6..e5ff4c712e54e05557a525c86b5be4e5
      }
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d584838165 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a012272b6ba1de328f4b1218c13526c3405c8c17 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
@@ -236,7 +249,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
    Allocator::LockBeforeFork(Thread);
    if (Config.StrictInProcessSplitLocks) {
      FEXCore::Utils::SpinWaitLock::lock(&StrictSplitLockMutex);
-@@ -519,6 +532,38 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
+@@ -519,6 +532,39 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
    return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
  }
  
@@ -269,13 +282,14 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
 +    const uint32_t N = NumViewExitKinds.load(std::memory_order_relaxed);
 +    ViewExitKinds[N].store(Kind, std::memory_order_relaxed);
 +    NumViewExitKinds.store(N + 1, std::memory_order_release);
++    TSOViews::LearnedExitKinds.store(N + 1, std::memory_order_release);
 +  }
 +} // namespace
 +
  ContextImpl::GenerateIRResult
  ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
    FEXCORE_PROFILE_SCOPED("GenerateIR");
-@@ -529,8 +574,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -529,8 +575,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
    uint64_t TotalInstructionsLength {0};
  
    bool HasCustomIR {};
@@ -288,7 +302,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
  
    if (HasCustomIRHandlers.load(std::memory_order_relaxed)) {
      std::shared_lock lk(CustomIRMutex);
-@@ -637,13 +685,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -637,13 +686,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
          // side effect here and (if that behaviour is required) we should handle
          // that more explicitly later.
          // tso-arm: with the page protocol a thread may be sent back to the dispatcher at any instruction start
@@ -312,7 +326,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
            }
            Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
          }
-@@ -696,12 +751,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -696,12 +752,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
            }
            // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
            // thread writes; the page protections make that sound
@@ -339,7 +353,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
            if (Thread->OpDispatcher->HadDecodeFailure()) {
              HadDispatchError = true;
            } else {
-@@ -781,6 +849,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -781,6 +850,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
  
    Thread->FrontendDecoder->DelayedDisownBuffer();
  
@@ -351,7 +365,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
    IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
  
    auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
-@@ -899,9 +972,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -899,9 +973,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
    std::optional<DiskCache::CodeHitData> Hit;
    std::optional<uint64_t> DiskCacheGuestCodeKey;
@@ -382,18 +396,22 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
        if (LoadedCode.BlockBegin) {
-@@ -938,10 +1031,17 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -938,10 +1032,21 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
 -  const uint64_t CompileStart = TSOViews::Enabled() ? TSOViews::Nanos() : 0;
 +  const bool ViewsOn = TSOViews::Enabled();
 +  const uint64_t CompileStart = ViewsOn && TSOViews::StatsWanted() ? TSOViews::Nanos() : 0;
++  const uint64_t EscalationsBefore = TSOEscalationGeneration.load(std::memory_order_acquire);
    auto [CompiledCode, DebugData, StartAddr, Length, NeedsAddGuestCodeRanges] = CompileCode(Thread, GuestRIP, MaxInst);
 -  if (CompileStart) {
 -    TSOViews::Account(TSOViews::Spent.Compiles, TSOViews::Spent.CompileNs, CompileStart);
-+  // tso-arm: translated in a state the disk cache does not keep (the views woke or fell back since the lookup)
-+  if (DiskCacheGuestCodeKey && !TSOViews::DiskCacheable()) {
++  // tso-arm: translated in a state the disk cache does not keep (the views woke or fell back since the lookup, an
++  // exit point was learned), or with escalations that changed meanwhile, which the store would check against as
++  // they are then
++  if (DiskCacheGuestCodeKey &&
++      (!TSOViews::DiskCacheable() || TSOEscalationGeneration.load(std::memory_order_acquire) != EscalationsBefore)) {
 +    DiskCacheGuestCodeKey.reset();
 +  }
 +  if (ViewsOn) {
@@ -403,7 +421,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -959,9 +1059,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -959,9 +1064,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
          fclose(F);
        }
      }
@@ -415,7 +433,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
                static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
                (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
      }
-@@ -1143,6 +1243,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1248,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -438,8 +456,31 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..e4174ac2530590c46b45514ab78d40d5
  void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
+@@ -1199,9 +1320,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
+     return false;
+   }
+   TSOEscalated.Insert({Start, End});
++  TSOEscalationGeneration.fetch_add(1, std::memory_order_acq_rel);
+   return true;
+ }
+ 
++uint64_t ContextImpl::TSOEscalationFingerprint(uint64_t Begin, uint64_t End) const {
++  std::shared_lock lk(TSOEscalatedMutex);
++  uint64_t Hash = 0;
++  // sorted by their ends, which do not overlap
++  auto It = std::lower_bound(TSOEscalated.begin(), TSOEscalated.end(), Begin, [](const auto& I, uint64_t B) { return I.End <= B; });
++  for (; It != TSOEscalated.end() && It->Offset < End; ++It) {
++    const uint64_t Rel[2] = {std::max<uint64_t>(It->Offset, Begin) - Begin, std::min<uint64_t>(It->End, End) - Begin};
++    Hash = XXH3_64bits_withSeed(Rel, sizeof(Rel), Hash);
++  }
++  return Hash;
++}
++
+ bool ContextImpl::GetCurrentBlockGuestRange(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t* Start, uint64_t* End) {
+   const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
+   auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..fed2386e1a34a1a2b93139cdd76906646bacc523 100644
+index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..abe373c7b20f80fd3095457455120ad1cdac2a38 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
 @@ -8,6 +8,7 @@
@@ -450,7 +491,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..fed2386e1a34a1a2b93139cdd7690664
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/HLE/SyscallHandler.h>
-@@ -484,6 +485,35 @@ namespace DiskCache {
+@@ -484,6 +485,48 @@ namespace DiskCache {
      }
    }
  
@@ -483,10 +524,23 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..fed2386e1a34a1a2b93139cdd7690664
 +    IndexLock.unlock();
 +  }
 +
++  // tso-arm: code translated with the views awake was ordered as the escalations within its range said: they go into
++  // its guest code's hash, at the store and at the lookup, so that a block is taken only where they are the same
++  static XXH128_hash_t WithEscalations(FEXCore::Context::ContextImpl* CTX, XXH128_hash_t Hash, uint64_t GuestRIP, uint64_t GuestSize) {
++    if (!TSOViews::AwakeInCompile()) {
++      return Hash;
++    }
++    struct {
++      XXH128_hash_t Hash;
++      uint64_t Escalations;
++    } Mixed {Hash, CTX->TSOEscalationFingerprint(GuestRIP, GuestRIP + GuestSize)};
++    return XXH3_128bits(&Mixed, sizeof(Mixed));
++  }
++
    uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
      struct __attribute__((packed)) {
        uint64_t CodeKey;
-@@ -503,6 +533,8 @@ namespace DiskCache {
+@@ -503,6 +546,8 @@ namespace DiskCache {
      if (MonoBackpatcher) {
        BlobKeyBytes.Flags |= 1 << 3;
      }
@@ -495,6 +549,24 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..fed2386e1a34a1a2b93139cdd7690664
  
      return XXH3_64bits(&BlobKeyBytes, sizeof(BlobKeyBytes));
    }
+@@ -707,7 +752,7 @@ namespace DiskCache {
+           for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
+             XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
+           }
+-          LiveGuestHash = XXH3_128bits_digest(&HashState);
++          LiveGuestHash = WithEscalations(CTX, XXH3_128bits_digest(&HashState), GuestRIP, Entry.GuestSize);
+           LastFootprintHashed = CurrentFootprint;
+           FirstHash = false;
+         }
+@@ -1179,7 +1224,7 @@ namespace DiskCache {
+       for (uint32_t i = 0; i < ExactGuestCodeExtents.size(); i += 2) {
+         XXH3_128bits_update(&HashState, GuestCode.data() + ExactGuestCodeExtents[i], ExactGuestCodeExtents[i + 1]);
+       }
+-      Header.GuestHash = XXH3_128bits_digest(&HashState);
++      Header.GuestHash = WithEscalations(CTX, XXH3_128bits_digest(&HashState), GuestRIP, GuestCode.size());
+     }
+     memcpy(BlobData + HeaderOffset, &Header, sizeof(Header));
+ 
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.h b/FEXCore/Source/Interface/Core/DiskCache.h
 index f7792be2d331effc2f372179a30fa94a434be097..0f1e3e3bac2c397457cd1eb2d147b3f81ebd1444 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.h
@@ -1153,7 +1225,7 @@ index 5129f9ea6564ed511a8be91ed5036586662224ef..e41cdbc6a781812f6020757a872a8120
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
-index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..ef6a2f7fc76613194b2734f2bccccdce3c2c4da4 100644
+index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..ebc20501346aea1417315b8ec46930ae9d867b3d 100644
 --- a/FEXCore/include/FEXCore/Core/TSOViews.h
 +++ b/FEXCore/include/FEXCore/Core/TSOViews.h
 @@ -9,8 +9,10 @@
@@ -1260,16 +1332,21 @@ index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..ef6a2f7fc76613194b2734f2bccccdce
  inline uint64_t Nanos() {
    timespec T;
    clock_gettime(CLOCK_MONOTONIC, &T);
-@@ -100,4 +150,24 @@ inline void Account(uint64_t& Count, uint64_t& Ns, uint64_t Start) {
+@@ -100,4 +150,34 @@ inline void Account(uint64_t& Count, uint64_t& Ns, uint64_t Start) {
    __atomic_fetch_add(&Count, 1, __ATOMIC_RELAXED);
    __atomic_fetch_add(&Ns, Nanos() - Start, __ATOMIC_RELAXED);
  }
 +
 +// FEX's disk cache (FEX_DISKCACHE) keeps translated blocks across runs, keyed by the guest's code and FEX's
 +// configuration. Code translated while the views are asleep or fallen back addresses guest memory directly and is
-+// ordered as FEX's configuration says, alike in every run: it may be cached, under a key with that state. Code of the
-+// awake protocol depends on what this run learned (the profile's and the faults' escalations, the exit points) and is
-+// neither looked up nor stored; nor anything under a measurement knob. Answers for the translation BeginCompile began.
++// ordered as FEX's configuration says, alike in every run. Code of the awake protocol depends on what this run
++// learned: the escalations (from the profile and the faults), checked per block through its hash, and the exit points
++// learned, while there are none. Each kind is cached under a key with that state; nothing under a measurement knob.
++// Answers for the translation BeginCompile began.
++// Instruction kinds learned as exit points so far (Core.cpp, LearnViewExit): code translated with the views awake
++// depends on them as well, and is cached only while there are none (rare: their table entries' addresses change
++// from run to run, so they could not go into the key).
++inline std::atomic<uint32_t> LearnedExitKinds {0};
 +inline bool DiskCacheable() {
 +  if (!Enabled()) {
 +    return true;
@@ -1278,7 +1355,12 @@ index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..ef6a2f7fc76613194b2734f2bccccdce
 +    const char* E = getenv("TSO_VIEWS_FALLBACK_STACK");
 +    return E && E[0] == 'p';
 +  }();
-+  return !Knobs && (AsleepInCompile || FallbackInCompile);
++  // Awake: the escalations within the block go into its guest code's hash (DiskCache.cpp, the store and the lookup)
++  return !Knobs && (AsleepInCompile || FallbackInCompile || LearnedExitKinds.load(std::memory_order_acquire) == 0);
++}
++// The views awake for the translation BeginCompile began
++inline bool AwakeInCompile() {
++  return Enabled() && !AsleepInCompile && !FallbackInCompile;
 +}
 +// The state such code was translated in, four bits of the disk cache's key
 +inline uint8_t DiskCacheState() {

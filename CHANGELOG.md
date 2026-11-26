@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.8 (not released yet)
+
+- The disk cache keeps the code of the page protocol's awake state as well: a block is taken only where the escalations
+  within its range are the ones it was translated with (they go into its guest code's hash), and not while the run has
+  learned exit points of its own (rare). zstd starts in 46 instead of 63 ms on the Pi 5; efficiency 87 % (pigz 91, xz
+  91, zstd 79 %). Litmus tests with the cache warm, three rounds: none forbidden.
+
 ## 0.4.7 (2026-11-26)
 
 Vulkan programs under `--gpu` work on Wayland desktops, Raspberry Pi OS's own among them, in the default ordering
