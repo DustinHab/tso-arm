@@ -1,4 +1,4 @@
-From 46b7a3f2dfe4d992b42ccb35f120863ada59c786 Mon Sep 17 00:00:00 2001
+From 8b3cea350aaaeaf632fe45e62eb56476ee817d6c Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -9,7 +9,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
  FEXCore/Source/Interface/Core/Core.cpp        |  167 ++-
- FEXCore/Source/Interface/Core/DiskCache.cpp   |   79 +-
+ FEXCore/Source/Interface/Core/DiskCache.cpp   |   98 +-
  FEXCore/Source/Interface/Core/DiskCache.h     |    8 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
  FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
@@ -56,7 +56,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 52 files changed, 4196 insertions(+), 302 deletions(-)
+ 52 files changed, 4211 insertions(+), 306 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..47da55c46662f74d1a1d3056df90976d8f1120e9 100644
@@ -508,7 +508,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..d7524010071568695ef3e48856303c09
    const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
    auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b087481b67 100644
+index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..3750a47fb662915b9777fd6fd262eb214db7e8d0 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
 @@ -8,6 +8,7 @@
@@ -519,7 +519,18 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/HLE/SyscallHandler.h>
-@@ -484,6 +485,68 @@ namespace DiskCache {
+@@ -478,12 +479,78 @@ namespace DiskCache {
+     WritingDiskCache = (bool)RWCacheDB;
+     ReadingDiskCache = !ROCacheDBs.empty() || RWCacheDB != nullptr;
+ 
+-    if (IsWritingDiskCache()) {
++    // tso-arm: stores are written by the translating thread itself unless TSO_DISKCACHE_WRITER=1 asks for FEX's writer
++    // thread: the program saw that thread as one of its own (in /proc/self/task), and Chromium's zygote, which forks
++    // only while it has one thread, stopped (Steam's steamwebhelper, Electron programs)
++    static const bool WriterThread = getenv("TSO_DISKCACHE_WRITER") && getenv("TSO_DISKCACHE_WRITER")[0] == '1';
++    if (IsWritingDiskCache() && WriterThread) {
+       FEXCore::Threads::Flags WriterThreadFlags = {.LowPriority = true, .Internal = true};
+       Writer = fextl::make_unique<WorkQueueThread>(WriterThreadFlags, "FEX:DiskCache");
      }
    }
  
@@ -588,7 +599,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
    uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
      struct __attribute__((packed)) {
        uint64_t CodeKey;
-@@ -503,6 +566,8 @@ namespace DiskCache {
+@@ -503,6 +570,8 @@ namespace DiskCache {
      if (MonoBackpatcher) {
        BlobKeyBytes.Flags |= 1 << 3;
      }
@@ -597,7 +608,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
  
      return XXH3_64bits(&BlobKeyBytes, sizeof(BlobKeyBytes));
    }
-@@ -707,7 +772,7 @@ namespace DiskCache {
+@@ -707,7 +776,7 @@ namespace DiskCache {
            for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
              XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
            }
@@ -606,7 +617,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
            LastFootprintHashed = CurrentFootprint;
            FirstHash = false;
          }
-@@ -832,7 +897,10 @@ namespace DiskCache {
+@@ -832,7 +901,10 @@ namespace DiskCache {
      }
  
      if (StoreInMemory && MemoryLRUCurrentSize > MemoryLRUMaxSize + MemoryLRUEvictThreshold) {
@@ -618,15 +629,19 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
      }
  
      HitData.HostCode = {HitData.Blob.data() + BlobOffset, Header.HostSize};
-@@ -973,6 +1041,7 @@ namespace DiskCache {
+@@ -973,7 +1045,10 @@ namespace DiskCache {
        }
  
        if (KeepEntryInMemory && Self->MemoryLRUCurrentSize > Self->MemoryLRUMaxSize + Self->MemoryLRUEvictThreshold) {
+-        Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
 +        // tso-arm: from the writer's own thread: not under WriterLock, which DrainWrites holds while it joins this thread
-         Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
++        if (Self->Writer) {
++          Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
++        }
        }
      }
-@@ -1179,7 +1248,7 @@ namespace DiskCache {
+   };
+@@ -1179,7 +1254,7 @@ namespace DiskCache {
        for (uint32_t i = 0; i < ExactGuestCodeExtents.size(); i += 2) {
          XXH3_128bits_update(&HashState, GuestCode.data() + ExactGuestCodeExtents[i], ExactGuestCodeExtents[i + 1]);
        }
@@ -635,17 +650,26 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..661735288de5d76eaf0f321d19c6a5b0
      }
      memcpy(BlobData + HeaderOffset, &Header, sizeof(Header));
  
-@@ -1248,6 +1317,10 @@ namespace DiskCache {
+@@ -1248,8 +1323,17 @@ namespace DiskCache {
      }
  
      // hand the rest off to the writer thread
-+    std::lock_guard WLk(WriterLock);
-+    if (!Writer) {
-+      return false;
+-    Writer->QueueWork(fextl::make_unique<CacheStoreWorkItem>(this, RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize),
+-                                                             std::move(IndexBlob), StoreDisk));
++    auto Item = fextl::make_unique<CacheStoreWorkItem>(this, RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize),
++                                                       std::move(IndexBlob), StoreDisk);
++    {
++      std::lock_guard WLk(WriterLock);
++      if (Writer) {
++        Writer->QueueWork(std::move(Item));
++        return true;
++      }
 +    }
-     Writer->QueueWork(fextl::make_unique<CacheStoreWorkItem>(this, RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize),
-                                                              std::move(IndexBlob), StoreDisk));
++    // tso-arm: without the writer thread, here (see Init)
++    Item->Run();
      return true;
+   }
+ 
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.h b/FEXCore/Source/Interface/Core/DiskCache.h
 index f7792be2d331effc2f372179a30fa94a434be097..8464c5ac6fea3dfc277332efa04f1968c4cf9c86 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.h
