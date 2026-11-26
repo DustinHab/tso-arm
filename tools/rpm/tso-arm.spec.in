@@ -1,0 +1,87 @@
+# tso-arm's RPM package (Fedora, openSUSE; aarch64). tools/rpm.sh fills in the version, the release package's tree
+# and the maintainer scripts of the Debian package (tools/deb/), which the scriptlets run with the arguments dpkg would
+# give them. Nothing is compiled: the release's FEX is prebuilt.
+Name:           tso-arm
+Version:        @VERSION@
+Release:        1
+Summary:        x86 Linux programs on 64-bit Arm with x86 memory order kept
+# tso-arm and FEX: MIT; the libraries built into FEX: their licenses are in
+# /opt/tso-arm/VERSION/fex/prebuilt/licenses
+License:        MIT AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND 0BSD AND (Apache-2.0 OR MIT)
+URL:            https://github.com/DustinHab/tso-arm
+ExclusiveArch:  aarch64
+# rpm's own dependency scan reads FEX's x86 guest libraries as well and would ask for x86 C libraries: the
+# dependencies are given here. What 'tso-arm run' needs: the C and C++ libraries the prebuilt FEX is linked with
+# (built on Ubuntu 22.04: glibc 2.35, GLIBCXX_3.4.30 of GCC 12), and the shell tools it reads programs with (od, awk;
+# openSUSE's container image comes without awk)
+AutoReqProv:    no
+Requires:       glibc >= 2.35
+Requires:       libstdc++.so.6(GLIBCXX_3.4.30)(64bit)
+Requires:       libgcc_s.so.1(GCC_4.5.0)(64bit)
+Requires:       coreutils
+Requires:       grep
+Requires:       sed
+Requires:       /usr/bin/awk
+# 'tso-arm rootfs': FEX's FEXRootFSFetcher downloads with curl and unpacks with unsquashfs
+Recommends:     curl
+Recommends:     /usr/bin/unsquashfs
+# 'tso-arm learn': binutils, Python with Capstone 5, clang, perf; --gpu: the host's Vulkan library
+Suggests:       binutils
+Suggests:       python3
+Suggests:       python3-capstone
+Suggests:       clang
+Suggests:       perf
+Suggests:       libvulkan.so.1()(64bit)
+
+# the files go in as the release has them: no debug packages, no stripping, no build ID links
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+%global __arch_install_post %{nil}
+%global _build_id_links none
+
+%description
+tso-arm runs x86-64 and 32-bit x86 Linux programs on 64-bit Arm Linux.
+Multithreaded x86 programs rely on x86's memory order, which Arm processors
+do not guarantee. tso-arm orders only the memory that threads really share:
+each thread sees memory through views of its own, and the processor's page
+protection reports the moment a second thread touches a page. A program's
+hot functions can be translated ahead of time ('tso-arm learn').
+
+It is built on FEX, which the package carries prebuilt with the tso-arm
+patches. x86 programs started directly and x86-64 container images
+(docker run --platform linux/amd64) run through it as well, registered with
+binfmt_misc. Dynamically linked programs need an x86-64 root file system,
+which 'tso-arm rootfs' fetches. It needs a kernel with 4 KB pages.
+
+%install
+mkdir -p %{buildroot}/opt/tso-arm %{buildroot}/usr/bin
+cp -a '@TREE@' %{buildroot}/opt/tso-arm/%{version}
+# bin/tso-arm and tools/get.sh leave an installation with this file to the package manager
+echo rpm >%{buildroot}/opt/tso-arm/%{version}/PACKAGE
+ln -s %{version} %{buildroot}/opt/tso-arm/current
+ln -s /opt/tso-arm/current/bin/tso-arm %{buildroot}/usr/bin/tso-arm
+
+%pre
+# rpm counts the versions installed afterwards: 1 a new installation, 2 an upgrade
+if [ "$1" -gt 1 ]; then set -- upgrade; else set -- install; fi
+@PREINST@
+
+%post
+set -- configure
+@POSTINST@
+
+%preun
+# 0: the package is removed; 1: an upgrade, whose new version registered itself already
+[ "$1" = 0 ] || exit 0
+set -- remove
+@PRERM@
+
+%postun
+# removed, the package takes what its command made beside its files along, as a purge of the Debian package does
+[ "$1" = 0 ] || exit 0
+set -- purge
+@POSTRM@
+
+%files
+/opt/tso-arm
+/usr/bin/tso-arm

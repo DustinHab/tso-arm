@@ -1,7 +1,7 @@
 #!/bin/sh
-# tso-arm's Debian package (tools/deb.sh), removed: x86 programs started directly no longer run through it, if it is
-# the one registered with binfmt_misc (another tso-arm installation's registration stays). Not on an upgrade: the new
-# version registers itself when it is configured.
+# tso-arm's Debian package (tools/deb.sh; the RPM package's %preun runs it as well, tools/rpm.sh), removed: x86
+# programs started directly no longer run through it, if it is the one registered with binfmt_misc (another tso-arm
+# installation's registration stays). Not on an upgrade: the new version registers itself when it is configured.
 set -e
 D=/opt/tso-arm
 B=/proc/sys/fs/binfmt_misc
