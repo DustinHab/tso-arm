@@ -1,4 +1,4 @@
-From 46b7a3f2dfe4d992b42ccb35f120863ada59c786 Mon Sep 17 00:00:00 2001
+From abfc692b563585c7c10a6e0cac1f3eee34de576a Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
