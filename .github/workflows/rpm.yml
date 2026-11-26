@@ -146,7 +146,8 @@ jobs:
           fi
           sudo tso-arm uninstall
           test -L /opt/tso-arm/current && test -e /usr/bin/tso-arm
-          sudo rpm -V tso-arm
+          # the files only (Ubuntu's rpm knows none of the packages it requires)
+          sudo rpm -V --nodeps tso-arm
 
       - name: On the runner, upgraded to a newer package
         run: |
