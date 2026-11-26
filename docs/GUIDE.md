@@ -195,10 +195,13 @@ program (`sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`) works as 
 network processes from a "zygote"; under FEX that went wrong in three places, and `tso-arm steam` runs Steam so
 that it gets past them:
 
-- FEX's full ordering (`TSO_ARM_MODE=full`): under the page protocol the processes the zygote forks ended within
-  seconds and were started again, and the window stayed empty. Games started from Steam inherit this: they run
-  correctly, but with every access ordered (as `--mode full`).
-- steamwebhelper without Chromium's sandbox (`-cef-disable-sandbox`): with it, no window came either.
+- FEX's full ordering (`TSO_ARM_MODE=full`): up to 0.4.9 the processes the zygote forks ended within seconds under
+  the page protocol (Chromium reserves more address space than the protocol's window held). Since 0.4.10 Steam comes
+  up to its login window under the page protocol as well, in its first start some two minutes later than under full
+  ordering (on GitHub's runner 7.5 instead of 5 minutes); full ordering stays the default for now. Games started from
+  Steam inherit it: they run correctly, but with every access ordered (as `--mode full`).
+- steamwebhelper without Chromium's sandbox (`-cef-disable-sandbox`): up to 0.4.9 no window came with it. Since
+  0.4.10 the login window comes with the sandbox as well (`TSO_ARM_STEAM_SANDBOX=1`), as fast as without.
 - FEX's server socket in the home directory: steamwebhelper runs in Steam's runtime container, which has a runtime
   directory of its own, and FEX did not reach its server there ("Couldn't connect to FEXServer socket").
 

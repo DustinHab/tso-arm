@@ -1,6 +1,13 @@
 # Changes
 
-## Unreleased
+## 0.4.10 (2026-11-26)
+
+A fix that matters for every installation of 0.4.6 to 0.4.9: a program that closes all of its descriptors no longer
+gets FEX's disk cache written into its files. Besides, Chromium and programs built on it run under the page protocol,
+and Steam keeps FEX's disk cache and comes up to its login window under the page protocol and with Chromium's sandbox
+as well. Install or update with `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh |
+sh`, `tso-arm update`, the release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt
+anew.
 
 - **A program that closes its descriptors no longer gets FEX's cache written into its files.** A program that
   closes every descriptor from 3 up at its start (`close_range`, as bubblewrap and other tools that clean up what
@@ -33,6 +40,10 @@
   4.1 s on the Pi 5): `tests/chrome_check.sh` in the Compat workflow, `tests/bigmap.c` in CI. Open: a WebAssembly
   access past its memory ends Chromium's renderer under FEX in every mode on the Pi (x86 Node.js catches it; notes
   section 64). `tests/faultrip.c` (CI) checks what V8's and Java's handlers do with a fault's context.
+- Steam, with the fixes above, on GitHub's Arm runner: `tso-arm steam` comes up to its login window with FEX's disk
+  cache on (after 5 minutes), and so it does under the page protocol (`TSO_ARM_MODE=tso`, after 7.5) and with
+  Chromium's sandbox (`TSO_ARM_STEAM_SANDBOX=1`, after 5), which both showed no window before. `tso-arm steam` keeps
+  full ordering and steamwebhelper without the sandbox as defaults for now; `--gpu` still ends Steam early.
 
 ## 0.4.9 (2026-11-26)
 

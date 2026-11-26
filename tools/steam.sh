@@ -66,8 +66,9 @@ esac
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && [ ! -f /etc/apparmor.d/tso-arm-fex ]; then
     die "Steam requires user namespaces, which AppArmor restricts here, FEX's as well: 'sudo tso-arm userns allow' allows them to tso-arm's FEX alone"
 fi
-# FEX's full ordering: under the page protocol the processes steamwebhelper's zygote forks (renderer, GPU, network)
-# ended within seconds, and it drew nothing (games Steam starts inherit this as well)
+# FEX's full ordering (games Steam starts inherit it): up to 0.4.9 the processes steamwebhelper's zygote forks ended
+# within seconds under the page protocol; since 0.4.10 Steam comes up to its login window under it as well, in its
+# first start some two minutes later (TSO_ARM_MODE=tso tso-arm steam)
 export TSO_ARM_MODE=${TSO_ARM_MODE:-full}
 # FEX's server socket in the home directory, as Valve's build of FEX for Steam has it: steamwebhelper runs in Steam's
 # runtime container, which has an XDG_RUNTIME_DIR of its own, and its sandboxed zygote in a network namespace of its
@@ -94,7 +95,7 @@ if [ -z "${FEX_SERVERSOCKETPATH:-}" ]; then
         export FEX_SERVERSOCKETPATH="$s"
     fi
 fi
-# steamwebhelper without Chromium's sandbox: with it, under full ordering as well, it showed no window
-# (TSO_ARM_STEAM_SANDBOX=1 keeps it)
+# steamwebhelper without Chromium's sandbox: up to 0.4.9 it showed no window with it; since 0.4.10 the login window
+# comes with it as well (TSO_ARM_STEAM_SANDBOX=1 keeps it)
 [ "${TSO_ARM_STEAM_SANDBOX:-0}" = 1 ] || set -- -cef-disable-sandbox "$@"
 exec "$R/bin/tso-arm" run "$D/current/usr/lib/steam/bin_steam.sh" "$@"
