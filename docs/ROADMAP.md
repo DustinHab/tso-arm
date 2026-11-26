@@ -263,3 +263,10 @@ FEX's cache made the translated code slower, in two ways of its own: all of it r
 well: pigz 9 % slower), and every 32-bit displacement and many immediates loaded as constants the cache could patch
 (xz with one thread 9 % slower). Relocatable code only where the cache may keep it, and no such data masks (a block is
 taken only where the guest code is the same): the same speed with the cache as without (notes section 60).
+
+Since (0.4.8, notes section 62): the awake protocol's code is cached as well, checked against the escalations in its
+range (they go into its guest hash; not while a run has learned exit points); the writer's queue is written out
+before `exit_group` and `execve` (at nice 19 it starved beside busy programs and lost most stores); and FEX's
+relocation filter knows a program's image extent with the disk cache too (it dropped every block that addressed its own
+data). A static program that ends at once starts in 6.5 ms instead of 16, zstd on a small input in 19 instead of 59,
+`python3 -c 0` in 0.095 s. The Debian package and `tools/get.sh` set it up as `tso-arm run` does.
