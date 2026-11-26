@@ -22,7 +22,8 @@
   reservations failed), and the profile keeps the fallback, so later runs start without views. The headless shell
   renders a page with V8 and WebAssembly in its first run under the page protocol as under full ordering (4.4 and
   4.1 s on the Pi 5): `tests/chrome_check.sh` in the Compat workflow, `tests/bigmap.c` in CI. Open: a WebAssembly
-  access past its memory ends the renderer under FEX in every mode (notes section 64).
+  access past its memory ends Chromium's renderer under FEX in every mode on the Pi (x86 Node.js catches it; notes
+  section 64). `tests/faultrip.c` (CI) checks what V8's and Java's handlers do with a fault's context.
 
 ## 0.4.9 (2026-11-26)
 

@@ -3081,6 +3081,12 @@ with such a mapping, in every mode, alone and with threads running before.
 **Open: WebAssembly's trap.** A WebAssembly access past its memory (which V8 compiles without a bounds check and
 catches with its handler of SIGSEGV) ends the renderer under FEX in every mode, without views as well. The fault is at
 the expected address (the memory's base plus the index, `SEGV_ACCERR`), but the instruction pointer in the context
-FEX hands the guest's handler is not the faulting instruction in V8's code (an address outside the program and V8's
-code, with the same low twelve bits in every run): V8's handler does not take the fault as its own and passes it on to
-Chromium's crash handler. Not looked into further yet.
+FEX hands the guest's handler is in code outside the program (with the same low twelve bits in every run, which fits
+V8's own code), and V8's handler does not take the fault as its own: it passes it on to Chromium's crash handler. It
+is not FEX's signal path: `tests/faultrip.c` does what V8's handler does (the context names the faulting load and the
+address, the handler sets the instruction pointer to a landing pad with the load's address in r10), 2,000 times, in
+every mode, with the cache and without, and x86-64 Node.js 26 from nodejs.org (V8 with its trap handler, without
+V8's sandbox) catches the same WebAssembly access as a RuntimeError under full ordering and under the page protocol.
+What differs in Chromium is V8's sandbox, whose 1 TB the Pi's 39-bit address space cannot hold (FEX reports 48
+virtual address bits, so V8 tries and falls back to a sandbox it only partly reserves); `tests/chrome_check.sh`
+records whether the trap is caught, on GitHub's runner with 48 bits as well. Not looked into further yet.
