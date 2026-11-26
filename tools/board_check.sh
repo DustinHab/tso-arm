@@ -68,6 +68,16 @@ case $gv in
     fi
     ;;
 esac
+# user namespaces, which Steam requires and AppArmor restricts on Ubuntu 23.10 and newer ('tso-arm userns')
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+    if [ -f /etc/apparmor.d/tso-arm-fex ]; then
+        say "user namespaces" "restricted by AppArmor, allowed to tso-arm's FEX"
+    else
+        say "user namespaces" "restricted by AppArmor (Steam requires them: sudo tso-arm userns allow)"
+    fi
+else
+    say "user namespaces" "not restricted"
+fi
 # what only 'learn' needs, and only a build of FEX from source
 missing=""
 for t in clang python3 perf; do

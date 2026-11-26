@@ -352,6 +352,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 | `tso-arm uninstall [--all]` | remove FEX and the command (`--all`: what was learned as well) |
 | `tso-arm rootfs [OPTIONS]` | an x86-64 root file system for dynamically linked programs (Ubuntu 24.04 without options) |
 | `tso-arm binfmt [register \| unregister]` | x86 programs started directly (`./program`) and x86-64 containers run through tso-arm; register and unregister need root |
+| `tso-arm userns [allow \| remove]` | user namespaces for x86 programs (Steam requires them) where AppArmor restricts them (Ubuntu 23.10 and newer): a profile for tso-arm's FEX alone; need root |
+| `tso-arm steam [ARGS]` | Valve's Steam client, from Valve's launcher package (fetched on first use), up to its login window as tested |
 | `tso-arm version` | the version, and the FEX it uses |
 | `tso-arm report [PROGRAM [ARGS]]` | what a bug report needs, as one block to paste |
 

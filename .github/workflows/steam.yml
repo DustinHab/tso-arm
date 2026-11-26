@@ -1,0 +1,92 @@
+name: Steam
+
+# Valve's Steam client for Linux under tso-arm on an Arm runner, up to its login window (tests/steam_check.sh):
+# 'tso-arm steam' on Xvfb, as a user of Ubuntu 24.04 starts it after 'sudo tso-arm userns allow' (Steam requires user
+# namespaces, which Ubuntu's AppArmor restricts to programs with a profile of their own); the bootstrap, the client's
+# update, steamwebhelper and its windows recorded with screenshots and Steam's logs, and the login window has to
+# appear. Run by hand, also what does not work yet, for the record: --gpu (FEX's thunks), the page protocol instead of
+# FEX's full ordering, steamwebhelper's own sandbox (Chromium's).
+
+on:
+  push:
+    # as CI: not for what changes only words or the diagnosis workflows run by hand
+    paths-ignore: ['docs/**', '**.md', '.github/workflows/*-diag.yml', '.github/workflows/profile.yml', '.github/ISSUE_TEMPLATE/**']
+  workflow_dispatch:
+
+jobs:
+  steam:
+    name: Steam (${{ matrix.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '[{"name":"steam","expect":"login"},{"name":"gpu","env":"TSO_ARM_THUNKS=1"},{"name":"page-protocol","env":"TSO_ARM_MODE=tso"},{"name":"cef-sandbox","env":"TSO_ARM_STEAM_SANDBOX=1"}]' || '[{"name":"steam","expect":"login"}]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd \
+            cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          # FEX's thunks, where FEX has to be built (as the release builds them)
+          g=$(gcc -dumpversion | cut -d. -f1)
+          sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
+            libstdc++-$g-dev-amd64-cross libgcc-$g-dev-amd64-cross libstdc++-$g-dev-i386-cross libgcc-$g-dev-i386-cross \
+            libgl-dev libegl-dev libx11-dev libxrandr-dev libxrender-dev libxcb1-dev libwayland-dev libdrm-dev \
+            libasound2-dev
+
+      - name: FEX with the tso-arm patches and its thunks (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-thunks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+
+      - name: FEX (the newest release's prebuilt one where its patches are these, else built)
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: TSO_ARM_THUNKS=1 bin/tso-arm install
+
+      # what 'tso-arm steam' works around, for the record: a thread of FEX's own in /proc/self/task (its disk cache),
+      # and Chromium's way of forking (both in the summary)
+      - name: x86 test programs
+        run: |
+          mkdir -p build/steam
+          x86_64-linux-gnu-gcc -O2 -static -o build/steam/singlethread tests/singlethread.c
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o build/steam/forkstack tests/forkstack.c
+
+      - name: Machine
+        run: bin/tso-arm version && bin/tso-arm check
+
+      - name: Root file system as a user fetches it
+        run: bin/tso-arm rootfs >/dev/null
+
+      - name: User namespaces for tso-arm's FEX (sudo tso-arm userns allow)
+        run: |
+          bin/tso-arm userns
+          sudo bin/tso-arm userns allow
+          bin/tso-arm userns
+          cat /etc/apparmor.d/tso-arm-fex
+
+      - name: Steam
+        timeout-minutes: 40
+        env:
+          STEAM_ENV: ${{ matrix.env }}
+          STEAM_EXPECT: ${{ matrix.expect }}
+        run: |
+          s=0
+          STEAM_MINUTES=25 sh tests/steam_check.sh ${{ matrix.name }} || s=$?
+          cat build/steam/${{ matrix.name }}/summary.md >>"$GITHUB_STEP_SUMMARY"
+          exit $s
+
+      - name: User namespaces as before (sudo tso-arm userns remove)
+        if: always()
+        run: sudo bin/tso-arm userns remove && bin/tso-arm userns
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steam-${{ matrix.name }}-${{ github.sha }}
+          retention-days: 14
+          path: build/steam/${{ matrix.name }}/

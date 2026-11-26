@@ -21,7 +21,8 @@ usage() {
 usage: tso-arm COMMAND [...]
 
   run [--mode MODE] [--aot LIBRARY | --no-aot] [--gpu] [--stats] PROGRAM [ARGS...]
-        run an x86-64 or 32-bit x86 Linux program. MODE: tso (default; x86 memory order kept, with the page
+        run an x86-64 or 32-bit x86 Linux program, or a script of them (#!: its interpreter from the root file
+        system, as Steam's steam.sh and the start scripts of games). MODE: tso (default; x86 memory order kept, with the page
         protocol and what 'learn' translated; a 32-bit program as with full), full (FEX's own full ordering),
         unordered (fastest, not correct for programs whose threads share data without locks). --aot: a library of translated functions other than the learned one;
         --no-aot: without what 'learn' translated.
@@ -50,9 +51,17 @@ usage: tso-arm COMMAND [...]
   binfmt [register | unregister]
         whether x86 programs started directly (./program) run through tso-arm; register and unregister change
         that for the whole system (binfmt_misc, and /etc/binfmt.d for after a reboot) and need root
+  userns [allow | remove]
+        whether x86 programs may make user namespaces (Steam requires them), which AppArmor restricts on Ubuntu
+        23.10 and newer; allow puts an AppArmor profile in place that permits them to tso-arm's FEX alone, remove
+        takes it away again (both need root)
   wine [install [VERSION] | PROGRAM.exe [ARGS...]]
         Windows programs through Wine: WineHQ's build for Ubuntu 24.04 (the root file system's distribution),
         fetched into ~/.local/share/tso-arm/wine on first use; needs the root file system ('tso-arm rootfs')
+  steam [install | ARGS...]
+        Valve's Steam client: Valve's launcher package, fetched from repo.steampowered.com into
+        ~/.local/share/tso-arm/steam on first use, started with the settings it needs under FEX; needs the root
+        file system ('tso-arm rootfs') and user namespaces ('tso-arm userns')
   version               this version and the FEX it uses
   report [PROGRAM [ARGS...]]
         what a bug report needs, to paste: versions, machine, root file system; with a program, what tso-arm knows
@@ -119,6 +128,9 @@ cmd_uninstall() {
         [ -w "$inst" ] || die "$inst belongs to another user: 'sudo tso-arm uninstall'"
         if [ "$(id -u)" = 0 ] && grep -qs "$inst/" /proc/sys/fs/binfmt_misc/tso-arm /proc/sys/fs/binfmt_misc/tso-arm-i386; then
             (cmd_binfmt unregister)
+        fi
+        if [ "$(id -u)" = 0 ] && grep -qs "$inst/" "$USERNS_PROFILE"; then
+            (cmd_userns remove)
         fi
         for l in /usr/local/bin/tso-arm "$HOME/.local/bin/tso-arm"; do
             if [ -L "$l" ] && [ "$(readlink "$l")" = "$inst/current/bin/tso-arm" ]; then
@@ -260,6 +272,75 @@ cmd_binfmt() {
     esac
 }
 
+# User namespaces, which Steam requires (its requirements check runs bubblewrap, steamwebhelper's sandbox makes them)
+# and AppArmor restricts on Ubuntu 23.10 and newer to programs with a profile of their own: under tso-arm the program
+# that asks is FEX, which no profile of the distribution's names. 'allow' puts one in place for tso-arm's FEX alone
+# (unconfined otherwise, as the distribution's own profiles of Chrome or Steam are).
+USERNS_PROFILE=/etc/apparmor.d/tso-arm-fex
+cmd_userns() {
+    r=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+    restricted=$([ "$(cat $r 2>/dev/null)" = 1 ] && echo 1 || echo 0)
+    case ${1:-} in
+    "")
+        if [ $restricted = 0 ]; then
+            echo "user namespaces: not restricted here; x86 programs may make them (Steam requires them)"
+        elif [ -f "$USERNS_PROFILE" ]; then
+            echo "user namespaces: restricted by AppArmor, allowed to tso-arm's FEX ($USERNS_PROFILE)"
+        else
+            echo "user namespaces: restricted by AppArmor, for FEX as well: Steam stops ('Steam now requires user namespaces to be enabled'); 'sudo tso-arm userns allow' allows them to tso-arm's FEX alone"
+        fi
+        ;;
+    allow)
+        [ "$(id -u)" = 0 ] || die "userns allow changes the system and needs root: sudo $REPO/bin/tso-arm userns allow"
+        if [ $restricted = 0 ]; then
+            echo "tso-arm: AppArmor does not restrict user namespaces here; nothing to allow"
+            return 0
+        fi
+        command -v apparmor_parser >/dev/null || die "apparmor_parser not found (package apparmor)"
+        # the FEX of an installation by tools/get.sh in each of its versions, else the one in use (under sudo the
+        # one 'tso-arm install' put into the home directory of the user who called it)
+        if inst=$(installed_dir); then
+            dir="$inst/*/fex/prebuilt/bin"
+        else
+            F=$(fex 2>/dev/null) || {
+                h=$([ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" | cut -d: -f6)
+                F=${h:+$h/.local/opt/tso-arm/bin/FEX}
+            }
+            [ -n "$F" ] && [ -x "$F" ] || die "no FEX to allow them to ('tso-arm install' first)"
+            dir=$(dirname "$(readlink -f "$F")")
+        fi
+        cat >"$USERNS_PROFILE" <<EOF
+# tso-arm: user namespaces for x86 programs run through FEX ('tso-arm userns allow'; 'tso-arm userns remove' takes
+# this away again)
+abi <abi/4.0>,
+include <tunables/global>
+
+profile tso-arm-fex $dir/{FEX,FEX-static} flags=(unconfined) {
+  userns,
+
+  include if exists <local/tso-arm-fex>
+}
+EOF
+        apparmor_parser -r "$USERNS_PROFILE" || {
+            rm -f "$USERNS_PROFILE"
+            die "AppArmor did not take the profile"
+        }
+        echo "tso-arm: x86 programs run through tso-arm's FEX ($dir) may make user namespaces now ($USERNS_PROFILE)"
+        ;;
+    remove)
+        [ "$(id -u)" = 0 ] || die "userns remove changes the system and needs root: sudo $REPO/bin/tso-arm userns remove"
+        if [ -f "$USERNS_PROFILE" ]; then
+            apparmor_parser -R "$USERNS_PROFILE" 2>/dev/null || true
+            rm -f "$USERNS_PROFILE"
+            echo "tso-arm: removed $USERNS_PROFILE; FEX's user namespaces are restricted as any program's again"
+        else
+            echo "tso-arm: no $USERNS_PROFILE to remove"
+        fi
+        ;;
+    *) die "userns: allow, remove, or nothing for the state" ;;
+    esac
+}
+
 # The FEX to run: TSO_ARM_FEX, the one 'tso-arm install' put into PREFIX, the prebuilt one a release package brings
 # along, a development build. An installed FEX says which patches it was built with; translated code and FEX must
 # agree on them, so one built with others is passed over.
@@ -291,7 +372,8 @@ fex() {
 # (static, pie, dynamic, or other), the first 8 bytes of its GNU build ID in hex (- without one), and whether it is an
 # AppImage (appimage or -: "AI" and its type after the ELF magic). The program headers and the build ID note sit at
 # the start of a file: its first KB is read (od is slow: 0.8 ms for it on a Pi 5), the first 64 KB if they lie
-# further.
+# further. A script (#!) is "x86-64 script": FEX runs its interpreter from the root file system (Steam's launcher
+# and steam.sh, the start scripts of games), and the scripts' own programs from there or beside them.
 elfinfo() {
     for lim in 1024 65536; do
         r=$(od -An -v -tu1 -N $lim "$1" 2>/dev/null | LC_ALL=C awk -v last=$([ $lim = 1024 ] && echo 0 || echo 1) '
@@ -299,6 +381,7 @@ elfinfo() {
         function u(o, len,   v, k) { v = 0; for (k = len - 1; k >= 0; k--) v = v * 256 + b[o + k]; return v }
         function out(m, k, id) { print m, k, id, (n > 10 && b[8] == 65 && b[9] == 73 && (b[10] == 1 || b[10] == 2)) ? "appimage" : "-" }
         END {
+            if (n >= 3 && b[0] == 35 && b[1] == 33) { print "x86-64 script - -"; exit }
             if (n < 52 || b[0] != 127 || b[1] != 69 || b[2] != 76 || b[3] != 70 || b[5] != 1) { out("other", "other", "-"); exit }
             c = b[4]; mach = u(18, 2); t = u(16, 2)
             m = mach == 62 ? "x86-64" : mach == 3 ? "i386" : "other"
@@ -425,15 +508,18 @@ cmd_run() {
     case $info in
     *" appimage") export APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-1} ;;
     esac
-    if [ "$k" = dynamic ] && ! has_rootfs; then
-        r=$(shared_rootfs) ||
+    if { [ "$k" = dynamic ] || [ "$k" = script ]; } && ! has_rootfs; then
+        r=$(shared_rootfs) || {
+            [ "$k" = script ] &&
+                die "$prog is a script, and its interpreter ($(sed -n '1s/^#![[:space:]]*//p' "$prog")) comes from an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS)"
             die "$prog is dynamically linked and needs an x86-64 root file system: 'tso-arm rootfs' fetches one (or set FEX_ROOTFS to a directory with the x86-64 libraries)"
+        }
         export FEX_ROOTFS="$r"
     fi
     F=$(fex)
     # FEX takes the root file system from its server, which lives as long as programs it started run (and a second
     # after): one started with another root file system serves this program too, whatever FEX_ROOTFS says
-    if [ -n "$FEX_ROOTFS" ] && [ "$k" = dynamic ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
+    if [ -n "$FEX_ROOTFS" ] && [ "$k" != static ] && [ "$k" != pie ] && pgrep -u "$(id -u)" -x FEXServer >/dev/null 2>&1; then
         r=$("$(dirname "$F")/FEXGetConfig" --current-rootfs 2>/dev/null)
         if [ "$(readlink -f "${r:-/nonexistent}")" != "$(readlink -f "$FEX_ROOTFS")" ]; then
             echo "tso-arm: FEX's server serves ${r:-no root file system} until the FEX programs started with it have ended; FEX_ROOTFS=$FEX_ROOTFS takes effect after that" >&2
@@ -472,6 +558,12 @@ cmd_run() {
     for x in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
         eval "[ -n \"\${$x-unset}\" ] || unset $x"
     done
+    # FEX's server makes a socket in XDG_RUNTIME_DIR besides its abstract one, and does not start where it cannot
+    # (an XDG_RUNTIME_DIR that names no directory, or another user's after su): FEX did not start then. Unset, FEX puts
+    # it into TMPDIR or /tmp.
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && { [ ! -d "$XDG_RUNTIME_DIR" ] || [ ! -w "$XDG_RUNTIME_DIR" ]; }; then
+        unset XDG_RUNTIME_DIR
+    fi
     # without glibc's dynamic loader (musl) the shell would say no more than "FEX: not found"
     [ -x /lib/ld-linux-aarch64.so.1 ] || case $F in *-static) ;; *)
         die "FEX ($F) needs glibc, and this system has none ($(libc)); 'tso-arm check' says more" ;;
@@ -560,6 +652,7 @@ cmd_learn() {
         fi
         echo "tso-arm: $(basename "$prog") is dynamically linked: its own functions are translated, and those of its shared libraries (for every program that uses them)"
         ;;
+    script) die "$prog is a script: 'learn' translates a program, the one the script runs" ;;
     *) die "$prog is not an x86 Linux program" ;;
     esac
     for t in python3 clang perf readelf; do
@@ -738,8 +831,10 @@ uninstall) shift && cmd_uninstall "$@" ;;
 update) shift && cmd_update "$@" ;;
 report) shift && cmd_report "$@" ;;
 wine) shift && exec sh "$REPO/tools/wine.sh" "$@" ;;
+steam) shift && exec sh "$REPO/tools/steam.sh" "$@" ;;
 rootfs) shift && cmd_rootfs "$@" ;;
 binfmt) shift && cmd_binfmt "$@" ;;
+userns) shift && cmd_userns "$@" ;;
 version | --version) cmd_version ;;
 -h | --help | help | "") usage ;;
 *) usage >&2 && exit 1 ;;
