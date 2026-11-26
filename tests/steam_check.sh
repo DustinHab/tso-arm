@@ -1,13 +1,14 @@
 #!/bin/sh
-# Valve's Steam client for Linux under tso-arm, as far as it gets without logging in: Valve's launcher package
-# (steam-launcher from repo.steampowered.com, checked against Valve's package index, unpacked, not installed) started
-# with 'tso-arm run' on an X server without a screen (Xvfb), for at most STEAM_MINUTES. It records how far Steam got
-# (the bootstrap unpacked, the client downloaded and unpacked, steamwebhelper started, Steam's login window) with
-# screenshots, the windows and processes, and Steam's logs. Needs the root file system ('tso-arm rootfs'), Xvfb,
-# xwininfo (x11-utils), import (ImageMagick), dpkg-deb; dbus-launch where there is one.
-#   tests/steam_check.sh NAME [OPTIONS of tso-arm run]        tests/steam_check.sh gpu --gpu
+# Valve's Steam client for Linux under tso-arm, as far as it gets without logging in: 'tso-arm steam' (Valve's
+# launcher package from repo.steampowered.com, checked against Valve's package index, unpacked, not installed) on an
+# X server without a screen (Xvfb), for at most STEAM_MINUTES. It records how far Steam got (the bootstrap unpacked,
+# the client downloaded and unpacked, steamwebhelper started, its window, Steam's login window) with screenshots, the
+# windows and processes, and Steam's logs. Needs the root file system ('tso-arm rootfs'), Xvfb, xwininfo (x11-utils),
+# import (ImageMagick); dbus-launch where there is one.
+#   tests/steam_check.sh NAME [OPTIONS of tso-arm run]        STEAM_ENV=TSO_ARM_THUNKS=1 tests/steam_check.sh gpu
+#   STEAM_RAW=1: the launcher with 'tso-arm run' and these OPTIONS instead, without the settings 'tso-arm steam' makes
 #   STEAM_MINUTES (default 20); STEAM_KEEP=1 keeps the Steam installation of an earlier run (~/.local/share/Steam);
-#   STEAM_ARGS: options for Steam (-cef-...); STEAM_ENV: options of env for it (-u XDG_RUNTIME_DIR); STEAM_STRACE=1:
+#   STEAM_ARGS: options for Steam (-cef-...); STEAM_ENV: options of env for it (NAME=VALUE, -u NAME); STEAM_STRACE=1:
 #   the system calls of every process that failed, and how each process ended, as the host's strace sees them (FEX's
 #   own), into strace.txt
 # Into build/steam/NAME: summary.md (the stages with the second each was reached, the first errors), console.txt
@@ -28,39 +29,21 @@ T=$R/bin/tso-arm
 S=$HOME/.local/share/Steam
 say() { echo "steam_check: $*"; }
 
-# Valve's launcher package: the newest steam-launcher in Valve's index, checked against its SHA256 there
-REPO=https://repo.steampowered.com/steam
-L=$R/build/steam/launcher
-if [ ! -f "$L/usr/lib/steam/bin_steam.sh" ]; then
-    rm -rf "$L" && mkdir -p "$L"
-    curl -fsSL --retry 2 -o "$L.Packages" "$REPO/dists/stable/steam/binary-amd64/Packages"
-    line=$(awk '/^Package: / { p = $2 } /^Version: / { v = $2 } /^Filename: / { f = $2 } /^SHA256: / { s = $2 }
-        /^$/ { if (p == "steam-launcher") print v, f, s; p = "" } END { if (p == "steam-launcher") print v, f, s }' \
-        "$L.Packages" | sort -V | tail -n 1)
-    ver=${line%% *}
-    rest=${line#* }
-    file=${rest%% *}
-    sum=${rest#* }
-    [ -n "$file" ] && [ -n "$sum" ] || {
-        say "no steam-launcher in $REPO's index"
-        exit 1
-    }
-    say "steam-launcher $ver from $REPO/$file"
-    curl -fsSL --retry 2 -o "$L.deb" "$REPO/$file"
-    [ "$(sha256sum "$L.deb" | cut -d' ' -f1)" = "$sum" ] || {
-        say "$file does not match Valve's index"
-        exit 1
-    }
-    dpkg-deb -x "$L.deb" "$L"
-    echo "$ver" >"$L/VERSION"
-fi
+# Valve's launcher package, as 'tso-arm steam' fetches it
+export TSO_ARM_STEAM_DIR=$R/build/steam/launcher
+"$T" steam install
+L=$TSO_ARM_STEAM_DIR/current
 if [ "${STEAM_KEEP:-0}" != 1 ]; then
     rm -rf "$S" "$HOME/.steam"
 fi
 
 # what a container runtime (pressure-vessel's bubblewrap) needs: user namespaces, which AppArmor may restrict
 {
-    echo "# Steam under tso-arm: $name${opts:+ (tso-arm run $opts)}"
+    if [ "${STEAM_RAW:-0}" = 1 ]; then
+        echo "# Steam under tso-arm: $name (tso-arm run${opts:+ $opts} bin_steam.sh${STEAM_ENV:+, env $STEAM_ENV})"
+    else
+        echo "# Steam under tso-arm: $name (tso-arm steam${STEAM_ENV:+, env $STEAM_ENV})"
+    fi
     echo
     echo '```'
     "$T" version
@@ -95,6 +78,7 @@ fi
             o=$(TSO_ARM_DISKCACHE=$c "$T" run "$R/build/steam/singlethread" 2>&1) && s=0 || s=$?
             echo "TSO_ARM_DISKCACHE=$c: $o (exit status $s)"
         done
+        sleep 2
     fi
     # what a process in user, network and PID namespaces of its own (Chromium's sandbox) sees of XDG_RUNTIME_DIR
     if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
@@ -133,9 +117,14 @@ wrap=""
 if [ "${STEAM_STRACE:-0}" = 1 ]; then
     wrap="strace -f -q --seccomp-bpf -e status=!successful -e signal=none -e trace=%process,%memory,%ipc,%network,%signal -o $O/strace.txt"
 fi
-setsid $wrap env ${STEAM_ENV:-} "$T" run $opts "$L/usr/lib/steam/bin_steam.sh" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
+if [ "${STEAM_RAW:-0}" = 1 ]; then
+    set -- run $opts "$L/usr/lib/steam/bin_steam.sh"
+else
+    set -- steam
+fi
+setsid $wrap env ${STEAM_ENV:-} "$T" "$@" ${STEAM_ARGS:-} >"$O/console.txt" 2>&1 </dev/null &
 pid=$!
-say "started: ${wrap:+$wrap }tso-arm run $opts $L/usr/lib/steam/bin_steam.sh ${STEAM_ARGS:-}(session $pid), at most $min minutes"
+say "started: ${wrap:+$wrap }${STEAM_ENV:+env $STEAM_ENV }tso-arm $* ${STEAM_ARGS:-}(session $pid), at most $min minutes"
 
 # the stages, each with the second it was first seen
 stages=""

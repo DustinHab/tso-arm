@@ -1,13 +1,11 @@
 name: Steam
 
 # Valve's Steam client for Linux under tso-arm on an Arm runner, as far as it gets without logging in
-# (tests/steam_check.sh): Valve's launcher package unpacked, started with 'tso-arm run' on Xvfb, the bootstrap, the
-# client's update, steamwebhelper and its windows recorded with screenshots and Steam's logs. Steam requires user
-# namespaces (its requirements check runs bubblewrap, and steamwebhelper's sandbox makes them), which Ubuntu 24.04's
-# AppArmor restricts: with the restriction lifted (sysctl) or with 'tso-arm userns allow' (a profile for FEX alone).
-# Variants: without FEX's disk cache (its writer thread is a second thread in each process, and Chromium's zygote
-# forks only single-threaded), with FEX's server socket in the home directory (FEX_SERVERSOCKETPATH, which Steam's
-# runtime container shares), with --gpu.
+# (tests/steam_check.sh): 'tso-arm steam' on Xvfb, the bootstrap, the client's update, steamwebhelper and its windows
+# recorded with screenshots and Steam's logs. Steam requires user namespaces (its requirements check runs
+# bubblewrap, and steamwebhelper's sandbox makes them), which Ubuntu 24.04's AppArmor restricts: with the restriction
+# lifted (sysctl) or with 'tso-arm userns allow' (a profile for FEX alone). Variants: with steamwebhelper's sandbox
+# (Chromium's) and without it, without its GPU process, and with the processes' ends traced.
 
 on:
   push:
@@ -24,20 +22,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: diskcache-off-socket-in-home
+          - name: steam-no-cef-sandbox
             userns: 1
-            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
-          - name: diskcache-off-socket-in-home-gpu
+            steam_args: -cef-disable-sandbox
+          - name: steam-no-cef-sandbox-no-gpu
             userns: 1
-            args: --gpu
-            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
-          - name: userns-allow-diskcache-off-socket-in-home
+            steam_args: -cef-disable-sandbox -cef-disable-gpu
+          - name: steam-strace
+            userns: 1
+            strace: 1
+          - name: steam-userns-allow-no-cef-sandbox
             userns_allow: 1
-            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
-          - name: diskcache-off-socket-in-home-cef-disable-gpu
-            userns: 1
-            steam_env: TSO_ARM_DISKCACHE=0 FEX_SERVERSOCKETPATH=/home/runner/.fex-server.socket
-            steam_args: -cef-disable-gpu
+            steam_args: -cef-disable-sandbox
     steps:
       - uses: actions/checkout@v4
 
