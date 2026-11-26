@@ -2942,3 +2942,36 @@ ended the process only while FEX had no thread of its own. The last guest thread
 process as `exit_group` does, with its own status, which Linux gives the process too (a main thread ended with
 `exit(3)` and a last one with `exit(7)`: 7 natively). `tests/lastexit.c` in `tests/ci.sh`, 64-bit in every mode and
 32-bit: `pthread_exit` in main with `exit` in the other thread, and a single thread ending with `exit`.
+## 61. Vulkan on a Wayland desktop, and the host's memory under the page protocol (2026-11-26)
+
+On the Pi's desktop (labwc, Wayland) vulkaninfo under `--gpu` stopped with SIGABRT once the earlier faults were out
+of the way: `Too many bits for size_t`, from the host's libwayland-client. vulkaninfo links the root file system's
+x86 libwayland, connects to the compositor (`wayland-0` in `XDG_RUNTIME_DIR`, without `WAYLAND_DISPLAY` as well) and
+asks the driver, through the Vulkan thunk, whether its devices can present to that connection; the host's V3DV took
+the x86 `wl_display` for its own. Without a reachable compositor it ran through (2,231 lines, the V3D and llvmpipe).
+FEX has a thunk for libwayland-client that makes both sides use the host's library; tso-arm had selected the Vulkan
+thunk alone.
+
+Selected as well, under full ordering vulkaninfo ran through and reported `VK_KHR_wayland_surface` presentable on the
+V3D. Under the page protocol two things stood in the way:
+
+- `ERROR: Permission denied`: at its start the thunk copies the host's interface tables into the program's own
+  (`wl_registry_interface` and 21 more, in the program's read-only data through copy relocations), after making those
+  pages writable with the host's `mprotect`. Under the page protocol a read-only private file mapping is the file
+  itself, mapped shared, and the host's `mprotect` cannot make that writable (EACCES); the guest's own `mprotect`, which
+  the protocol handles, makes it a copy. The guest side of the thunk now calls `mprotect` on those pages first. Built
+  for the test in WSL: FEX's thunk generator and guest libraries compile on an x86 host with
+  `-DENABLE_X86_HOST_DEBUG=True` (libclang 21's development files, FEX's submodules).
+- SIGSEGV in the guest side's unpacker of a listener callback (`wl_registry`'s `global` event): its arguments lie on
+  the host's stack, which the host passes to the guest by pointer, and translated code reaches memory through the views
+  only, at the view's base plus the address; outside the 16 GB window that is nothing. Any pointer into the host's
+  memory a thunk hands a program fails so (a Vulkan driver's mapped memory as well). With `--gpu` the views wake at once
+  (FEX maps a shared file for the thunks at the start), so it applies to every program under `--gpu` in the default
+  mode. Now an access of translated code through the views to an address outside the window sends the process to the
+  fallback to full ordering, which addresses memory directly, and the instruction runs again in a new translation, as
+  an access the handler cannot complete is repeated (a wild pointer faults there at its own address, as without views);
+  the profile keeps the fallback for later runs.
+
+vulkaninfo under the page protocol with both thunks: 2,540 lines, the V3D presenting to Wayland windows, as under full
+ordering; `tests/vkproc.c` and `tests/gpu_info.c` as before. `tests/graphics_check.sh` runs vulkaninfo on a headless
+Weston (`--backend=headless`) with and without `--gpu` and requires a Wayland surface.

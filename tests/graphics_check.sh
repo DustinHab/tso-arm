@@ -72,4 +72,29 @@ case $(EGL_PLATFORM=surfaceless timeout 120 env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_
 esac
 check "FEX's OpenGL thunk" info info info env TSO_ARM_THUNKS=1 FEX_THUNKCONFIG=$gl MESA_LOADER_DRIVER_OVERRIDE= $T run
 rm -f $gl
+# On a Wayland desktop (here a headless Weston, where it is installed): vulkaninfo connects to the compositor and asks
+# the driver whether its devices can present to Wayland windows. Under --gpu that goes through FEX's Wayland thunk as
+# well: with the x86 libwayland of the root file system the host's driver read the program's connection as its own and
+# stopped, and under the page protocol the thunk's pointers into the host's memory need the fallback to full ordering
+if command -v weston >/dev/null 2>&1; then
+    wd=$(mktemp -d)
+    XDG_RUNTIME_DIR=$wd weston --backend=headless --socket=wayland-tso --idle-time=0 >$wd/weston.log 2>&1 &
+    wpid=$!
+    for i in $(seq 50); do
+        [ -S $wd/wayland-tso ] && break
+        sleep 0.2
+    done
+    for c in "x86 Mesa|" "--gpu|--gpu"; do
+        name=${c%%|*} opt=${c#*|}
+        st=0
+        out=$(XDG_RUNTIME_DIR=$wd WAYLAND_DISPLAY=wayland-tso timeout 120 $T run $opt $R/usr/bin/vulkaninfo 2>&1) || st=$?
+        n=$(printf '%s\n' "$out" | grep -c 'Surface type = VK_KHR_wayland_surface')
+        say FAIL "$name" "vulkaninfo on Wayland" "$([ $st = 0 ] && [ "$n" -gt 0 ] && echo "devices presenting to Wayland windows: $n")" \
+            "exit status $st, $n Wayland surfaces: $(printf '%s\n' "$out" | grep -v 'Unknown Vulkan' | tail -n 2 | tr '\n' ' ')"
+    done
+    kill $wpid 2>/dev/null
+    rm -rf $wd
+else
+    echo "info: no weston here: Vulkan on Wayland not tried"
+fi
 exit $fail

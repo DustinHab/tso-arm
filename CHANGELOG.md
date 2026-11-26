@@ -1,5 +1,18 @@
 # Changes
 
+## 0.4.7 (not released yet)
+
+- `--gpu` on a Wayland desktop (Raspberry Pi OS's own): Vulkan programs that draw in a Wayland window or ask whether
+  they could (vulkaninfo) stopped (`Too many bits for size_t`): with the root file system's x86 libwayland the host's
+  driver got the program's connection to the compositor and read it as its own. `--gpu` selects FEX's Wayland thunk
+  beside the Vulkan one now, so that both sides share the host's libwayland. Two faults stood in its way, one of FEX's
+  own: the thunk made the program's read-only interface tables writable with the host's `mprotect`, which the page
+  protocol's mapping of a read-only file refuses (`Permission denied`), and now the program makes them writable itself
+  first; and the page protocol could not reach the host's memory that a thunk hands a program (a Wayland event's
+  arguments, memory a Vulkan driver maps), so such an access sends the program to full ordering now, which addresses
+  memory directly, and runs again. On the Pi 5 vulkaninfo reports the V3D presenting to Wayland windows, under the page
+  protocol as under full ordering. The graphics check runs vulkaninfo on a headless Weston, with and without `--gpu`.
+
 ## 0.4.6 (2026-11-26)
 
 Programs start much faster from their second run on: `tso-arm run` keeps what FEX translated in a cache on disk,

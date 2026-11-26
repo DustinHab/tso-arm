@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q cmake ninja-build clang lld python3 binutils zstd squashfs-tools golang-go \
-            xvfb libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 gcc-x86-64-linux-gnu
+            xvfb libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 gcc-x86-64-linux-gnu weston
           # FEX's thunks, as the release builds them
           g=$(gcc -dumpversion | cut -d. -f1)
           sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \

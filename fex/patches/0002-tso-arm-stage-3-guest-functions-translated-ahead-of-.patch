@@ -1,4 +1,4 @@
-From b94159bac4aeb935a32659511fffaa02bf95e658 Mon Sep 17 00:00:00 2001
+From 858a02e9022a39f2b6164fac074dd455c8176b8f Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -44,17 +44,18 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  105 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  104 +-
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  192 ++-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  217 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1227 +++++++++++++++--
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  181 ++-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1238 +++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  184 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |   92 +-
  .../LinuxSyscalls/ThreadManager.h             |   53 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 +++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
- 50 files changed, 3990 insertions(+), 269 deletions(-)
+ ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
+ 51 files changed, 4064 insertions(+), 291 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..94fa0931498f399b84833ebbacd8d569d997a213 100644
@@ -2927,7 +2928,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..0e5999b56ac52d63514e140d69615674
  }
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e40bd4a8a 100644
+index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..c420b4eb21a6d2caadb218a9d1bd302c81ad07eb 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -3040,7 +3041,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
        return true;
      };
      // The faulting instruction, read once: another thread may write a boundary trap over it at any time
-@@ -102,7 +152,7 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -102,26 +152,86 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      // A thread at an instruction start of a block that was left behind: back to the dispatcher, which translates
      // the code again (with the escalated instructions ordered). The trap may also have replaced an instruction
      // that faulted just before; that one has not done anything yet, so leaving here is exact as well.
@@ -3049,7 +3050,34 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
        return Handled();
      }
  
-@@ -112,16 +162,51 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
++    // An access of translated code through the views to an address outside the guest's window: a pointer into the
++    // host's memory that a thunk gave the guest (a callback's arguments on the host's stack, memory a Vulkan driver
++    // mapped), which no view holds (it faulted at the view base plus that address: a Wayland listener under --gpu).
++    // Full ordering from then on, which addresses memory directly, and the instruction runs again in a new
++    // translation, as an access the handler cannot complete does below; a wild pointer faults there at its own
++    // address, as without the views. Threads still in old translations come here as well.
++    if (InCode && !FEXCore::TSOViews::IdentityBase()) {
++      const uint64_t Base = Thread->CurrentFrame->TSOViewBase;
++      const uint64_t OrderedBase = Base | FEXCore::TSOViews::OrderedBit;
++      const bool InOwnViews = (FaultAddress >= Base && FaultAddress - Base < FEXCore::TSOViews::Window) ||
++                              (FaultAddress >= OrderedBase && FaultAddress - OrderedBase < FEXCore::TSOViews::Window);
++      if (Base && FaultAddress >= FEXCore::TSOViews::Window && !InOwnViews) {
++        if (Views->FallbackForHostAccess(FaultAddress - Base) && Views->TakeFallbackRequest()) {
++          _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, 0, FEXCore::TSOViews::Window);
++          FEX::HLE::AOTOrderAll();
++          Thread->CTX->TSOTrapBlockBoundaries(Thread, PC);
++        }
++        ThreadObject->SignalInfo.Delegator->SpillSRA(Thread, ucontext, Thread->CurrentFrame->InSyscallInfo & 0xFFFF);
++        const auto& Config = ThreadObject->SignalInfo.Delegator->GetConfig();
++        ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
++        ArchHelpers::Context::SetArmReg(ucontext, 1, 1); // ENTRY_FILL_SRA_SINGLE_INST_REG: compile a single instruction
++        return Handled();
++      }
++    }
++
+     const bool Write = ArchHelpers::Context::GetArmESR(ucontext) & ArchHelpers::Context::ESR1_WNR;
+     const auto Verdict = Views->HandleFault(FaultAddress, Write, TSOSlotOf(Thread));
+     if (Views->TakeFallbackRequest()) {
        // Full ordering from now on: all translated code goes, every thread leaves its block at the next
        // instruction start or at its next plain access to guest memory
        _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, 0, FEXCore::TSOViews::Window);
@@ -3101,7 +3129,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
          LogMan::Msg::EFmt("tso-arm: plain access to shared memory outside translated code, pc {:#x}, address {:#x}", HostPC, FaultAddress);
          return false;
        }
-@@ -129,11 +214,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -129,11 +239,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        // thread goes on in the old translation; only an access the handler cannot perform repeats the instruction
        // as a single-instruction block, the way the SMC path below does.
        const uint64_t RIP = CTX->RestoreRIPFromHostPC(Thread, HostPC);
@@ -3115,7 +3143,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
                  (unsigned long)HostPC, (unsigned long)FaultAddress, TSOSlotOf(Thread), (unsigned long)BS, (unsigned long)BE,
                  (unsigned long)Thread->CurrentFrame->State.InlineJITBlockHeader);
        }
-@@ -162,7 +247,16 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -162,7 +272,16 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        if (Refresh) {
          _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, EscStart, EscEnd - EscStart);
        }
@@ -3133,7 +3161,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
        TSOViewMemory::NoteAccess(Emulated);
        if (Emulated) {
          if (Refresh) {
-@@ -181,18 +275,41 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -181,18 +300,41 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
        return Handled();
      }
      case TSOViewMemory::Fault::NotOurs:
@@ -3182,7 +3210,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
          }
        }
        break;
-@@ -230,6 +347,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+@@ -230,6 +372,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      auto UnprotectRegionCallback = [](uintptr_t Start, uintptr_t Length) {
        auto rv = mprotect((void*)Start, Length, PROT_READ | PROT_WRITE);
        LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Start, Length);
@@ -3193,7 +3221,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
      };
  
      if (Entry->second.Flags.Shared) {
-@@ -284,6 +405,12 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
+@@ -284,6 +430,12 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
      if (SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK) {
        return;
      }
@@ -3206,7 +3234,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
  
      auto lk = FEXCore::GuardSignalDeferringSection<std::shared_lock>(VMATracking.Mutex, Thread);
  
-@@ -485,6 +612,19 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -485,6 +637,19 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Size, PendingResourceDeletion);
@@ -3226,7 +3254,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
  
    if (LateMetadata) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
-@@ -534,6 +674,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -534,6 +699,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
    }
    InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), Size, PendingResourceDeletion);
  
@@ -3238,7 +3266,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
    if (length) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
      CTX->RemoveForceTSOInformation(reinterpret_cast<uint64_t>(addr), length);
-@@ -569,6 +714,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -569,6 +739,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
    }
  
    InvalidateCodeRangeIfNecessaryOnRemap(Thread, reinterpret_cast<uint64_t>(old_address), Result, old_size, new_size);
@@ -3247,7 +3275,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..fb846255e897fe011f9bba9fed82165e
    return Result;
  }
  
-@@ -713,6 +860,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
+@@ -713,6 +885,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Length, PendingResourceDeletion);
@@ -3325,7 +3353,7 @@ index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba5
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03ebc54320dc 100644
+index 76be33d737559e72474c8c50006170f43d983c57..fa07e7d1e581287912852bdd674862d0be36667b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -30,8 +30,15 @@ $end_info$
@@ -3869,10 +3897,10 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
 -      AliasNone(Addr, Length, OrderedViewBase(S));
 +    if (!SlotUsed[S] || (!Eager && S != 0 && S != Slot)) {
 +      continue;
-+    }
+     }
 +    if (S != 0) {
 +      AliasNone(Addr, Length, SlotBase(S));
-     }
++    }
 +    AliasNone(Addr, Length, OrderedViewBase(S));
 +    Mask |= uint16_t(1U << S);
    }
@@ -4742,7 +4770,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -878,6 +1751,32 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -878,6 +1751,43 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    ProfileChanged = true;
  }
  
@@ -4752,6 +4780,17 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
 +    return false;
 +  }
 +  LogMan::Msg::IFmt("tso-arm: no view slot for another thread ({} at once), falling back to full ordering", Slots - 1);
++  EnterFallback(Nanos() - StartNs, true);
++  return true;
++}
++
++bool TSOViewMemory::FallbackForHostAccess(uint64_t Address) {
++  std::lock_guard lk(Mutex);
++  if (FallbackActive.load(std::memory_order_relaxed)) {
++    return false;
++  }
++  LogMan::Msg::IFmt("tso-arm: an access to {:#x}, outside the guest's memory (the host's, from a thunk), falling back to full ordering",
++                    Address);
 +  EnterFallback(Nanos() - StartNs, true);
 +  return true;
 +}
@@ -4775,7 +4814,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +1799,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +1810,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -4791,7 +4830,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,11 +1816,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,11 +1827,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -4817,7 +4856,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    Apply(First << PageShift, Last << PageShift);
    ChunkShares[Chunk] = 0;
    Count.Collapsed += Moved;
-@@ -920,22 +1841,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -920,22 +1852,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
  }
  
  TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
@@ -4882,7 +4921,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,8 +1907,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,8 +1918,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -4927,7 +4966,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    if (LastFault == FaultAddress) {
      if (++LastFaultCount > 64) {
        LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
-@@ -963,6 +1960,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -963,6 +1971,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -4944,7 +4983,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -1050,7 +2057,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1050,7 +2068,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
  
    if (Log) {
@@ -4953,7 +4992,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
              (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
              Result == Fault::Escalate ? "escalate" : "retry");
    }
-@@ -1058,17 +2065,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1058,17 +2076,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    // Budget: a program that keeps the protocol busy (more than TSO_VIEWS_BUDGET faults per second over the last
    // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
    // faults while a program starts up and its threads first touch their data.
@@ -4989,7 +5028,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
        }
        return Result;
      }
-@@ -1088,6 +2112,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +2123,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -4997,7 +5036,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
        }
        return Result;
      }
-@@ -1096,12 +2121,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +2132,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;
@@ -5017,7 +5056,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..6ee264efe8c06b0c5f8d8088b8eb03eb
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4668c89a1 100644
+index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..9689614a1f43f4df221eb3c5de717776771e645d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 @@ -5,10 +5,12 @@
@@ -5060,13 +5099,16 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    int64_t Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize, int Flags, uint64_t New, int Slot);
    // MADV_DONTNEED and MADV_FREE on memory that is private for the guest: shared memory keeps its contents under
    // MADV_DONTNEED, so the pages are removed instead (they read as zero afterwards, as private memory would)
-@@ -43,15 +54,70 @@ public:
+@@ -43,15 +54,73 @@ public:
  
    // A new thread's plain view; 0 if no slot is free. The pages of the mapping that holds StackPointer move to it.
    uint64_t AttachThread(uint64_t StackPointer);
 +  // No slot was free for a new thread: the fallback to full ordering. True if it starts now (the caller throws the
 +  // translated code away).
 +  bool FallbackForThread();
++  // Translated code reached through the views for an address outside the guest's window (the host's memory, which
++  // a thunk handed the guest): the fallback to full ordering, which addresses memory directly. True if it starts now.
++  bool FallbackForHostAccess(uint64_t Address);
 +  // In the fallback, a thread without a slot of its own uses the views of a slot in use (every page is shared there,
 +  // nobody owns any, and the ordered views have every right): the plain view base it takes
 +  uint64_t ShareSlot();
@@ -5133,7 +5175,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    uint64_t Transitions() const {
      return Stats.Transitions;
    }
-@@ -60,15 +126,27 @@ public:
+@@ -60,15 +129,27 @@ public:
    static void ExitStats();
  
    // Profile of the program: the escalated code ranges and whether it fell back, kept between runs
@@ -5162,7 +5204,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    // Counts an access completed in the handler (true) or an instruction repeated as a single-instruction block
    static void NoteAccess(bool Emulated);
    // Counts a thread sent back to the dispatcher from a trapped instruction start
-@@ -80,27 +158,68 @@ private:
+@@ -80,27 +161,68 @@ private:
      uint64_t End;
      int Prot;
      Kind K;
@@ -5238,7 +5280,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    static void Reserve(uint64_t Base, uint64_t Length);
    static uint64_t ViewBase(int Slot, bool Ordered);
  
-@@ -108,13 +227,35 @@ private:
+@@ -108,13 +230,35 @@ private:
    std::map<uint64_t, Range> Ranges; // guest mappings by start address, split where the protection differs
    bool SlotUsed[FEXCore::TSOViews::Slots] {};
    bool SlotUsable[FEXCore::TSOViews::Slots] {};
@@ -5276,7 +5318,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    uint8_t QuickAllowed {2}; // TSO_VIEWS_STRIKES: quick changes of hands in a row that still migrate
  
    // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
-@@ -124,6 +265,12 @@ private:
+@@ -124,6 +268,12 @@ private:
    void SaveProfile();
    std::string ProfilePath;
    std::vector<std::pair<uint64_t, uint64_t>> Escalations; // recorded and loaded, for the profile
@@ -5289,7 +5331,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
    bool ProfileLoaded {};
    bool ProfileChanged {};
    uint64_t FaultsSeen {};
-@@ -134,6 +281,7 @@ private:
+@@ -134,6 +284,7 @@ private:
    uint64_t WindowSize {1000};         // TSO_VIEWS_WINDOW: faults per rate measurement
    uint64_t Budget {};
    std::atomic<bool> FallbackRequest {false};
@@ -5297,7 +5339,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..68e33ab089e7d977d48457467aa7bff4
  
  public:
    // True once after the fallback started: the caller then throws away all translated code
-@@ -146,6 +294,11 @@ private:
+@@ -146,6 +297,11 @@ private:
    uint8_t* Owner {};    // page states, one byte per guest page
    uint8_t* ChunkShares {}; // per chunk: private pages shared since the last collapse (nullptr: no chunks)
    uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page
@@ -6573,6 +6615,82 @@ index 592248e8cc4df6d4624dc71232014b91fc2cd29d..d453190ac7988532ffe368a3ecd427e4
  #ifdef IS_32BIT_THUNK
    } else if (a_1 == "vkAllocateCommandBuffers"sv) {
      return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkAllocateCommandBuffers;
+diff --git a/ThunkLibs/libwayland-client/Guest.cpp b/ThunkLibs/libwayland-client/Guest.cpp
+index 2f887a6a36b4f0b94a14f817bc44b4a6dfa367db..1cca6993950d4daca1fe4bdb2bc0ac4dcdb3470c 100644
+--- a/ThunkLibs/libwayland-client/Guest.cpp
++++ b/ThunkLibs/libwayland-client/Guest.cpp
+@@ -4,6 +4,7 @@ tags: thunklibs|wayland-client
+ $end_info$
+ */
+ 
++#include <sys/mman.h>
+ #include <wayland-util.h>
+ #include <wayland-client.h>
+ 
+@@ -354,29 +355,41 @@ extern "C" void wl_log_set_handler_client(wl_log_func_t handler) {
+ }
+ 
+ 
++// tso-arm: the interface's pages made writable by the guest's own mprotect before the host copies its interface into
++// them. The host's mprotect alone failed under the page protocol (EACCES, "ERROR: Permission denied"): there a
++// read-only private file mapping is the file itself, mapped shared, and only the guest's mprotect, which the protocol
++// handles, makes it a copy of its own.
++static void ExchangeInterface(const wl_interface* Interface, const char* Name) {
++  const auto Addr = reinterpret_cast<uintptr_t>(Interface);
++  const auto Begin = Addr & ~uintptr_t {0xfff};
++  const auto Size = ((Addr & 0xfff) + sizeof(wl_interface) > 0x1000) ? 0x2000 : 0x1000;
++  mprotect(reinterpret_cast<void*>(Begin), Size, PROT_READ | PROT_WRITE);
++  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(Interface), Name);
++}
++
+ void OnInit() {
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_output_interface), "wl_output_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_shm_pool_interface), "wl_shm_pool_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_pointer_interface), "wl_pointer_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_compositor_interface), "wl_compositor_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_shm_interface), "wl_shm_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_registry_interface), "wl_registry_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_buffer_interface), "wl_buffer_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_seat_interface), "wl_seat_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_surface_interface), "wl_surface_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_keyboard_interface), "wl_keyboard_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_callback_interface), "wl_callback_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_display_interface), "wl_display_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_data_offer_interface), "wl_data_offer_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_data_source_interface), "wl_data_source_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_data_device_interface), "wl_data_device_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_data_device_manager_interface), "wl_data_device_manager_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_shell_interface), "wl_shell_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_shell_surface_interface), "wl_shell_surface_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_touch_interface), "wl_touch_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_region_interface), "wl_region_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_subcompositor_interface), "wl_subcompositor_interface");
+-  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_subsurface_interface), "wl_subsurface_interface");
++  ExchangeInterface(&wl_output_interface, "wl_output_interface");
++  ExchangeInterface(&wl_shm_pool_interface, "wl_shm_pool_interface");
++  ExchangeInterface(&wl_pointer_interface, "wl_pointer_interface");
++  ExchangeInterface(&wl_compositor_interface, "wl_compositor_interface");
++  ExchangeInterface(&wl_shm_interface, "wl_shm_interface");
++  ExchangeInterface(&wl_registry_interface, "wl_registry_interface");
++  ExchangeInterface(&wl_buffer_interface, "wl_buffer_interface");
++  ExchangeInterface(&wl_seat_interface, "wl_seat_interface");
++  ExchangeInterface(&wl_surface_interface, "wl_surface_interface");
++  ExchangeInterface(&wl_keyboard_interface, "wl_keyboard_interface");
++  ExchangeInterface(&wl_callback_interface, "wl_callback_interface");
++  ExchangeInterface(&wl_display_interface, "wl_display_interface");
++  ExchangeInterface(&wl_data_offer_interface, "wl_data_offer_interface");
++  ExchangeInterface(&wl_data_source_interface, "wl_data_source_interface");
++  ExchangeInterface(&wl_data_device_interface, "wl_data_device_interface");
++  ExchangeInterface(&wl_data_device_manager_interface, "wl_data_device_manager_interface");
++  ExchangeInterface(&wl_shell_interface, "wl_shell_interface");
++  ExchangeInterface(&wl_shell_surface_interface, "wl_shell_surface_interface");
++  ExchangeInterface(&wl_touch_interface, "wl_touch_interface");
++  ExchangeInterface(&wl_region_interface, "wl_region_interface");
++  ExchangeInterface(&wl_subcompositor_interface, "wl_subcompositor_interface");
++  ExchangeInterface(&wl_subsurface_interface, "wl_subsurface_interface");
+ }
+ 
+ // Would insert spaces around -
 -- 
 2.53.0
 

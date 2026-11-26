@@ -459,7 +459,9 @@ cmd_run() {
 # so it is not selected. Off unless asked for, as in FEX: x86-64 Vulkan reaches the Pi 5's V3D and vkcube and
 # vulkaninfo run, but FEX's thunks are incomplete, and 32-bit programs have no Vulkan thunk. The directories are
 # given here because a prebuilt FEX was built for another prefix; FEX_THUNKCONFIG names another selection
-# (fex/thunks.json: Vulkan), MESA_LOADER_DRIVER_OVERRIDE another OpenGL driver.
+# (fex/thunks.json: Vulkan, and libwayland-client: with the program's own x86 libwayland a Vulkan program on a Wayland
+# desktop handed the host's driver a connection it read as its own and stopped), MESA_LOADER_DRIVER_OVERRIDE another
+# OpenGL driver.
 thunks() {
     p=$(dirname "$(dirname "$1")")
     [ "${TSO_ARM_THUNKS:-0}" = 1 ] || return 0
