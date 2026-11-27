@@ -1,4 +1,4 @@
-From 729e0ccc77d90974246dc67f1ce16b57d2e07d9b Mon Sep 17 00:00:00 2001
+From c343ab896052847b93eaca9e2e44e46f4bbcf0e5 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -44,7 +44,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/FileManagement.cpp          |  251 ++-
  .../LinuxSyscalls/FileManagement.h            |    6 +
  .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
- .../LinuxSyscalls/SignalDelegator.cpp         |  537 ++++++-
+ .../LinuxSyscalls/SignalDelegator.cpp         |  581 ++++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  150 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |    4 +
@@ -64,7 +64,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 60 files changed, 4985 insertions(+), 387 deletions(-)
+ 60 files changed, 5021 insertions(+), 395 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
 index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3256edee0 100644
@@ -2547,7 +2547,7 @@ index 60b0ef192be43077c65e9101e78819076fb0d621..fc0f9c2cf09cc6a8d0a329d0fddcc34f
        MappedPages.reset(PageAddr);
      }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470fba2cdfa 100644
+index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..1492abd114d9f8100cdec67f482513b90b43ffb4 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -27,6 +27,10 @@ $end_info$
@@ -2869,7 +2869,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
  bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext) {
    auto SigInfo = *static_cast<siginfo_t*>(Info);
  
-@@ -628,18 +822,190 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
+@@ -628,31 +822,234 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
    return false;
  }
  
@@ -2935,6 +2935,29 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
 +#endif
 +}
 +
++// tso-arm: the thread's deferred frames are changed by its own handlers, nested in one another (FEX's handlers leave
++// the synchronous signals' numbers open, and another thread may send them without pauses): every change with all
++// signals blocked for its few instructions. A QueueFrame interrupted between writing its frame and counting it by
++// another's left a frame counted that was never written, signal 0: its delivery marked 1 << -1, signal 64, pending
++// for the guest, and FEX sent signal 64 to the thread, which has no handler for it: the process ended ("Real-time
++// signal 30", tests/sigsync.c without pauses on GitHub's N2 now and then). The kernel blocks nothing that faults here.
++namespace {
++  class FramesSection final {
++  public:
++    FramesSection() {
++      const uint64_t All = ~0ULL;
++      ::syscall(SYS_rt_sigprocmask, SIG_BLOCK, &All, &Old, 8);
++    }
++    ~FramesSection() {
++      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Old, nullptr, 8);
++    }
++    FramesSection(const FramesSection&) = delete;
++    FramesSection& operator=(const FramesSection&) = delete;
++  private:
++    uint64_t Old {};
++  };
++} // namespace
++
 +// tso-arm: holds an asynchronous signal back for the thread's next exact point. It goes back into the kernel's queue
 +// for this thread, with its siginfo, and stays blocked on the host (the interrupted code's mask) until the interrupt
 +// page's fault there takes the block away; the kernel delivers it then, at that store, with masks, nested handlers,
@@ -2984,6 +3007,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
 +void SignalDelegator::QueueFrame(FEX::HLE::ThreadStateObject* ThreadObject, int Signal, const siginfo_t& Info, uint64_t AddedMask,
 +                                 void* UContext) {
 +  auto& Frames = ThreadObject->SignalInfo.DeferredSignalFrames;
++  FramesSection Section;
 +  bool Waits = false;
 +  if (Signal < 32) {
 +    for (const auto& Frame : Frames) {
@@ -3056,25 +3080,41 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
        // Pull a signal frame off the stack.
  
        mprotect(reinterpret_cast<void*>(&Thread->InterruptFaultPage), sizeof(Thread->InterruptFaultPage), PROT_READ | PROT_WRITE);
+-
+-      if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
+-        // No signals to defer. Just set the fault page back to RW and continue execution.
+-        // This occurs as a minor race condition between the refcount decrement and the access to the fault page.
+-        return;
 +      ThreadObject->SignalInfo.InterruptArmed = false;
- 
-       if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
-         // No signals to defer. Just set the fault page back to RW and continue execution.
-@@ -650,8 +1016,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
-       const auto& Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
++
++      // tso-arm: the frame taken with all signals blocked (FramesSection)
++      ThreadStateObject::DeferredSignalState Top;
++      {
++        FramesSection Section;
++        if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
++          // No signals to defer. Just set the fault page back to RW and continue execution.
++          // This occurs as a minor race condition between the refcount decrement and the access to the fault page.
++          return;
++        }
++        Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
++        ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
+       }
+-
+-      const auto& Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
        Signal = Top.Signal;
        SigInfo = Top.Info;
 -      // sig mask has been updated at the defer time, recover the original mask
 -      memcpy(&_context->uc_sigmask, &Top.SigMask, sizeof(uint64_t));
+-      ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
 +      // tso-arm: the signal was blocked on the host at the defer time; the mask in force now, without it
 +      {
 +        auto& [sigmask_val] = _context->uc_sigmask;
 +        sigmask_val[0] &= ~Top.AddedMask;
 +      }
-       ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
  
        // Until we re-protect the page to PROT_NONE, FEX will now *permanently* defer signals and /not/ check them.
-@@ -678,27 +1047,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+       //
+@@ -678,27 +1075,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
    } else if (IsAsyncSignal(&SigInfo, Signal) && MustDeferSignal) {
      // If the signal is asynchronous (as determined by si_code) and FEX is in a state of needing
      // to defer the signal, then add the signal to the thread's signal queue.
@@ -3109,7 +3149,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
  
      // Postpone the remainder of signal handling logic until we process the SIGSEGV triggered by writing to InterruptFaultPage.
      return;
-@@ -709,27 +1068,60 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -709,27 +1096,60 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      // This signal is masked, must defer until the guest updates the signal mask.
      // Add it to the pending signal list
      ThreadObject->SignalInfo.PendingSignals |= 1ULL << (Signal - 1);
@@ -3175,7 +3215,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
  
        // Update our host signal mask so we don't hit race conditions with signals
        // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
-@@ -741,12 +1133,18 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -741,12 +1161,18 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      ERROR_AND_DIE_FMT("Unhandled guest exception");
    }
  
@@ -3194,7 +3234,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
    } else if (Handler.OldAction.handler == SIG_DFL && (Handler.DefaultBehaviour == DEFAULT_COREDUMP || Handler.DefaultBehaviour == DEFAULT_TERM)) {
      CTX->FlushAndCloseCodeMap();
  
-@@ -826,6 +1224,21 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -826,6 +1252,21 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // SA_RESTORER : We always need our host side restorer on x86-64, Couldn't use guest restorer anyway
    SignalHandler.HostAction.sa_flags = CheckAndAddFlags(SignalHandler.HostAction.sa_flags, SignalHandler.GuestAction.sa_flags,
                                                         SA_NOCLDSTOP | SA_NOCLDWAIT | SA_NODEFER | SA_RESTART);
@@ -3216,7 +3256,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
  
  #ifdef ARCHITECTURE_x86_64
  #define SA_RESTORER 0x04000000
-@@ -836,11 +1249,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -836,11 +1277,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // Walk the signals we have that are required and make sure to remove it from the mask
    // This'll likely be SIGILL, SIGBUS, SIG63
  
@@ -3240,7 +3280,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1000,16 +1422,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1000,16 +1450,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
  #ifdef ARCHITECTURE_arm64
    // Register SIGBUS signal handler.
    const auto SigbusHandler = [](FEXCore::Core::InternalThreadState* Thread, int Signal, void* _info, void* ucontext) -> bool {
@@ -3268,7 +3308,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
      }
  
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSIGBUSCount, 1);
-@@ -1026,7 +1456,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1026,7 +1484,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
        return true;
      }
      ArchHelpers::Context::SetPc(ucontext, PC + Result.value_or(0));
@@ -3277,7 +3317,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
    };
  
    RegisterHostSignalHandler(SIGBUS, SigbusHandler, true);
-@@ -1038,6 +1468,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1038,6 +1496,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
    for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
      RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
    }
@@ -3299,7 +3339,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
  }
  
  SignalDelegator::~SignalDelegator() {
-@@ -1083,7 +1528,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1083,7 +1556,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    if (Thread->Thread) {
      // Reserve a small amount of deferred signal frames. Usually the stack won't be utilized beyond
      // 1 or 2 signals but add a few more just in case.
@@ -3310,7 +3350,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
    }
  }
  
-@@ -1151,6 +1598,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1151,6 +1626,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;
@@ -3318,7 +3358,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..aafd9535c7e7a9638c1a0a1ba6c45470
      // Only attempt to install a new thunk handler if we were installing a new guest action
      if (!InstallHostThunk(Signal)) {
        UpdateHostThunk(Signal);
-@@ -1286,6 +1734,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+@@ -1286,6 +1762,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
      }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);

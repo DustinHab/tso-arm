@@ -3261,3 +3261,27 @@ it waits for a thread to leave before `unshare`). `tests/chrootfs.c` checks it a
 `--no-sandbox` as before; `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. The CI, Compat and Apps workflows allow user
 namespaces to tso-arm's FEX for their runs (`sudo tso-arm userns allow`), so `chrootfs`, Chromium's sandbox in
 `tests/chrome_check.sh` and the six desktop programs run with it there.
+## 69. Frames of FEX's deferral queued inside one another (2026-11-27)
+
+`sigsync` without pauses ended now and then in CI on GitHub's Arm runners (Neoverse N2), in every mode, with no line
+of its own and the shell's "Real-time signal 30": signal 64, which neither the program nor FEX has a handler for. In
+200 runs of each mode in a row on the N2 it did not happen once; twice in CI runs of the day (one of them the
+release check of 0.4.13).
+
+The one place FEX sends a signal number it computed is `CheckForPendingSignals`, which sends each signal marked
+pending for the guest (`PendingSignals`, bit n for signal n + 1) once the guest unblocks it. Bit 63 is signal 64, and
+`PendingSignals |= 1ULL << (Signal - 1)` sets it for a `Signal` of 0 (the shift by -1 is a shift by 63 on Arm).
+Signal 0 comes from a frame of FEX's deferral that was never written. The frames are a vector with room reserved
+(section 54), and `QueueFrame` appends to it with `emplace_back`: the frame written at the end, then the count raised.
+It runs inside FEX's signal handler, where the synchronous signals' numbers stay open (for faults of FEX's own), and a
+SIGBUS sent by another thread that comes in between the two runs `QueueFrame` again: it writes its frame to the same
+place and raises the count, and the outer one raises it once more. The count then holds a frame past the last one
+written, zeros where nothing was queued before; its delivery at the interrupt page took 0 for the signal, found it
+masked for the guest, marked bit 63, and FEX sent signal 64 the next time the guest set its mask. The same holds for the
+delivery's `back()` and `pop_back()`, between which a frame queued is taken away in place of the one delivered.
+
+Both change the frames with all signals blocked now (`FramesSection`: two `rt_sigprocmask` calls around a few
+instructions, which fault on nothing; FEX defers a signal only while it translates or is in a section of its own, so
+the cost is that of signals that come in there). `tests/sigdefer.c` makes it likely: three threads send SIGSEGV,
+SIGBUS, SIGILL, SIGTRAP and SIGFPE without pauses to a thread that writes a new function to fresh memory and calls it,
+3,000 times, so that most signals come in while FEX translates and the next ones during its handler for them.
