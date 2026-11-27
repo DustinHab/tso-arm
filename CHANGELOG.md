@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.14 (2026-11-27)
+
+32-bit programs can run under the page protocol (`TSO_ARM_32_VIEWS=1`), and 64-bit programs are faster with string
+operations and their own stack pages: 87 % of native on the efficiency table. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **The page protocol for 32-bit programs**, with `TSO_ARM_32_VIEWS=1`: their memory through the views below 4 GB,
   set up before FEX takes the address space above for itself, the translation's parts that were for 64-bit programs
