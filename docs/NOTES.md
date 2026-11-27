@@ -3098,6 +3098,29 @@ unblocked inside the handler and blocked again before it returns) and lands righ
 V8's handler today takes a fault only if the signal is the kernel's (`si_code` > 0), the address lies in memory
 registered as a WebAssembly memory with its guard regions, and the instruction pointer is exactly a trapping
 instruction of registered code (`src/trap-handler/handler-inside-posix.cc`, `handler-inside.cc`).
+
+**Resolved (after 0.4.15): not FEX's, the headless shell's.** `TSO_ARM_SIGLOG=guest` (FEX, see below) reports what
+a guest's handler of a fault is handed: the RIP FEX gives it is the faulting load itself (`8b 14 01`, `mov
+edx,[rcx+rax]`, Liftoff's; `8b 04 1a` with `--js-flags=--no-liftoff`), the address the memory's base plus the index,
+`si_code` 2. The handler it goes to is Chrome's `StackDumpSignalHandler` (through a CFI jump table entry), which looks
+whether a debugger is attached and prints its report: no call of `sigprocmask` (V8's handler unblocks SIGSEGV first),
+and every `sigaction` of SIGSEGV from the process's start comes from base's stack dumping; V8 never installs its own.
+Natively on x86-64 (WSL, no FEX) the same headless shell (158.0.8127.88) ends the same way ("Received signal 11
+SEGV_ACCERR 311000040000"), with and without `--single-process`, and catches the trap with
+`--disable-features=WebAssemblyTrapHandler` (explicit bounds checks) as under FEX. Google Chrome (the same version,
+Google's package) catches it natively and under tso-arm (`tso-arm app run chrome --headless=new`) in all four ways:
+the page protocol and full ordering, with Chrome's sandbox and without. There Crashpad's handler hands a fault to V8's
+first. `tests/apps_check.sh` (Apps workflow) checks the trap with Chrome and Edge; `tests/chrome_check.sh` no longer
+runs it.
+
+`TSO_ARM_SIGLOG=guest` (besides what `TSO_ARM_SIGLOG=1` reports): each SIGSEGV, SIGBUS, SIGILL and SIGFPE handed to a
+guest's handler (code, address, whether from translated code, the host's pc, the RIP as reconstructed and its block's
+entry, 16 bytes of guest code there, the handler and its flags); then the thread's next 16 calls of `sigaction` and
+`sigprocmask`, its next `sigreturn` (the RIP and r10 it returns to: a landing pad when V8 took the fault) and the next
+400 blocks it enters through the dispatcher (`TSOViews::GuestTraceBudget`; with `TSO_ARM_DISKCACHE=0` every block of a
+handler that has not run before, to be read in the program's binary with `objdump --start-address`); and every
+`sigaction` of SIGSEGV and SIGBUS from the start.
+
 ## 65. FEX's own descriptors, and a program that closes all of its own (2026-11-26)
 
 Steam's check of user namespaces still failed on GitHub's runner with the cache on (the writer ended for `unshare`,

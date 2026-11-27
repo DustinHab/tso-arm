@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+- WebAssembly's trap (an access past a WebAssembly memory, caught as a RuntimeError) was not tso-arm's: Google
+  Chrome catches it under tso-arm in every mode, with its sandbox and without, while Google's headless shell does not
+  catch it natively either (its handler of SIGSEGV does not ask V8's). The Apps workflow checks it with Chrome and
+  Edge (`tests/apps_check.sh`); `tests/chrome_check.sh` no longer runs it (notes section 64).
+- `TSO_ARM_SIGLOG=guest`: what a guest's handler of a fault is handed (the RIP as reconstructed, the code there, the
+  address) and what it does then (its calls of `sigaction` and `sigprocmask`, where it returns to, the blocks it
+  enters), and every `sigaction` of SIGSEGV and SIGBUS.
+
 ## 0.4.15 (2026-11-27)
 
 Each program keeps a disk cache database of its own, so what one program translates no longer makes every other

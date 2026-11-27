@@ -164,8 +164,10 @@ libraries they need from Ubuntu 24.04's archive and a menu entry; the Apps workf
 runner up to its first window. On the way: Chromium under the page protocol (notes section 64), FEX's descriptors
 and the cache (section 65), a program inside the root file system starting itself through `/proc/self/exe` (section
 66), the host's limit on a renderer's data counting FEX's memory (0.4.12, section 67), Chromium's and Electron's own
-sandbox with seccomp-bpf (section 68: `tso-arm app` uses it where user namespaces are allowed). Open: WebAssembly's
-trap in Chromium (section 64).
+sandbox with seccomp-bpf (section 68: `tso-arm app` uses it where user namespaces are allowed). WebAssembly's trap
+(an access past its memory, caught as a RuntimeError): Google Chrome catches it under tso-arm in every mode, with its
+sandbox and without; the headless shell does not, natively neither (section 64); the Apps workflow checks it with
+Chrome and Edge.
 
 ## 8. The page protocol for 32-bit programs
 

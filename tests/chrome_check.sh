@@ -5,8 +5,8 @@
 # views' window holds) and in two runs with the profile, and under FEX's full ordering. The browser, its zygote,
 # renderer, GPU and network processes all have to come up for the page to come back. Where user namespaces are
 # allowed, twice more with Chromium's own sandbox (its renderers under seccomp-bpf). (WebAssembly's trap, an access
-# past its memory that V8 catches with its handler of SIGSEGV, stops the renderer under FEX in every mode: notes
-# section 64.)
+# past its memory, is not caught by the headless shell, natively neither: its handler of SIGSEGV does not ask V8's;
+# tests/apps_check.sh checks it with Google Chrome and Edge, notes section 64.)
 #   tests/chrome_check.sh [DIR]     DIR: where the headless shell is kept (default build/chrome)
 # Exit status 1 if a run did not return the page as expected.
 set -e
@@ -131,24 +131,4 @@ else
     echo "  (no writable root file system: not run from inside one)"
 fi
 
-# for the record, not required (notes section 64): a WebAssembly access past its memory, which V8 catches with its
-# handler of SIGSEGV and turns into a RuntimeError
-cat >"$D/trap.html" <<'EOF'
-<html><body><p id=out>not run</p><script>
-const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,6,1,2,108,100,0,0,10,9,1,7,0,32,0,40,2,0,11]);
-const ld = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.ld;
-let w; try { ld(65536 * 4); w = 'no trap'; } catch (e) { w = (e instanceof WebAssembly.RuntimeError) ? 'trap' : 'other: ' + e; }
-document.getElementById('out').textContent = 'wasm ' + w;
-</script></body></html>
-EOF
-rm -rf "$D/profile-trap"
-st=0
-TSO_ARM_MODE=full timeout 60 "$T" run "$S" --no-sandbox --user-data-dir="$D/profile-trap" --dump-dom "file://$D/trap.html" \
-    >"$D/trap.out" 2>"$D/trap.err" || st=$?
-if grep -q 'wasm trap' "$D/trap.out"; then
-    echo "  (for the record) WebAssembly's trap under full ordering: caught"
-else
-    echo "  (for the record) WebAssembly's trap under full ordering: not caught (exit status $st; $(grep -m1 'Received signal' "$D/trap.err"))"
-fi
-rm -rf "$D/profile-trap"
 exit $fail

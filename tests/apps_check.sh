@@ -2,7 +2,8 @@
 # x86 desktop programs that have no Arm build for Linux, as a user gets them: 'tso-arm app install NAME' (from their
 # makers' own addresses), then 'tso-arm app run NAME' on an X server without a screen (Xvfb), up to its first window of
 # 300 by 300 pixels or more and until it draws in it (once more where the first start only fetched what the program
-# runs: Discord), for at most APPS_MINUTES each. Signing in is not tested. Needs the root file system
+# runs: Discord), for at most APPS_MINUTES each; Chrome and Edge also headless, with a WebAssembly access past its
+# memory that the page has to catch as a RuntimeError. Signing in is not tested. Needs the root file system
 # ('tso-arm rootfs', writable: the programs go into it), Xvfb, xwininfo (x11-utils), import (ImageMagick);
 # dbus-launch where there is one.
 #   tests/apps_check.sh [NAME...]     default: every program 'tso-arm app' knows by name
@@ -57,6 +58,16 @@ fi
 } >"$O/summary.md"
 
 failed=""
+traps=""
+# the page for WebAssembly's trap (Chrome and Edge): a function loading from its one page of memory, once past it
+cat >"$O/trap.html" <<'EOF'
+<html><body><p id=out>not run</p><script>
+const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,6,1,2,108,100,0,0,10,9,1,7,0,32,0,40,2,0,11]);
+const ld = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.ld;
+let w; try { ld(65536 * 4); w = 'no trap'; } catch (e) { w = (e instanceof WebAssembly.RuntimeError) ? 'trap' : 'other: ' + e; }
+document.getElementById('out').textContent = 'wasm ' + w + ', in bounds ' + ld(0);
+</script></body></html>
+EOF
 rfs=$("$T" app rootfs)
 if [ "${APPS_REMOVE:-0}" = 1 ]; then
     (cd "$rfs" && find . | sort) >"$O/rootfs-before.txt"
@@ -189,6 +200,24 @@ for n in "$@"; do
         mkdir -p "$(dirname "$g")"
         cp "$f" "$g" 2>/dev/null || true
     done
+    # Chrome and Edge, headless: a WebAssembly access past its memory, which V8 catches with its handler of SIGSEGV
+    # (Crashpad's hands the signal to it first) and turns into a RuntimeError for the page (notes section 64)
+    case $n in
+    chrome | edge)
+        rm -rf "$P/trapprof"
+        timeout 120 "$T" app run "$n" --headless=new --user-data-dir="$P/trapprof" --dump-dom "file://$O/trap.html" \
+            >"$P/trap.txt" 2>"$P/trap-err.txt" </dev/null || true
+        if grep -q 'wasm trap, in bounds 0' "$P/trap.txt"; then
+            say "$n: WebAssembly's trap caught"
+            traps="$traps, $n caught"
+        else
+            say "$n: WebAssembly's trap not caught ($(grep -a -m1 -o 'Received signal [0-9A-Z_ ]*' "$P/trap-err.txt" || echo 'no page'))"
+            traps="$traps, $n not caught"
+            failed="$failed $n-wasm"
+        fi
+        rm -rf "$P/trapprof"
+        ;;
+    esac
     # only every fourth screenshot of the way there
     k=0
     for p in "$P"/shot-*.png; do
@@ -218,6 +247,9 @@ for n in "$@"; do
 done
 kill $xpid 2>/dev/null || true
 [ -n "${DBUS_SESSION_BUS_PID:-}" ] && kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
+if [ -n "$traps" ]; then
+    printf '\nWebAssembly'"'"'s trap (headless, an access past its memory caught as a RuntimeError): %s.\n' "${traps#, }" >>"$O/summary.md"
+fi
 if [ "${APPS_REMOVE:-0}" = 1 ]; then
     for n in $("$T" app list | awk '{ print $1 }'); do
         "$T" app remove "$n" >>"$O/remove.txt" 2>&1 || failed="$failed remove-$n"
@@ -237,7 +269,7 @@ fi
 [ -f "$O/summary.md.tail" ] && cat "$O/summary.md.tail" >>"$O/summary.md" && rm -f "$O/summary.md.tail"
 cat "$O/summary.md"
 if [ "${APPS_EXPECT:-}" = window ] && [ -n "$failed" ]; then
-    say "no window from:$failed"
+    say "no window or no caught trap from:$failed"
     exit 1
 fi
 exit 0
