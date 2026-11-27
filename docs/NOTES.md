@@ -3319,3 +3319,9 @@ flood of synchronous signals' numbers that never stops, the thread spends nearly
 (the frames, the interrupt page, the guest's frame and its sigreturn); where that time goes is not measured yet.
 No program is known to send so; profilers use SIGPROF, which is blocked on the host as any other signal and costs what
 a signal costs under FEX. `sigdefer` is not in the CI. `sigsync` without pauses: 90 of 90 on the Pi in the three modes.
+
+**forksnap on the 22.04 runner.** The second release check of 0.4.13 failed once more, in `forksnap` under the page
+protocol on GitHub's ubuntu-22.04-arm runner: one child of 100 saw memory written after the fork (section 58). Not
+these changes: 2,000 forks a run, two hours each on that runner, one child saw it in 5 of some 73 runs on the commit
+before them and in 8 of some 73 on this one; on the Pi 200 of 200 runs right on 0.4.13 and on 0.4.12. A rare fault of
+`FreezeForFork` on that runner, a few in a thousand of CI's runs; open.
