@@ -57,9 +57,17 @@ jobs:
         if: ${{ !inputs.symbols && steps.fex.outputs.cache-hit != 'true' }}
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
 
+      - name: FEX with its symbol table (cached)
+        id: fexsym
+        if: ${{ inputs.symbols }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-symbols-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+
       # the same code linked once more without --strip-all (fex/link_symbols.sh), in place of the installed one
       - name: FEX built here, with its symbol table
-        if: ${{ inputs.symbols }}
+        if: ${{ inputs.symbols && steps.fexsym.outputs.cache-hit != 'true' }}
         run: |
           bin/tso-arm install --source
           cd ~/.local/src/tso-arm/FEX/Build-tso-arm

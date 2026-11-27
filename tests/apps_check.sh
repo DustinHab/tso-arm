@@ -149,6 +149,9 @@ for n in "$@"; do
                     for p in $tp; do
                         timeout 90 sudo -n gdb -p "$p" -batch -ex 'set pagination off' -ex 'thread apply all bt 40' \
                             >"$P/gdb-$attempt-$p.txt" 2>&1 </dev/null || true
+                        # FEX's frames below translated code, which the backtrace does not get past
+                        timeout 300 sudo -n gdb -p "$p" -batch -x "$R/tests/stackscan.py" \
+                            >"$P/stack-$attempt-$p.txt" 2>&1 </dev/null || true
                     done
                 fi
             fi
