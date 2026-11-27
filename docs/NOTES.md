@@ -3541,3 +3541,15 @@ decoder saw an empty map there before as well). Chrome's headless shell, six run
 then 4.00 to 4.03 s (from 5.7, 5.5, 4.5 s with neither change); `python3 -c 0` unchanged (107 ms warm). FEX's part
 now: the translation 63 % (register allocation 15 %), the decoder 15 %, the disk cache's index read at each
 process's start 3 %, the block link map (a `std::map`) 3 %.
+
+What still misses, by process (third run, `TSO_DISKCACHE_LOG=1`): the browser 315 lookups, its two zygotes 51 each,
+a utility process 121, the GPU process 11,824, the two renderers 46,764 and 49,312: the forked processes, which do not
+store (section 71). In one process (`--single-process`, the renderer in the browser, which stores) the misses settle
+at 64,000 to 80,000 a run and as many units are stored anew each time: Chromium's code is entered at other blocks from
+run to run, and a unit is found only through its start and the blocks after its calls (its entry points). With
+multiblock off (every unit one basic block) they fell to 4,098 by the fourth run. Tried and taken out: every block of
+a unit an entry point (`Block.IsEntryPoint` for all of them in the frontend; IR values are local to a block, so the
+entry point's prologue is all entering anywhere needs). The first runs missed a tenth less (162,000 against 184,000
+lookups), but the code grew and each loaded unit mapped all its entries: Chrome 4.56 instead of 4.11 s warm, `python3
+-c 0` 122 instead of 107 ms. Whatever would make the renderers' code found again needs both: their stores, and a unit
+found through more than its start in the disk cache's index.
