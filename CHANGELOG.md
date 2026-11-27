@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.15 (2026-11-27)
+
+Each program keeps a disk cache database of its own, so what one program translates no longer makes every other
+program start more slowly, and Google Chrome installs by name. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **FEX's disk cache keeps a database for each program.** Every start read the whole index of the one database all
   programs shared, and what one program stored made every other's start slower: after two runs of Chrome's headless
