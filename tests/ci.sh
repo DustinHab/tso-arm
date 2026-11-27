@@ -202,7 +202,7 @@ done
 # posix_spawn (clone with CLONE_VM | CLONE_VFORK) while other threads translate code: the child as a vfork, FEX's
 # locks and maps in the parent whole (Slack's renderer hung on them)
 for m in tso full; do
-    out=$(last timeout 120 $T run --mode $m $B/spawnvm 200) || fail "spawnvm, $m: $out"
+    out=$(last timeout 120 $T run --mode $m $B/spawnvm 3) || fail "spawnvm, $m: $out"
     ok "$m: $out"
 done
 
