@@ -53,6 +53,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
     $CC -O2 -static -o $B/faultrip tests/faultrip.c
     $CC -O2 -static -o $B/closeall tests/closeall.c
+    $CC -O2 -static -pthread -o $B/spawnvm tests/spawnvm.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -196,6 +197,13 @@ for m in tso full; do
     rm -rf "$dc"
     [ $st = 0 ] && [ $secs -lt 10 ] || fail "closeall, $m: exit status $st after $secs s: $out"
     ok "$m: $(echo "$out" | tail -n 1)"
+done
+
+# posix_spawn (clone with CLONE_VM | CLONE_VFORK) while other threads translate code: the child as a vfork, FEX's
+# locks and maps in the parent whole (Slack's renderer hung on them)
+for m in tso full; do
+    out=$(last timeout 120 $T run --mode $m $B/spawnvm 200) || fail "spawnvm, $m: $out"
+    ok "$m: $out"
 done
 
 # a fault's instruction pointer in the guest's handler, changed there to a landing pad (V8's WebAssembly traps,

@@ -1,4 +1,4 @@
-From 51ddd514a28703c92e49cf86e8e20daa61b1dd10 Mon Sep 17 00:00:00 2001
+From 48bda28f3a3bf7f9bda5b3681f56741c0a8041b8 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -45,7 +45,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
  .../LinuxSyscalls/SignalDelegator.cpp         |  507 +++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  117 +-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  139 +-
  .../LinuxSyscalls/Syscalls/Passthrough.cpp    |   48 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  105 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  253 ++-
@@ -61,7 +61,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 57 files changed, 4790 insertions(+), 376 deletions(-)
+ 57 files changed, 4812 insertions(+), 376 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f0ad56699 100644
@@ -3290,7 +3290,7 @@ index 9e6820bf6f22ed030fcf53b53ecc437f4ee14da1..61843152c020a96fdebee84af84706cb
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d246f5180b3 100644
+index a7a432bbd650081e4a8ed1af18a3b0650357af94..c71911dd31cf0d6d8dd21fbf79d0d96e71d829f4 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -3362,7 +3362,36 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
          ++OldArgv;
        }
        while (*OldArgv) {
-@@ -673,6 +692,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -658,6 +677,28 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+     return false;
+   };
+ 
++  // tso-arm: posix_spawn's clone (CLONE_VM | CLONE_VFORK and a stack of its own, without CLONE_THREAD: glibc's
++  // posix_spawn, after its clone3 with CLONE_CLEAR_SIGHAND got EINVAL below) as a vfork: the child with FEX's state
++  // of its own, the parent waiting until the child has called execve or exited. Through the handler for unhandled
++  // flags the child ran FEX on its parent's memory: its unlocking after the fork (UnlockAfterFork) released the locks
++  // the parent held for the fork and reset FEX's code invalidation lock, the parent released them once more after
++  // it, and the parent's other threads went on meanwhile, so that FEX's maps and pools in the parent broke (Slack's
++  // renderer: null pointers in a thread's lookup cache and in the decoder's pool, delivered to the guest's SIGSEGV
++  // handler, which did not come back, the lookup cache's lock held for good, every thread waiting for it). The child
++  // sees a copy of its parent's memory, as after vfork() here: what it stores for the parent (glibc: the error of an
++  // execve that failed) does not reach it, the child's exit status 127 does.
++  if (!AnyFlagsSet(flags, CLONE_THREAD | CLONE_SIGHAND | CLONE_SYSVSEM) && AllFlagsSet(flags, CLONE_VM | CLONE_VFORK)) {
++    args->args.flags &= ~uint64_t(CLONE_VM);
++    if (!HasUnhandledFlags(args)) {
++      static const bool SigLog = getenv("TSO_ARM_SIGLOG") != nullptr;
++      if (SigLog) {
++        fprintf(stderr, "tso-arm siglog: pid %d: clone %#lx (posix_spawn's) as a vfork\n", ::getpid(), static_cast<unsigned long>(flags));
++      }
++      return FEX::HLE::ForkGuest(Frame->Thread, Frame, args);
++    }
++    args->args.flags = flags;
++  }
++
+   // If there are flags that can't be handled regularly then we need to hand off to the true clone handler
+   if (HasUnhandledFlags(args)) {
+     if (!AnyFlagsSet(flags, CLONE_THREAD)) {
+@@ -673,6 +714,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
        args->NewStack = FEX::LinuxEmulation::Threads::AllocateStackObject();
  
        FEX::HLE::_SyscallHandler->LockBeforeFork(Frame->Thread);
@@ -3373,7 +3402,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
  
        uint64_t Result {};
        if (args->Type == TYPE_CLONE2) {
-@@ -683,6 +706,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -683,6 +728,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
  
        if (Result != 0) {
          // Parent
@@ -3384,7 +3413,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
          // Unlock the mutexes on both sides of the fork
          FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, false);
  
-@@ -711,6 +738,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -711,6 +760,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
      // CLONE_PARENT is ignored (Implied by CLONE_THREAD)
      return FEX::HLE::ForkGuest(Thread, Frame, args);
    } else {
@@ -3409,7 +3438,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
      auto NewThread = FEX::HLE::CreateNewThread(Thread->CTX, Frame, args);
  
      // Return the new threads TID
-@@ -899,11 +944,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -899,11 +966,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
@@ -3474,7 +3503,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
    }
  
    // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
-@@ -962,6 +1055,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
+@@ -962,6 +1077,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -3486,7 +3515,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..fbcdd6d05e0859fb21b26feb15893d24
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +1072,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +1094,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();
