@@ -3437,14 +3437,30 @@ the cache but does not write it (section 62: it shares its parent's descriptors 
 renderers are forks of its zygote, so what only they run misses in every run. What it would bring if they stored
 theirs (four runs on an empty cache, the best warm one against the better of two without): Chrome's headless shell
 renders the page in 4.65 instead of 5.45 s with its cache warm as it is, and with `--single-process` (the renderer in
-the browser process, which stores its code) in 3.09 instead of 3.47 s; so perhaps a tenth more, for a child that
-reopens the cache's files after `fork` (their `flock` is per open file description, which a child shares with its
-parent; and Chromium's zygote is in its chroot by then, so only through FEX's own descriptor of `/proc`). Not done
-yet.
+the browser process, which stores its code) in 3.09 instead of 3.47 s; so perhaps a tenth more.
+
+Tried, and taken out again: a child with an address space and descriptors of its own opened both files anew after
+the fork (through FEX's own descriptor of `/proc` and `self/fd/N`, onto the same numbers: their `flock` is per open
+file description, which a child shares with its parent, and Chromium's zygote is in its chroot by then) and wrote with
+a writer of its own. Chromium's renderers come through FEX's other clone path, each the first process of a PID
+namespace of its own (`clone` with `CLONE_NEWPID`), and wrote from there as well. They ended with `exit_group(0)`, and
+their stores reached the file (the cache 260, 483, 555 MB after three runs instead of 107, 198), but the renderers'
+later runs missed about as often (42,000 to 52,000 blocks, against 60,000), and the page took as long (4.2 to 4.8 s
+against 4.3 to 4.7 s). The renderers stored code at 37,668 offsets of Chrome's file in the second run and missed at
+40,938 in the third, none of them the same: they enter their code at other addresses from run to run, which fits a
+multiblock unit being keyed by the address it was entered by, and with several threads that address changes. So
+the cache would need every entry of a unit in its index, its guest code's extents relative to each; not done.
+
+The key of a lookup that missed, what `TSO_DISKCACHE_LOG=1` reports now: `nokey` (no entry under the key) or `nohash`
+(none whose guest code is the same), the offset in the file, the file's id, the key, the process, whether it writes,
+whether the range is writable, the protocol's state and the configuration's hash; `dc store` the same for each block
+stored. A first run without a profile (Chrome starts under the page protocol, falls back, states 11, 13 and 15) and
+the second, which starts without views (state 8, its profile says it fell back), share no key: only the third run
+finds the second's code.
 
 FEX names the database by the program's path as well now (`CONFIG_APP_FILENAME`, which FEX sets for every program it
 starts, also after `execve`): `RWCacheDB_<configuration>_<program>`, the libraries a program maps in its own. A
 program's start reads only what it stored itself; what Chrome stores costs only Chrome's start (some 180 ms at the
 size limit of 1 GB against its 6 s). `TSO_DISKCACHE_SHARED=1` keeps one database for all, as FEX has it. The CI runs
 two programs with an empty cache: two databases, the second runs of both missing 10 of 614 blocks of the first.
-Open: Chromium's renderers, which never store their code (above).
+Open: Chromium's misses, a multiblock unit under each of its entries (above).
