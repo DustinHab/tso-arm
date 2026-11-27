@@ -1,5 +1,21 @@
 # Changes
 
+## Unreleased
+
+- **Chromium, Electron and CEF programs start more than twice as fast** with the disk cache warm: Chrome's headless
+  shell renders a page in 1.8 instead of 4.0 s, its later runs finding all but a few hundred of its blocks instead of
+  missing some 90,000. Two faults kept them from it: forked children (Chromium's renderers and GPU process are forks
+  of its zygote) read the cache but did not write it, and V8's copy of its builtins from its program's file (`mremap`
+  with `MREMAP_DONTUNMAP`, as Node.js does as well) became the base FEX reckoned the whole file from, so that the
+  offsets of the program's code changed from run to run. A forked child now opens the cache's files anew at its first
+  store and writes with a writer of its own (`TSO_DISKCACHE_CHILD=0` turns it off), and such a copy is a resource of
+  its own in FEX. Fork-heavy programs gain too: a shell loop of 300 subshells takes 1.4 instead of 2.4 s.
+- Under the page protocol `mremap` with `MREMAP_DONTUNMAP` unmapped the old range (the views copied private memory and
+  dropped it): a program copying a page of its own code so died at once. The old range stays now, as the kernel
+  leaves it.
+- `tests/forkcode.c` and `tests/remapcode.c` in the CI: a forked child's code and a program whose code was copied
+  below it are found in the disk cache's second run (notes section 72).
+
 ## 0.4.16 (2026-11-28)
 
 Chromium, Electron and CEF programs start 12 to 14 % faster, and WebAssembly's trap turned out to work in Google

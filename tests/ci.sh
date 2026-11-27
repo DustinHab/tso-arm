@@ -68,6 +68,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
     $CC -O2 -static -o $B/getenv tests/getenv.c
+    $CC -O2 -static -o $B/forkcode tests/forkcode.c
+    $CC -O2 -static -o $B/remapcode tests/remapcode.c
     # 32-bit x86 programs (CC_X86_32, default i686-linux-gnu-gcc; skipped without one)
     if command -v $CC32 >/dev/null; then
         $CC32 -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
@@ -248,6 +250,22 @@ rm -rf "$dc"
 [ "$dbs" = 2 ] && [ "$shared" = 1 ] && [ $((misses * 10)) -lt "$first" ] ||
     fail "disk cache per program: $dbs databases for two programs, $shared shared, misses $first in the first runs, $misses in the second"
 ok "disk cache: a database for each of two programs, misses $first in their first runs, $misses in the second; one shared with TSO_DISKCACHE_SHARED=1"
+
+# a forked child writes the disk cache as well (Chromium's renderers and GPU process are forks of its zygote), and a
+# copy of a page of a program's code below it (V8's builtins, with mremap(MREMAP_DONTUNMAP)) leaves the offsets of the
+# program's code as they are: the second run of each finds the code of its first (notes section 72)
+for p in forkcode remapcode; do
+    dc=$(mktemp -d)
+    for r in first second; do
+        out=$(FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$dc/ TSO_DISKCACHE_LOG=1 timeout 60 $T run $B/$p 2>>$dc/$r) ||
+            fail "disk cache, $p, $r run: exit status $?: $out"
+    done
+    first=$(grep -c '^dc nokey' $dc/first)
+    misses=$(grep -c '^dc nokey' $dc/second)
+    rm -rf "$dc"
+    [ $((misses * 10)) -lt "$first" ] || fail "disk cache, $p: misses $first in the first run, $misses in the second ($out)"
+    ok "disk cache, $p: misses $first in the first run, $misses in the second ($out)"
+done
 
 # a program of Chromium's family (V8's snapshot beside it) gets multiblock units of 50 guest instructions, any other
 # tso-arm's 150, and FEX_MAXINST set otherwise stays (notes section 72)

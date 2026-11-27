@@ -295,5 +295,11 @@ data). A static program that ends at once starts in 6.5 ms instead of 16, zstd o
 Since (notes section 71): a database for each program. Each start reads its database's whole index, and in the one
 FEX shares between all programs of a configuration Chromium's code (some 100 MB a run, its forked renderers never
 write theirs and miss again) made every other program start slower: `python3 -c 0` 125 instead of 90 ms after two
-runs of Chrome's headless shell, about as slow as without the cache after a release check (1 GB). Open: Chromium's
-own misses.
+runs of Chrome's headless shell, about as slow as without the cache after a release check (1 GB).
+
+Since (notes section 72): Chromium's own misses. Its start is mostly FEX translating; smaller multiblock units for
+Chromium's family, no relocation map on the disk cache's path, and then two faults found: forked children (its
+renderers and GPU process) did not write the cache, and V8's copy of its builtins (`mremap` with `MREMAP_DONTUNMAP`)
+became the base FEX reckoned Chrome's whole file from, so the offsets of its code changed from run to run. Both fixed,
+with the views' `mremap` honouring `MREMAP_DONTUNMAP`: Chrome's headless shell renders a page in 1.8 s with its cache
+warm (4.5 s in 0.4.15), a shell loop of subshells takes 40 % less.

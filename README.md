@@ -309,7 +309,8 @@ by default and with `BOX64_DYNAREC_STRONGMEM=1` it does not keep x86 order (forb
 - **Chromium** and programs built on it: Google's headless shell renders pages with V8 and WebAssembly under the page
   protocol and under full ordering (`tests/chrome_check.sh` in the Compat workflow). Chromium reserves more address
   space than the views' window holds, so its processes fall back to full ordering at their start (notes section 64).
-  **Steam** (`tso-arm steam`) comes up to its login window on GitHub's Arm runner. **Desktop programs** without an
+  With FEX's disk cache warm the headless shell renders a page in 1.8 s on the Pi 5 (5.1 s the first time; notes
+  section 72). **Steam** (`tso-arm steam`) comes up to its login window on GitHub's Arm runner. **Desktop programs** without an
   Arm build for Linux install from their makers' packages with `tso-arm app install` (Discord, Spotify, Slack,
   Signal, Zoom, Microsoft Edge; the Apps workflow starts each up to its first window).
 - **Containers:** `docker run --platform linux/amd64 IMAGE` runs x86-64 images once `binfmt register` (the

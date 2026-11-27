@@ -1,17 +1,17 @@
-From b5548e3d29fba0f37ca64bee77a60b75485258f3 Mon Sep 17 00:00:00 2001
+From 22d31ed3b16a834b9f5458c05b465aef103ff6c2 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
 
 ---
  .../Source/Interface/Config/Config.json.in    |    6 +-
- FEXCore/Source/Interface/Context/Context.h    |   20 +
+ FEXCore/Source/Interface/Context/Context.h    |   21 +
  .../Core/ArchHelpers/Arm64Emitter.cpp         |   40 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
- FEXCore/Source/Interface/Core/Core.cpp        |  183 +-
- FEXCore/Source/Interface/Core/DiskCache.cpp   |  152 +-
- FEXCore/Source/Interface/Core/DiskCache.h     |   12 +
+ FEXCore/Source/Interface/Core/Core.cpp        |  187 +-
+ FEXCore/Source/Interface/Core/DiskCache.cpp   |  213 ++-
+ FEXCore/Source/Interface/Core/DiskCache.h     |   24 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
  FEXCore/Source/Interface/Core/Frontend.cpp    |   27 +-
  FEXCore/Source/Interface/Core/Frontend.h      |    6 +
@@ -29,18 +29,18 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../IR/Passes/RegisterAllocationPass.cpp      |    2 +-
  .../Source/Utils/Allocator/64BitAllocator.cpp |   12 +-
  FEXCore/Source/Utils/AllocatorHooks.cpp       |   41 +
- FEXCore/include/FEXCore/Core/Context.h        |   16 +
+ FEXCore/include/FEXCore/Core/Context.h        |   18 +
  FEXCore/include/FEXCore/Core/CoreState.h      |    5 +
- .../FEXCore/Core/DiskCacheFileMapper.h        |    5 +
+ .../FEXCore/Core/DiskCacheFileMapper.h        |   10 +
  FEXCore/include/FEXCore/Core/TSOViews.h       |   89 +-
  .../include/FEXCore/Utils/AllocatorHooks.h    |    2 +
- FEXCore/include/FEXCore/Utils/File.h          |    5 +
+ FEXCore/include/FEXCore/Utils/File.h          |    9 +
  Source/Common/Config.cpp                      |   28 +-
  Source/Common/FDUtils.h                       |   62 +
  Source/Common/FEXServerClient.cpp             |   42 +-
  Source/Tools/FEXInterpreter/CMakeLists.txt    |   12 +
  Source/Tools/FEXInterpreter/ELFCodeLoader.h   |   16 +-
- .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  119 +-
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  136 +-
  .../LinuxEmulation/ArchHelpers/MContext.h     |   16 +
  .../LinuxSyscalls/FileManagement.cpp          |  251 ++-
  .../LinuxSyscalls/FileManagement.h            |    6 +
@@ -51,10 +51,10 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  150 +-
  .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |    4 +
  .../LinuxSyscalls/Syscalls/Passthrough.cpp    |  123 +-
- .../LinuxSyscalls/Syscalls/Thread.cpp         |  107 +-
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  282 ++-
+ .../LinuxSyscalls/Syscalls/Thread.cpp         |  116 +-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  322 +++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1536 +++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1560 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  220 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |  100 +-
  .../LinuxSyscalls/ThreadManager.h             |   67 +-
@@ -66,7 +66,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 62 files changed, 5427 insertions(+), 436 deletions(-)
+ 62 files changed, 5601 insertions(+), 441 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
 index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3256edee0 100644
@@ -88,10 +88,18 @@ index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3
        },
        "ExtendedVolatileMetadata": {
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f0ad56699 100644
+index 18f08b861e4b979c9b12b6317138519dccccb50b..c4de40e68ab27c3acc971be49b7dae101cd76879 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
-@@ -220,6 +220,16 @@ public:
+@@ -196,6 +196,7 @@ public:
+ #ifndef _WIN32
+   void LockBeforeFork(FEXCore::Core::InternalThreadState* Thread) override;
+   void UnlockAfterFork(FEXCore::Core::InternalThreadState* Thread, bool Child) override;
++  void ForkedChildWritesDiskCache() override;
+ #endif
+   void SetSignalDelegator(FEXCore::SignalDelegator* SignalDelegation) override;
+   void SetSyscallHandler(FEXCore::HLE::SyscallHandler* Handler) override;
+@@ -220,6 +221,16 @@ public:
        CodeMapWriter.reset();
      }
    }
@@ -108,7 +116,7 @@ index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f
  
    void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
    void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
-@@ -238,6 +248,10 @@ public:
+@@ -238,6 +249,10 @@ public:
    AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandler Handler, void* Creator = nullptr, void* Data = nullptr);
  
    void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) override;
@@ -119,7 +127,7 @@ index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f
  
    void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) override;
  
-@@ -513,6 +527,12 @@ private:
+@@ -513,6 +528,12 @@ private:
    fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
    // tso-arm: guest instructions translated ordered (all others plain) when views are on; under CodeInvalidationMutex
    IntervalList<uint64_t> TSOEscalated;
@@ -285,7 +293,7 @@ index 87a110c845921e3d5bd7dd5f22b0f97d95aa9ba6..e5ff4c712e54e05557a525c86b5be4e5
      }
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c3d255fc5 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..3a1c968ce09ff852bd9709e6def6819627647420 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -9,6 +9,7 @@ $end_info$
@@ -329,15 +337,21 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
  
    if constexpr (BLOCK_DEBUGGING) {
      // If the developer wants to do any single-stepping points or watch points.
-@@ -454,6 +467,7 @@ void ContextImpl::DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
+@@ -452,8 +465,13 @@ void ContextImpl::DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
+ }
+ 
  #ifndef _WIN32
++void ContextImpl::ForkedChildWritesDiskCache() {
++  DiskCache.WriteInForkedChild();
++}
++
  void ContextImpl::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
    Allocator::UnlockAfterFork(LiveThread, Child);
 +  DiskCache.UnlockAfterFork(Child);
  
    Profiler::PostForkAction(Child);
    if (Child) {
-@@ -475,6 +489,7 @@ void ContextImpl::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread
+@@ -475,6 +493,7 @@ void ContextImpl::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread
  
  void ContextImpl::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread) {
    CodeInvalidationMutex.lock();
@@ -345,7 +359,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
    Allocator::LockBeforeFork(Thread);
    if (Config.StrictInProcessSplitLocks) {
      FEXCore::Utils::SpinWaitLock::lock(&StrictSplitLockMutex);
-@@ -519,6 +534,39 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
+@@ -519,6 +538,39 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
    return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
  }
  
@@ -385,7 +399,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
  ContextImpl::GenerateIRResult
  ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
    FEXCORE_PROFILE_SCOPED("GenerateIR");
-@@ -529,8 +577,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -529,8 +581,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
    uint64_t TotalInstructionsLength {0};
  
    bool HasCustomIR {};
@@ -398,7 +412,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
  
    if (HasCustomIRHandlers.load(std::memory_order_relaxed)) {
      std::shared_lock lk(CustomIRMutex);
-@@ -637,13 +688,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -637,13 +692,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
          // side effect here and (if that behaviour is required) we should handle
          // that more explicitly later.
          // tso-arm: with the page protocol a thread may be sent back to the dispatcher at any instruction start
@@ -423,7 +437,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
            }
            Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
          }
-@@ -696,12 +754,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -696,12 +758,25 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
            }
            // tso-arm: with views, an instruction is plain until a fault showed it touching memory that another
            // thread writes; the page protections make that sound
@@ -450,7 +464,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
            if (Thread->OpDispatcher->HadDecodeFailure()) {
              HadDispatchError = true;
            } else {
-@@ -779,6 +850,13 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -779,6 +854,13 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
      Thread->OpDispatcher->Finalize();
    }
  
@@ -464,7 +478,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
    Thread->FrontendDecoder->DelayedDisownBuffer();
  
    IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
-@@ -880,6 +958,16 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -880,6 +962,16 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    }
  
    auto Thread = Frame->Thread;
@@ -481,7 +495,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
    FEXCORE_PROFILE_SCOPED("CompileBlock");
    FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedJITTime);
  
-@@ -899,9 +987,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -899,9 +991,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
    std::optional<DiskCache::CodeHitData> Hit;
    std::optional<uint64_t> DiskCacheGuestCodeKey;
@@ -517,7 +531,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
        if (LoadedCode.BlockBegin) {
-@@ -933,15 +1046,32 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -933,15 +1050,32 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
        }
      }
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedDiskCacheMissCount, 1);
@@ -553,7 +567,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -959,9 +1089,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -959,9 +1093,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
          fclose(F);
        }
      }
@@ -565,7 +579,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
                static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
                (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
      }
-@@ -1143,6 +1273,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1277,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -588,7 +602,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
  void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
-@@ -1199,9 +1345,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
+@@ -1199,9 +1349,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
      return false;
    }
    TSOEscalated.Insert({Start, End});
@@ -612,7 +626,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..a60a23aa88d05a29db8a49944d66032c
    const uint64_t BlockBegin = Thread->CurrentFrame->State.InlineJITBlockHeader;
    auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe53871595b0bc 100644
+index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..26834643dc09c7e886ff25b2699f2874273bda62 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
 @@ -8,6 +8,7 @@
@@ -623,24 +637,45 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/string.h>
  #include <FEXCore/HLE/SyscallHandler.h>
-@@ -19,6 +20,8 @@
+@@ -19,6 +20,10 @@
  #include <FEXHeaderUtils/Filesystem.h>
  
  #include <cstdint>
++#include <fcntl.h>
++#include <unistd.h>
 +#include <cstdio>
 +#include <cstdlib>
  #include <cstring>
  #include <atomic>
  
-@@ -55,6 +58,7 @@ namespace DiskCache {
+@@ -55,6 +60,26 @@ namespace DiskCache {
    };
  
    static FileMapperFunc FileMapper = nullptr;
 +  static FDHookFunc FDHook = nullptr;
++  static ReopenHookFunc ReopenHook = nullptr;
++
++  bool FOZFile::Reopen() {
++    if (!FD || !ReopenHook) {
++      return false;
++    }
++    const int Old = FD->GetHandle();
++    const int New = ReopenHook(Old);
++    if (New < 0) {
++      return false;
++    }
++    // onto the old number, which stays FEX's own (FEX::ProtectFD); the parent keeps the old description
++    const bool Ok = ::dup3(New, Old, O_CLOEXEC) == Old;
++    ::close(New);
++    if (Ok) {
++      FD->ForgetLock();
++    }
++    return Ok;
++  }
  
    bool FOZFile::Open(const fextl::string& FOZFileName, bool ReadOnly) {
      FileName = FOZFileName;
-@@ -69,6 +73,15 @@ namespace DiskCache {
+@@ -69,6 +94,15 @@ namespace DiskCache {
        FD.reset();
        return false;
      }
@@ -656,7 +691,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
  
      bool Valid = false;
      bool TookLock = false;
-@@ -356,6 +369,10 @@ namespace DiskCache {
+@@ -356,6 +390,14 @@ namespace DiskCache {
      return true;
    }
  
@@ -664,10 +699,14 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
 +    FDHook = Func;
 +  }
 +
++  FEX_DEFAULT_VISIBILITY void SetReopenHook(ReopenHookFunc Func) {
++    ReopenHook = Func;
++  }
++
    FEX_DEFAULT_VISIBILITY void SetFileMapper(FileMapperFunc Func) {
      FileMapper = Func;
    }
-@@ -445,7 +462,19 @@ namespace DiskCache {
+@@ -445,7 +487,19 @@ namespace DiskCache {
        FileMapper = nullptr;
      }
  
@@ -688,7 +727,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
      OpenCacheDB(RWDBBasePath, false);
  
      if (RWCacheDB && !FoundMetadata) {
-@@ -484,6 +513,91 @@ namespace DiskCache {
+@@ -484,6 +538,114 @@ namespace DiskCache {
      }
    }
  
@@ -711,6 +750,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
 +      return;
 +    }
 +    if (Child) {
++      WroteBeforeFork = WritingDiskCache;
 +      WritingDiskCache = false;
 +      if (MemoryLRUMaxSize) {
 +        ReadingDiskCache = false;
@@ -721,6 +761,27 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
 +    MemoryLRULock.unlock();
 +    IndexLock.unlock();
 +    WriterLock.unlock();
++  }
++
++  // tso-arm: a forked child read the cache and wrote nothing (UnlockAfterFork): it shared its parent's open file
++  // descriptions, and with them their flock, which then kept neither from the other's stores. Chromium's renderers and
++  // its GPU process are forks of its zygote, and whatever only they run missed again in every run (notes sections 71
++  // and 72). A child with an address space and descriptors of its own (a fork, not a vfork, which goes on to execve)
++  // writes as well: at its first store (Store) it opens both files anew, through /proc (ReopenHook: FEX's own
++  // descriptor of it, which the zygote's chroot does not hide), onto the same numbers, and starts a writer of its own;
++  // a child that stores nothing (most go on to execve) costs nothing. Unless the cache is kept in memory as well
++  // (DiskCacheMemorySize), whose pruning a child does not share. TSO_DISKCACHE_CHILD=0: a child writes nothing.
++  void DiskCache::WriteInForkedChild() {
++    static const bool Off = [] {
++      const char* E = getenv("TSO_DISKCACHE_CHILD");
++      return E && E[0] == '0';
++    }();
++    if (Off || !WroteBeforeFork || MemoryLRUMaxSize || !RWCacheDB) {
++      return;
++    }
++    std::lock_guard lk(WriterLock);
++    ChildWriterPending = true;
++    WritingDiskCache = true;
 +  }
 +
 +  // tso-arm: code translated with the views awake was ordered as the escalations within its range said: they go into
@@ -770,7 +831,8 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
 +
 +  void DiskCache::ResumeWrites() {
 +    std::lock_guard lk(WriterLock);
-+    if (Writer || !WritingDiskCache) {
++    // a forked child's writer starts with its first store, on files opened anew (WriteInForkedChild)
++    if (Writer || !WritingDiskCache || ChildWriterPending) {
 +      return;
 +    }
 +    FEXCore::Threads::Flags WriterThreadFlags = {.LowPriority = true, .Internal = true};
@@ -780,7 +842,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
    uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
      struct __attribute__((packed)) {
        uint64_t CodeKey;
-@@ -503,6 +617,8 @@ namespace DiskCache {
+@@ -503,6 +665,8 @@ namespace DiskCache {
      if (MonoBackpatcher) {
        BlobKeyBytes.Flags |= 1 << 3;
      }
@@ -789,7 +851,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
  
      return XXH3_64bits(&BlobKeyBytes, sizeof(BlobKeyBytes));
    }
-@@ -555,6 +671,10 @@ namespace DiskCache {
+@@ -555,6 +719,10 @@ namespace DiskCache {
      if (!IsReadingDiskCache()) {
        return std::nullopt;
      }
@@ -800,7 +862,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
      if (Region && Region->FileStartVA) {
        struct __attribute__((packed)) {
          uint64_t GuestOffset;
-@@ -618,6 +738,12 @@ namespace DiskCache {
+@@ -618,6 +786,12 @@ namespace DiskCache {
        auto It = Index.find(LookupKey);
        if (It == Index.end()) {
          // definite miss
@@ -813,7 +875,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
          return std::nullopt;
        }
  
-@@ -707,7 +833,7 @@ namespace DiskCache {
+@@ -707,7 +881,7 @@ namespace DiskCache {
            for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
              XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
            }
@@ -822,7 +884,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
            LastFootprintHashed = CurrentFootprint;
            FirstHash = false;
          }
-@@ -759,6 +885,9 @@ namespace DiskCache {
+@@ -759,6 +933,9 @@ namespace DiskCache {
      }
  
      if (!FoundMatchingHash || !EntryUnderReview) {
@@ -832,7 +894,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
        return std::nullopt;
      }
  
-@@ -832,7 +961,10 @@ namespace DiskCache {
+@@ -832,7 +1009,10 @@ namespace DiskCache {
      }
  
      if (StoreInMemory && MemoryLRUCurrentSize > MemoryLRUMaxSize + MemoryLRUEvictThreshold) {
@@ -844,7 +906,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
      }
  
      HitData.HostCode = {HitData.Blob.data() + BlobOffset, Header.HostSize};
-@@ -973,6 +1105,7 @@ namespace DiskCache {
+@@ -973,6 +1153,7 @@ namespace DiskCache {
        }
  
        if (KeepEntryInMemory && Self->MemoryLRUCurrentSize > Self->MemoryLRUMaxSize + Self->MemoryLRUEvictThreshold) {
@@ -852,7 +914,7 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
          Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
        }
      }
-@@ -1179,13 +1312,20 @@ namespace DiskCache {
+@@ -1179,13 +1360,23 @@ namespace DiskCache {
        for (uint32_t i = 0; i < ExactGuestCodeExtents.size(); i += 2) {
          XXH3_128bits_update(&HashState, GuestCode.data() + ExactGuestCodeExtents[i], ExactGuestCodeExtents[i + 1]);
        }
@@ -866,19 +928,32 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
        MakeLookupKey(Thread, GuestCodeKey, RangeInfo.Writable, GuestRIP == CTX->GetMonoBackPatcherBlock().load(std::memory_order_relaxed));
 +    static const bool DCLog = getenv("TSO_DISKCACHE_LOG") != nullptr;
 +    if (DCLog) {
-+      fprintf(stderr, "dc store rip %#lx off %#lx file %#lx key %#lx pid %d writes %d wr %d state %d bucket %#lx\n",
++      // with the guest code the unit covers (its first byte's offset in the file, its size)
++      const uint64_t CodeAt = reinterpret_cast<uint64_t>(GuestCode.data());
++      fprintf(stderr, "dc store rip %#lx off %#lx file %#lx key %#lx pid %d writes %d wr %d state %d bucket %#lx code %#lx size %#lx\n",
 +              (unsigned long)GuestRIP, (unsigned long)((Region && Region->FileStartVA) ? GuestRIP - Region->FileStartVA : ~0ULL),
 +              (unsigned long)(Region ? Region->FileInfo.FileId : 0), (unsigned long)LookupKey, ::getpid(), WritingDiskCache ? 1 : 0,
-+              RangeInfo.Writable ? 1 : 0, TSOViews::DiskCacheState(), (unsigned long)(BucketHash.high64 ^ BucketHash.low64));
++              RangeInfo.Writable ? 1 : 0, TSOViews::DiskCacheState(), (unsigned long)(BucketHash.high64 ^ BucketHash.low64),
++              (unsigned long)((Region && Region->FileStartVA) ? CodeAt - Region->FileStartVA : ~0ULL), (unsigned long)GuestCode.size());
 +    }
  
      // blob done, publish to index as in-memory for now, flush to disk below
      struct IndexEntry NewEntry {nullptr, 0, (uint32_t)TotalSize, Header.GuestSize, Header.GuestHash, BlobRef};
-@@ -1248,6 +1388,10 @@ namespace DiskCache {
+@@ -1248,6 +1439,20 @@ namespace DiskCache {
      }
  
      // hand the rest off to the writer thread
 +    std::lock_guard WLk(WriterLock);
++    // tso-arm: a forked child's first store: its files opened anew and a writer of its own (WriteInForkedChild)
++    if (!Writer && ChildWriterPending) {
++      ChildWriterPending = false;
++      if (RWCacheDB->ReopenForChild()) {
++        FEXCore::Threads::Flags WriterThreadFlags = {.LowPriority = true, .Internal = true};
++        Writer = fextl::make_unique<WorkQueueThread>(WriterThreadFlags, "FEX:DiskCache");
++      } else {
++        WritingDiskCache = false;
++      }
++    }
 +    if (!Writer) {
 +      return false;
 +    }
@@ -886,16 +961,38 @@ index 3c78b22dadd10a36fa72d2ae20b5d321f92237e5..60054f83ce62953cf42d04f507fe5387
                                                               std::move(IndexBlob), StoreDisk));
      return true;
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.h b/FEXCore/Source/Interface/Core/DiskCache.h
-index f7792be2d331effc2f372179a30fa94a434be097..35a282edc4a555b344fa6b1b10f8ec09e1eaf7a2 100644
+index f7792be2d331effc2f372179a30fa94a434be097..6c51e82222806ac4cd92aa22c539a02808c485e8 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.h
 +++ b/FEXCore/Source/Interface/Core/DiskCache.h
-@@ -209,6 +209,16 @@ namespace DiskCache {
+@@ -152,6 +152,8 @@ namespace DiskCache {
+     bool ReadAll(fextl::vector<uint8_t>& Out); // from first blob
+     bool ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob);
+     bool WriteBlob(const MesaFOZ::foz_payload_key& Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t& OutBlobOffset);
++    // tso-arm: the same file under the same descriptor, through an open file description of its own (DiskCache.cpp)
++    bool Reopen();
+ 
+   private:
+     static constexpr uint32_t OPEN_LOCK_TIMEOUT_MS = 100;
+@@ -171,6 +173,10 @@ namespace DiskCache {
+     bool Full() const {
+       return MaxSizeReached;
+     }
++    // tso-arm: both files opened anew for a forked child (DiskCache::WriteInForkedChild)
++    bool ReopenForChild() {
++      return CacheFOZ.Reopen() && IndexFOZ.Reopen();
++    }
+ 
+   private:
+     // stores run on the Writer, so returning quick isn't as important
+@@ -209,6 +215,18 @@ namespace DiskCache {
        return Validation;
      }
  
 +    // tso-arm: around a fork (DiskCache.cpp)
 +    void LockBeforeFork();
 +    void UnlockAfterFork(bool Child);
++    // tso-arm: a forked child (an address space and descriptors of its own) writes what it translates as well
++    void WriteInForkedChild();
 +    // tso-arm: the writer's queue written out (DiskCache.cpp), before exit_group (Again false) or execve
 +    void DrainWrites(bool Again);
 +    // tso-arm: the writer ended (its queue written out) and started again, around a system call that needs the
@@ -906,7 +1003,18 @@ index f7792be2d331effc2f372179a30fa94a434be097..35a282edc4a555b344fa6b1b10f8ec09
    private:
      bool OpenCacheDB(const fextl::string& CacheDBName, bool ReadOnly);
      uint64_t MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t ModuleOffset, bool Writable, bool MonoBackpatcher);
-@@ -232,6 +242,8 @@ namespace DiskCache {
+@@ -216,6 +234,10 @@ namespace DiskCache {
+ 
+     bool ReadingDiskCache {};
+     bool WritingDiskCache {};
++    // tso-arm: the parent wrote the cache when it forked (UnlockAfterFork, WriteInForkedChild)
++    bool WroteBeforeFork {};
++    // tso-arm: a forked child writes, its files not opened anew yet, nor its writer started (Store does it first)
++    bool ChildWriterPending {};
+     FEXCore::Context::ContextImpl* CTX;
+     XXH128_hash_t BucketHash;
+     fextl::vector<fextl::unique_ptr<IndexedDB>> ROCacheDBs;
+@@ -232,6 +254,8 @@ namespace DiskCache {
  
      // the Writer holds references to all this stuff above and needs to be last
      fextl::unique_ptr<WorkQueueThread> Writer;
@@ -1639,10 +1747,19 @@ index 63f84a824c25858ec175b0bad99823cb85628225..55ac344d163faec286be9024f023d964
  
  #endif
 diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
-index af14fc4b92d25141a3a21c6ab9642c1c10eb7b85..7d270b881723dee42a330bc9586d7c817b14bab6 100644
+index af14fc4b92d25141a3a21c6ab9642c1c10eb7b85..2c0c66be5dc949899258efad95f8eea9a00df734 100644
 --- a/FEXCore/include/FEXCore/Core/Context.h
 +++ b/FEXCore/include/FEXCore/Core/Context.h
-@@ -138,6 +138,12 @@ public:
+@@ -124,6 +124,8 @@ public:
+ #ifndef _WIN32
+   FEX_DEFAULT_VISIBILITY virtual void LockBeforeFork(FEXCore::Core::InternalThreadState* Thread) {}
+   FEX_DEFAULT_VISIBILITY virtual void UnlockAfterFork(FEXCore::Core::InternalThreadState* Thread, bool Child) {}
++  // tso-arm: in a forked child with an address space of its own, after UnlockAfterFork: it writes the disk cache too
++  FEX_DEFAULT_VISIBILITY virtual void ForkedChildWritesDiskCache() {}
+ #endif
+   FEX_DEFAULT_VISIBILITY virtual void SetSignalDelegator(FEXCore::SignalDelegator* SignalDelegation) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void SetSyscallHandler(FEXCore::HLE::SyscallHandler* Handler) = 0;
+@@ -138,6 +140,12 @@ public:
    virtual AbstractCodeCache& GetCodeCache() = 0;
    virtual void SetCodeMapWriter(fextl::unique_ptr<CodeMapWriter>) = 0;
    virtual void FlushAndCloseCodeMap() = 0;
@@ -1655,7 +1772,7 @@ index af14fc4b92d25141a3a21c6ab9642c1c10eb7b85..7d270b881723dee42a330bc9586d7c81
  
    FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
    FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
-@@ -174,6 +180,16 @@ public:
+@@ -174,6 +182,16 @@ public:
     */
    FEX_DEFAULT_VISIBILITY virtual void AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) = 0;
  
@@ -1689,10 +1806,10 @@ index 5129f9ea6564ed511a8be91ed5036586662224ef..e41cdbc6a781812f6020757a872a8120
    // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
    uint32_t SuspendDoorbell {};
 diff --git a/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h b/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
-index 6e32c07bfc7dc6b96123a259f1a7e75cb2453cdd..68b49e03b00679862e49ead96411a6edbe8babee 100644
+index 6e32c07bfc7dc6b96123a259f1a7e75cb2453cdd..146718a87466927d15c3966f4311270fd3bdd3b8 100644
 --- a/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
 +++ b/FEXCore/include/FEXCore/Core/DiskCacheFileMapper.h
-@@ -8,4 +8,9 @@ namespace FEXCore::DiskCache {
+@@ -8,4 +8,14 @@ namespace FEXCore::DiskCache {
  using FileMapperFunc = void* (*)(FEXCore::File::File::FileHandleType Handle, uint64_t MapSize);
  
  FEX_DEFAULT_VISIBILITY void SetFileMapper(FileMapperFunc Func);
@@ -1701,6 +1818,11 @@ index 6e32c07bfc7dc6b96123a259f1a7e75cb2453cdd..68b49e03b00679862e49ead96411a6ed
 +// frontend moves it to FEX's own range and keeps the guest from closing it)
 +using FDHookFunc = int (*)(int FD);
 +FEX_DEFAULT_VISIBILITY void SetFDHook(FDHookFunc Func);
++
++// tso-arm: opens the file behind one of the cache's descriptors anew, with an open file description of its own
++// (for a forked child, DiskCache::WriteInForkedChild); returns the new descriptor or -1
++using ReopenHookFunc = int (*)(int FD);
++FEX_DEFAULT_VISIBILITY void SetReopenHook(ReopenHookFunc Func);
  } // namespace FEXCore::DiskCache
 diff --git a/FEXCore/include/FEXCore/Core/TSOViews.h b/FEXCore/include/FEXCore/Core/TSOViews.h
 index a7ac53a11a92df9b0dbb905a0eca61b2cf5a4c5e..978fd270cf4dfa59a2bda3c6d2e5f790b2e39db7 100644
@@ -1862,16 +1984,20 @@ index c4cadf40aa8a54b5caa792d51a39a1810793c3d7..54c679d5b51d4de6af765ff33c349b2f
  void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
  #endif
 diff --git a/FEXCore/include/FEXCore/Utils/File.h b/FEXCore/include/FEXCore/Utils/File.h
-index f33ae7b1e6a9d7f1db9557a5919e63bcd067fb8f..1e481bc63f33ee537828f2e7c817a02e504f9688 100644
+index f33ae7b1e6a9d7f1db9557a5919e63bcd067fb8f..6f4f40988141ab740f3710d892956de9b37585cc 100644
 --- a/FEXCore/include/FEXCore/Utils/File.h
 +++ b/FEXCore/include/FEXCore/Utils/File.h
-@@ -102,6 +102,11 @@ public:
+@@ -102,6 +102,15 @@ public:
      return Handle;
    }
  
 +  // tso-arm: the same file under another handle (a duplicate the caller made; this one is closed then)
 +  void ReplaceHandle(FileHandleType New) {
 +    Handle = New;
++  }
++  // tso-arm: a forked child's copy of a lock its parent held (DiskCache::WriteInForkedChild)
++  void ForgetLock() {
++    Locked = false;
 +  }
 +
    /**
@@ -2175,7 +2301,7 @@ index 9cedb6087d0e534cab158def792069aee38a3670..e23eab603853df84d3945fa7388044c3
        }
  
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e0124c5f874 100644
+index bed03b914c97204dfaadc24771b96fc9bc4163bc..9fa361a1c263bc8e877c1b866f97b51b6c2e44ee 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 @@ -9,6 +9,7 @@ $end_info$
@@ -2186,7 +2312,14 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  #include "Common/HostFeatures.h"
  #include "Common/Linux/LinuxVersion.h"
  #include "Common/Linux/SBRKAllocations.h"
-@@ -22,6 +23,7 @@ $end_info$
+@@ -16,12 +17,14 @@ $end_info$
+ #include "ELFCodeLoader.h"
+ #include "VDSO_Emulation.h"
+ #include "LinuxSyscalls/GdbServer.h"
++#include "LinuxSyscalls/FileManagement.h"
+ #include "LinuxSyscalls/LinuxAllocator.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/Utils/Threads.h"
  #include "LinuxSyscalls/x32/Syscalls.h"
  #include "LinuxSyscalls/x64/Syscalls.h"
  #include "LinuxSyscalls/SignalDelegator.h"
@@ -2194,7 +2327,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  #include "Linux/Utils/ELFContainer.h"
  #include "Thunks.h"
  
-@@ -29,6 +31,7 @@ $end_info$
+@@ -29,6 +32,7 @@ $end_info$
  #include <FEXCore/Core/Context.h>
  #include <FEXCore/Core/CoreState.h>
  #include <FEXCore/Core/DiskCacheFileMapper.h>
@@ -2202,7 +2335,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  #include <FEXCore/Utils/Allocator.h>
  #include <FEXCore/Utils/FileLoading.h>
  #include <FEXCore/Utils/LogManager.h>
-@@ -49,6 +52,7 @@ $end_info$
+@@ -49,6 +53,7 @@ $end_info$
  #include <cstdint>
  #include <cstdio>
  #include <cstdlib>
@@ -2210,7 +2343,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  #include <cstring>
  #include <elf.h>
  #include <fcntl.h>
-@@ -162,6 +166,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
+@@ -162,6 +167,8 @@ fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit)
  
  fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
    if (Is64Bit) {
@@ -2219,7 +2352,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
      return {};
    }
  
-@@ -202,6 +208,11 @@ static void* DiskCacheFilemapper(FEXCore::File::File::FileHandleType Handle, uin
+@@ -202,6 +209,26 @@ static void* DiskCacheFilemapper(FEXCore::File::File::FileHandleType Handle, uin
    return Result;
  }
  
@@ -2228,10 +2361,25 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
 +  return FEX::ProtectFD(FEX::MoveFEXFD(FD));
 +}
 +
++// tso-arm: a disk cache file opened anew for a forked child (DiskCache::WriteInForkedChild), through /proc's link to
++// its descriptor: by FEX's own descriptor of /proc, which a chroot (Chromium's zygote) does not hide, else by path
++static int DiskCacheReopen(int FD) {
++  char Name[32];
++  snprintf(Name, sizeof(Name), "self/fd/%d", FD);
++  const int Proc = FEX::HLE::ProcDirFD();
++  int New = Proc >= 0 ? ::openat(Proc, Name, O_RDWR | O_CLOEXEC) : -1;
++  if (New < 0) {
++    char Path[40];
++    snprintf(Path, sizeof(Path), "/proc/%s", Name);
++    New = ::open(Path, O_RDWR | O_CLOEXEC);
++  }
++  return New;
++}
++
  bool InterpreterHandler(fextl::string* Filename, const fextl::string& RootFS, fextl::vector<fextl::string>* args) {
    int FD {-1};
  
-@@ -382,7 +393,82 @@ static int StealFEXFDFromEnv(const char* Env) {
+@@ -382,7 +409,82 @@ static int StealFEXFDFromEnv(const char* Env) {
    return FEXFD;
  }
  
@@ -2315,7 +2463,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
    auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
    FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
  
-@@ -439,7 +525,12 @@ int main(int argc, char** argv, char** const envp) {
+@@ -439,7 +541,12 @@ int main(int argc, char** argv, char** const envp) {
  
    // Ensure FEXServer is setup before config options try to pull CONFIG_ROOTFS
    auto SelfPath = FEX::GetSelfPath();
@@ -2328,7 +2476,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
      LogMan::Msg::EFmt("FEXServerClient: Failure to setup client");
      return -1;
    }
-@@ -492,6 +583,12 @@ int main(int argc, char** argv, char** const envp) {
+@@ -492,6 +599,12 @@ int main(int argc, char** argv, char** const envp) {
  
    ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
    FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
@@ -2341,7 +2489,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  
    if (!Loader.ELFWasLoaded()) {
      // Loader couldn't load this program for some reason
-@@ -535,11 +632,28 @@ int main(int argc, char** argv, char** const envp) {
+@@ -535,11 +648,29 @@ int main(int argc, char** argv, char** const envp) {
      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
    }
  
@@ -2360,6 +2508,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
  
    FEXCore::DiskCache::SetFileMapper(DiskCacheFilemapper);
 +  FEXCore::DiskCache::SetFDHook(DiskCacheFD);
++  FEXCore::DiskCache::SetReopenHook(DiskCacheReopen);
  
 +  // tso-arm: a 32-bit guest's views are set up now, before FEX takes the address space above 4 GB for its own memory
 +  // (InitMemoryRegions, InitAllocator): their reservations at 16 GB and above are there first, and stay theirs
@@ -2370,7 +2519,7 @@ index bed03b914c97204dfaadc24771b96fc9bc4163bc..edb6ad50fdc12f4c8396ae10c4111e01
    auto MemoryRegions = FEX::Allocator::InitMemoryRegions(Loader.Is64BitMode());
    auto Allocator = FEX::Allocator::InitAllocator(Loader.Is64BitMode());
  
-@@ -617,6 +731,9 @@ int main(int argc, char** argv, char** const envp) {
+@@ -617,6 +748,9 @@ int main(int argc, char** argv, char** const envp) {
      }
    }
  
@@ -4345,7 +4494,7 @@ index 11ff1635f96b69cd1f73229300645a88623831bc..50984e7eb6c103152021962af11ede5f
      REGISTER_SYSCALL_IMPL_X64(readahead, SyscallPassthrough3<SYSCALL_DEF(readahead)>);
      REGISTER_SYSCALL_IMPL_X64(futex, SyscallPassthrough6<SYSCALL_DEF(futex)>);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
-index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915a3bbdb33 100644
+index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..1c4485a0f810d5267b5f0368a30942a8dfb7ab52 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 @@ -183,6 +183,12 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
@@ -4361,7 +4510,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
  uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::Context* CTX, FEXCore::Core::CpuStateFrame* Frame,
                          FEX::HLE::clone3_args* CloneArgs) {
    FEXCore::Allocator::InitializeThread();
-@@ -209,9 +215,16 @@ uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::C
+@@ -209,9 +215,21 @@ uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::C
      // If we don't have CLONE_THREAD then we are effectively a fork
      // Clear all the other threads that are being tracked
      // Frame->Thread is /ONLY/ safe to access when CLONE_THREAD flag is not set
@@ -4374,11 +4523,16 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
 +    if (auto* Views = FEX::HLE::TSOViewMemory::Get(); Views && !(flags & CLONE_VM)) {
 +      Views->AfterForkChild(Thread->Thread->CurrentFrame->TSOViewBase, !(flags & CLONE_VFORK), DropCopiedCode, Thread->Thread);
 +    }
++    // tso-arm: a child with an address space and descriptors of its own writes the disk cache as well (Chromium's
++    // renderers, each the first process of a PID namespace of its own, came through here and stored nothing)
++    if (!(flags & (CLONE_VM | CLONE_FILES | CLONE_VFORK))) {
++      Thread->Thread->CTX->ForkedChildWritesDiskCache();
++    }
 +
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &CloneArgs->SignalMask, nullptr, sizeof(CloneArgs->SignalMask));
  
      Thread->Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RAX] = 0;
-@@ -261,8 +274,9 @@ uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::C
+@@ -261,8 +279,9 @@ uint64_t HandleNewClone(FEX::HLE::ThreadStateObject* Thread, FEXCore::Context::C
    return Thread->StatusCode;
  }
  
@@ -4390,7 +4544,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
  }
  
  uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
-@@ -289,19 +303,40 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -289,19 +308,40 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
    FEX::HLE::_SyscallHandler->LockBeforeFork(Frame->Thread);
  
    const bool IsVFork = flags & CLONE_VFORK;
@@ -4436,7 +4590,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
        // Close the read end of the pipe.
        // Keep the write end open so the parent can poll it.
        close(VForkFDs[0]);
-@@ -316,8 +351,19 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -316,8 +356,23 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
  
    if (IsChild) {
      auto ThreadObject = static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
@@ -4453,10 +4607,14 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
 +    if (auto* Views = FEX::HLE::TSOViewMemory::Get()) {
 +      Views->AfterForkChild(Frame->TSOViewBase, !IsVFork, DropCopiedCode, Thread);
 +    }
++    // tso-arm: a fork's child writes the disk cache as well (a vfork's goes on to execve)
++    if (!IsVFork && !(flags & CLONE_FILES)) {
++      Thread->CTX->ForkedChildWritesDiskCache();
++    }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
-@@ -366,6 +412,14 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -366,6 +421,14 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      // the rest of the context remains as is, this thread will keep executing
      return 0;
    } else {
@@ -4471,7 +4629,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
      if (Result != -1) {
        if (flags & CLONE_PARENT_SETTID) {
          *parent_tid = Result;
-@@ -378,7 +432,7 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -378,7 +441,7 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, nullptr, sizeof(Mask));
  
      // VFork needs the parent to wait for the child to exit.
@@ -4480,7 +4638,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
        // Wait for the read end of the pipe to close.
        pollfd PollFD {};
        PollFD.fd = VForkFDs[0];
-@@ -399,6 +453,21 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+@@ -399,6 +462,21 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
    }
  }
  
@@ -4502,7 +4660,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
  uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
    // TLS/DTV teardown is something FEX can't control. Disable glibc checking when we leave a pthread.
    // Since this thread is hard stopping, we can't track the TLS/DTV teardown in FEX's thread handling.
-@@ -413,6 +482,13 @@ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
+@@ -413,6 +491,13 @@ uint64_t SyscallExit(FEXCore::Core::CpuStateFrame* Frame, int status) {
  
    ThreadObject->StatusCode = status;
  
@@ -4516,7 +4674,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
    FEX::HLE::_SyscallHandler->UninstallTLSState(ThreadObject);
  
    if (ThreadObject->ExecutionThread) {
-@@ -586,16 +662,11 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+@@ -586,16 +671,11 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
    });
  
    REGISTER_SYSCALL_IMPL(exit_group, [](FEXCore::Core::CpuStateFrame* Frame, int status) -> uint64_t {
@@ -4539,7 +4697,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
  }
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..66b548fe6b0e4746c229b4f98a1d3443c3205683 100644
+index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..de610fe5325525ec0d862b34b7f79b0ad80800e4 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -4990,7 +5148,36 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..66b548fe6b0e4746c229b4f98a1d3443
    return Result;
  }
  
-@@ -854,8 +1057,27 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
+@@ -771,6 +974,28 @@ static uint64_t ComputeCodeMapId(std::string_view Filename, std::optional<fextl:
+   return Hash;
+ }
+ 
++// tso-arm: a resource of its own for a mapping of an ELF file away from where its program headers place it. V8 maps
++// its builtins from its program's file once more, next to its own code, with mremap(MREMAP_DONTUNMAP), and with mmap
++// where that fails (Chrome's processes, Node.js). In the file's resource, below the program's own mappings, such a
++// mapping became the resource's first VMA, the base every section of the file is reckoned from (BuildSectionInfo):
++// the disk cache's offsets of all the program's code were then the distance to wherever V8 had put its builtins in
++// that run, and nothing stored was found again (notes section 72). Its own resource reckons its code from its own
++// start, under a file id of its own (the file's and the offset), so that its code is not taken for the program's code
++// at the same offset either, and with its own extent.
++static VMATracking::MappedResource* StrayResource(VMATracking::VMATracking& Tracking, const VMATracking::MRID& mrid,
++                                                  const VMATracking::MappedResource* Original, uint64_t Offset, uint64_t Size) {
++  auto Stray = Tracking.InsertMappedResource(mrid, VMATracking::MappedResource {nullptr, nullptr, 0, {}, {}});
++  Stray->second.Iterator = Stray;
++  auto* Resource = &Stray->second;
++  if (Original && Original->MappedFile) {
++    Resource->MappedFile = fextl::make_unique<VMATracking::ExecutableFileState>();
++    Resource->MappedFile->Filename = Original->MappedFile->Filename;
++    Resource->MappedFile->FileId = Original->MappedFile->FileId ^ XXH3_64bits(&Offset, sizeof(Offset));
++    Resource->MappedFile->MappedSize = Size;
++  }
++  return Resource;
++}
++
+ // MMan Tracking
+ std::optional<SyscallHandler::LateApplyExtendedVolatileMetadata>
+ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t addr, size_t length, int prot, int flags, int fd,
+@@ -854,13 +1079,39 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
            LOGMAN_THROW_A_FMT(Resource->ProgramHeaders.empty() || offset == 0, "Expected file offset 0 for the first mapping of an ELF "
                                                                                "file");
          } else if (CheckForElfFileDiskCache) {
@@ -5019,6 +5206,44 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..66b548fe6b0e4746c229b4f98a1d3443
          } else {
            Resource->MappedFile->FileId = ComputeCodeMapId(Resource->MappedFile->Filename);
          }
+       } else if (ResourceIt->second.ProgramHeaders.empty()) {
+         // Not an ELF file, so we don't need to distinguish between different base addresses
++        // tso-arm: or the program FEX loaded itself, whose resource has none either: a mapping of a part of it below the
++        // mapping of its first page (V8's builtins, mapped again when mremap fails) goes into a resource of its own
++        // (StrayResource)
++        if (offset > 0 && Resource && Resource->MappedFile && Resource->FirstVMA && Resource->FirstVMA->Offset == 0 &&
++            addr < Resource->FirstVMA->Base) {
++          Resource = StrayResource(VMATracking, mrid, Resource, static_cast<uint64_t>(offset), Size);
++        }
+       } else {
+         // Mapped a non-header section of an ELF file.
+         // Look up the corresponding MappedResource using the expected base address.
+@@ -877,6 +1128,8 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
+           // Node.js hits this as it maps a section of itself that isn't a part of the program headers.
+           LogMan::Msg::IFmt("Warning: Could not find base for file mapping at {:#x} (offset {:#x}): {}", addr, offset,
+                             std::string_view(Tmp, PathLength));
++          // tso-arm: a resource of its own (StrayResource), not the file's first one
++          Resource = StrayResource(VMATracking, mrid, Resource, static_cast<uint64_t>(offset), Size);
+         } else {
+           Resource = &ResourceIt->second;
+         }
+@@ -988,8 +1241,15 @@ void SyscallHandler::TrackMremap(FEXCore::Core::InternalThreadState* Thread, uin
+       VMATracking.DeleteVMARange(CTX, OldAddress, OldSize, OldResource);
+     }
+ 
++    // tso-arm: part of an executable file's mapping put elsewhere (V8's builtins, copied with MREMAP_DONTUNMAP) goes
++    // into a resource of its own, not the file's (StrayResource)
++    auto* NewResource = OldResource;
++    if (NewAddress != OldAddress && OldResource && OldResource->MappedFile) {
++      NewResource = StrayResource(VMATracking, OldResource->Iterator->first, OldResource, OldOffset, NewSize);
++    }
++
+     // Make anonymous mapping
+-    VMATracking.TrackVMARange(CTX, OldResource, NewAddress, OldOffset, NewSize, OldFlags, OldProt);
++    VMATracking.TrackVMARange(CTX, NewResource, NewAddress, OldOffset, NewSize, OldFlags, OldProt);
+   }
+ }
+ 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
 index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba57678b1b1 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOAccess.cpp
@@ -5085,7 +5310,7 @@ index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba5
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c3594649d0f7 100644
+index 76be33d737559e72474c8c50006170f43d983c57..82cd6f09153178bef9d866e3e14fa3fbb2d2b156 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -19,6 +19,7 @@ $end_info$
@@ -5226,10 +5451,11 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
 +            PCount.SiteNs[SiteOther] / 1e9);
 +    if (Out != stderr) {
 +      fclose(Out);
-+    }
-+  }
-+} // namespace
-+
+     }
+-    fprintf(stderr, "\n");
+   }
+ } // namespace
+ 
 +namespace {
 +  // tso-arm: /proc, opened when the views are set up: a process that takes away its own access to files afterwards
 +  // (Chromium's zygote changes its root to an empty directory) still forks, and the fork's child lists the guest's
@@ -5240,14 +5466,13 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
 +  int OpenProc(const char* Name) {
 +    if (ProcDir >= 0) {
 +      return ::openat(ProcDir, Name, O_RDONLY | O_CLOEXEC);
-     }
--    fprintf(stderr, "\n");
++    }
 +    char Path[64];
 +    snprintf(Path, sizeof(Path), "/proc/%s", Name);
 +    return ::open(Path, O_RDONLY | O_CLOEXEC);
-   }
- } // namespace
- 
++  }
++} // namespace
++
 +namespace {
 +  // A 32-bit guest (TSOViewMemory::SetGuest32): its mappings lie in [Low32, Top32), as the kernel's for a 32-bit
 +  // process (its first 64 KB are never mapped, its top page is the kernel's)
@@ -6194,7 +6419,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
      return -errno;
    }
  
-@@ -628,11 +1240,17 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
+@@ -628,16 +1240,26 @@ int64_t TSOViewMemory::Mprotect(uint64_t Addr, uint64_t Length, int Prot) {
    }
    for (; It != Ranges.end() && It->first < Addr + L; ++It) {
      const uint64_t S = std::max(It->first, Addr);
@@ -6215,7 +6440,16 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    }
    Apply(Addr, Addr + L);
    return 0;
-@@ -647,18 +1265,50 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+ }
+ 
++#ifndef MREMAP_DONTUNMAP
++#define MREMAP_DONTUNMAP 4
++#endif
++
+ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize, int Flags, uint64_t New, int Slot) {
+   std::lock_guard lk(Mutex);
+   VLOG("tso-arm: mremap %#lx+%#lx -> %#lx flags %#x\n", (unsigned long)Old, (unsigned long)OldSize, (unsigned long)NewSize, Flags);
+@@ -647,18 +1269,50 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
  
    const Range* SrcP = Find(Old);
    if (!SrcP) {
@@ -6241,7 +6475,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
 +        ::mremap(R, NewSize, OldSize, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(Old));
 +        return -ENOMEM;
 +      }
-+      if (OldL && T != Old) {
++      if (OldL && T != Old && !(Flags & MREMAP_DONTUNMAP)) {
 +        RemoveOutside(Old, Old + OldL);
 +      } else if (OldL && NewL < OldL) {
 +        RemoveOutside(Old + NewL, Old + OldL);
@@ -6269,7 +6503,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
      Erase(A, A + Len);
      SetState(A, A + Len, 0);
    };
-@@ -666,7 +1316,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -666,7 +1320,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
    if (OldL == 0) {
      // The guest asks for a second mapping of shared memory
      uint64_t T = (Flags & MREMAP_FIXED) ? New : ChooseAddress(0, NewL);
@@ -6278,7 +6512,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
        return -ENOMEM;
      }
      auto R = ::mremap(reinterpret_cast<void*>(Old), 0, NewL, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(T));
-@@ -674,6 +1324,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -674,6 +1328,9 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
        return -errno;
      }
      Place(T, NewL, Kind::SharedAnon);
@@ -6288,7 +6522,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
      return T;
    }
  
-@@ -690,11 +1343,10 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -690,11 +1347,10 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
  
    if (Src.K == Kind::Private) {
      // Shared memory objects cannot grow under an existing mapping: a tail object in place, or a moved copy
@@ -6302,7 +6536,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
          SetState(Old + OldL, Old + NewL, Mine);
          Apply(Old + OldL, Old + NewL);
          return Old;
-@@ -704,7 +1356,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -704,7 +1360,7 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
        return -ENOMEM;
      }
      const uint64_t T = (Flags & MREMAP_FIXED) ? New : ChooseAddress(0, NewL);
@@ -6311,7 +6545,26 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
        return -ENOMEM;
      }
      auto R = ::mmap(reinterpret_cast<void*>(T), NewL, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-@@ -721,13 +1373,13 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+@@ -713,29 +1369,41 @@ int64_t TSOViewMemory::Mremap(uint64_t Old, uint64_t OldSize, uint64_t NewSize,
+     }
+     memcpy(R, reinterpret_cast<void*>(Old), std::min(OldL, NewL));
+     ::mprotect(R, NewL, Src.Prot);
+-    ::munmap(reinterpret_cast<void*>(Old), OldL);
+-    Drop(Old, OldL);
++    // tso-arm: MREMAP_DONTUNMAP (V8 copies its builtins from its program's file so, next to its own code) leaves the
++    // old range mapped: a file's pages read the file as before, anonymous memory reads zeros, as the kernel leaves
++    // them. The old range was unmapped, the program's own code with it (tests/remapcode.c died at once).
++    if (Flags & MREMAP_DONTUNMAP) {
++      if (!Src.FileBacked) {
++        ::madvise(reinterpret_cast<void*>(Old), OldL, MADV_REMOVE);
++      }
++    } else {
++      ::munmap(reinterpret_cast<void*>(Old), OldL);
++      Drop(Old, OldL);
++    }
+     Place(T, NewL, Kind::Private);
+     return T;
+   }
  
    // Shared memory of the guest's own: the kernel moves or grows it
    uint64_t T = (Flags & MREMAP_FIXED) ? New : Old;
@@ -6326,8 +6579,21 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
 +  if (!T || T + NewL > PlaceTop()) {
      return -ENOMEM;
    }
++  const int Keep = Flags & MREMAP_DONTUNMAP;
    void* R = (T == Old) ? ::mremap(reinterpret_cast<void*>(Old), OldL, NewL, 0) :
-@@ -747,6 +1399,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+-                         ::mremap(reinterpret_cast<void*>(Old), OldL, NewL, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(T));
++                         ::mremap(reinterpret_cast<void*>(Old), OldL, NewL, MREMAP_MAYMOVE | MREMAP_FIXED | Keep, reinterpret_cast<void*>(T));
+   if (R == MAP_FAILED) {
+     return -errno;
+   }
+-  Drop(Old, OldL);
++  if (!(Keep && T != Old)) {
++    Drop(Old, OldL);
++  }
+   Place(T, NewL, Src.K);
+   return T;
+ }
+@@ -747,6 +1415,9 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      return ::madvise(reinterpret_cast<void*>(Addr), Length, Advice) == -1 ? -errno : 0;
    }
    const uint64_t End = Addr + PageUp(Length);
@@ -6337,7 +6603,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    auto It = Ranges.upper_bound(Addr);
    if (It != Ranges.begin()) {
      --It;
-@@ -757,11 +1412,23 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
+@@ -757,11 +1428,23 @@ int64_t TSOViewMemory::Madvise(uint64_t Addr, uint64_t Length, int Advice) {
      if (S >= E) {
        continue;
      }
@@ -6362,7 +6628,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    return 0;
  }
  
-@@ -773,6 +1440,18 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -773,6 +1456,18 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    std::lock_guard lk(Mutex);
@@ -6381,7 +6647,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    int S = 1;
    for (; S < Slots; ++S) {
      if (SlotUsable[S] && !SlotUsed[S]) {
-@@ -783,10 +1462,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
+@@ -783,10 +1478,17 @@ uint64_t TSOViewMemory::AttachThread(uint64_t StackPointer) {
      return 0;
    }
    SlotUsed[S] = true;
@@ -6403,7 +6669,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
      }
    }
  
-@@ -833,6 +1519,10 @@ void TSOViewMemory::HandOffStack(uint64_t Base, uint64_t StackPointer) {
+@@ -833,6 +1535,10 @@ void TSOViewMemory::HandOffStack(uint64_t Base, uint64_t StackPointer) {
        ROMask[P] = 0;
      }
    }
@@ -6414,7 +6680,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    Apply(Start, E);
  }
  
-@@ -842,19 +1532,444 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -842,19 +1548,444 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
    }
    std::lock_guard lk(Mutex);
    const int S = Base / Window;
@@ -6863,7 +7129,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1977,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1993,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -6872,7 +7138,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -873,11 +1988,60 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -873,11 +2004,60 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    for (auto& [Start, R] : Ranges) {
      Apply(Start, R.End);
    }
@@ -6933,7 +7199,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +2064,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +2080,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -6949,7 +7215,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,11 +2081,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,11 +2097,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -6975,7 +7241,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    Apply(First << PageShift, Last << PageShift);
    ChunkShares[Chunk] = 0;
    Count.Collapsed += Moved;
-@@ -920,22 +2106,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -920,22 +2122,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
  }
  
  TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
@@ -7040,7 +7306,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,8 +2172,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,8 +2188,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -7085,7 +7351,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    if (LastFault == FaultAddress) {
      if (++LastFaultCount > 64) {
        LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
-@@ -963,6 +2225,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -963,6 +2241,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -7102,7 +7368,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -974,6 +2246,14 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -974,6 +2262,14 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      ROMask[Page] = 0;
      ++Count.Migrations;
    };
@@ -7117,7 +7383,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
  
    if (Ordered) {
      // An ordered access (or an atomic) through this thread's ordered view. Its own pages are accessible there,
-@@ -1011,6 +2291,8 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1011,6 +2307,8 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      ++Count.Claims;
    } else if (St == Slot) {
      // stale protection; re-applied below
@@ -7126,7 +7392,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
    } else if (IsOwnerSlot(St)) {
      if (Write && Migrating && MayMigrate(Page)) {
        MoveHere();
-@@ -1050,7 +2332,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1050,7 +2348,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
  
    if (Log) {
@@ -7135,7 +7401,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
              (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
              Result == Fault::Escalate ? "escalate" : "retry");
    }
-@@ -1058,17 +2340,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1058,17 +2356,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    // Budget: a program that keeps the protocol busy (more than TSO_VIEWS_BUDGET faults per second over the last
    // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
    // faults while a program starts up and its threads first touch their data.
@@ -7171,7 +7437,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
        }
        return Result;
      }
-@@ -1088,6 +2387,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +2403,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -7179,7 +7445,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c359
        }
        return Result;
      }
-@@ -1096,12 +2396,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +2412,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;

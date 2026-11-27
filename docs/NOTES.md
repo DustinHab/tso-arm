@@ -3479,6 +3479,8 @@ against 4.3 to 4.7 s). The renderers stored code at 37,668 offsets of Chrome's f
 40,938 in the third, none of them the same: they enter their code at other addresses from run to run, which fits a
 multiblock unit being keyed by the address it was entered by, and with several threads that address changes. So
 the cache would need every entry of a unit in its index, its guest code's extents relative to each; not done.
+(Later, section 72: wrong. The offsets themselves changed from run to run, the distance to V8's copy of its builtins,
+which FEX took for the base of Chrome's file; with that fixed, children writing find their code again.)
 
 The key of a lookup that missed, what `TSO_DISKCACHE_LOG=1` reports now: `nokey` (no entry under the key) or `nohash`
 (none whose guest code is the same), the offset in the file, the file's id, the key, the process, whether it writes,
@@ -3553,3 +3555,41 @@ entry point's prologue is all entering anywhere needs). The first runs missed a 
 lookups), but the code grew and each loaded unit mapped all its entries: Chrome 4.56 instead of 4.11 s warm, `python3
 -c 0` 122 instead of 107 ms. Whatever would make the renderers' code found again needs both: their stores, and a unit
 found through more than its start in the disk cache's index.
+
+**That was wrong; the misses were two faults.** The store log now gives each unit's guest code (its first byte's
+offset and its size), and the misses of a run lay neither inside nor at the start of anything stored before. In one
+process the third and fourth runs missed at the same offsets with the same keys (state 8 both): the process that
+missed was a forked one, which stored nothing, in one process as well (`writes 0`). And with forked children writing
+(below), the renderers still missed some 76,000 a run, many of them at offsets past the end of Chrome's file (216 MB):
+up to 0x64f102f50, the distance from an address that changed from run to run. A renderer maps 2.3 MB of Chrome's
+file once more, from offset 0x5995000, at an address of its own below the program: V8 copies its builtins next to
+its code (`OS::RemapPages`, `mremap(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP)` on kernels from 5.13 on, an
+`mmap` of the file where that fails). FEX put the copy into the file's resource, and below the program's own
+mappings it became that resource's first VMA, the base every section of the file is reckoned from
+(`BuildSectionInfo`: `FirstVMA->Base`): the disk cache's offset of every block of the program was then its distance
+to wherever V8 had put its builtins in that run. A fault of FEX's own (Node.js copies its builtins the same way).
+
+Three changes, in FEX:
+
+- A copy of a part of an executable file's mapping elsewhere (`mremap` to another address, an `mmap` of a later
+  offset below the mapping of the file's first page) goes into a resource of its own (`StrayResource`), reckoned
+  from its own start, under a file id of its own (the file's and the offset), so that its code is not taken for the
+  program's at the same offset either, and with its own extent.
+- A forked child (an address space and descriptors of its own) writes the disk cache as well: at its first store it
+  opens both files anew through `/proc` (FEX's own descriptor of it, which the zygote's chroot does not hide), onto the
+  same numbers, so that its `flock` is its own, and starts a writer of its own. A child that stores nothing (most go
+  on to `execve`) costs nothing; Chromium's renderers come through FEX's other clone path (`CLONE_NEWPID`) and write
+  from there. `TSO_DISKCACHE_CHILD=0` turns it off.
+- The views' `mremap` knew no `MREMAP_DONTUNMAP`: private memory was copied and the old range unmapped, the program's
+  own code with it (a static program copying a page of its code so died at once under the page protocol). The old
+  range stays now (a file's pages as they were, anonymous memory empty, as the kernel leaves them), and the flag
+  goes through where the kernel moves the memory.
+
+Chrome's headless shell, six runs from an empty cache: 5.1, 5.1, then 1.75 to 1.82 s (4.0 s before), its third and
+later runs missing 336 to 954 lookups instead of some 90,000; the cache settles at some 500 MB. Neither change alone:
+forked children writing with the copies still in the file's resource, 4.0 to 5.0 s; the copies fixed with children
+not writing, 3.7 to 4.3 s. A shell loop of 300 subshells (`x=$(echo $i; true)`, each a fork) 1.41 instead of 2.36 s
+warm: the subshells' code is found now. `python3 -c 0` as before (101 to 107 ms). `tests/forkcode.c` (a child running
+code its parent never runs: 315 misses, then 3; 91 with 0.4.16's FEX) and `tests/remapcode.c` (a copy of a page of its
+own code below it, at an address that changes from run to run, as V8 does: 326, then 2; 142 with 0.4.16's FEX under
+full ordering, and under the page protocol 0.4.16 died) in `tests/ci.sh`.
