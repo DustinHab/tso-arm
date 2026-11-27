@@ -21,6 +21,10 @@ on:
       args:
         description: 'Options given to each program'
         default: ''
+      symbols:
+        description: 'FEX built here, with its symbol table (gdb names its functions; some 25 minutes more)'
+        type: boolean
+        default: false
 
 jobs:
   apps:
@@ -43,14 +47,27 @@ jobs:
 
       - name: FEX with the tso-arm patches and its thunks (cached)
         id: fex
+        if: ${{ !inputs.symbols }}
         uses: actions/cache@v4
         with:
           path: ~/.local/opt/tso-arm
           key: fex-thunks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
 
       - name: FEX (the newest release's prebuilt one where its patches are these, else built)
-        if: steps.fex.outputs.cache-hit != 'true'
+        if: ${{ !inputs.symbols && steps.fex.outputs.cache-hit != 'true' }}
         run: TSO_ARM_THUNKS=1 bin/tso-arm install
+
+      # the same code linked once more without --strip-all (fex/link_symbols.sh), in place of the installed one
+      - name: FEX built here, with its symbol table
+        if: ${{ inputs.symbols }}
+        run: |
+          bin/tso-arm install --source
+          cd ~/.local/src/tso-arm/FEX/Build-tso-arm
+          cmd=$(ninja -t commands Bin/FEX | tail -n 1)
+          cmd=$(echo "$cmd" | sed 's/-Xlinker --strip-all//g; s/-Wl,--strip-all//g; s/,--strip-all//g; s# -o Bin/FEX # -o Bin/FEX-sym #')
+          sh -c "$cmd"
+          cp Bin/FEX-sym ~/.local/opt/tso-arm/bin/FEX
+          file ~/.local/opt/tso-arm/bin/FEX
 
       - name: Root file system as a user fetches it
         run: bin/tso-arm version && bin/tso-arm rootfs >/dev/null

@@ -147,7 +147,7 @@ for n in "$@"; do
                 sudo -n python3 "$R/tests/waits.py" $tp >"$P/waits-$attempt.txt" 2>&1 || true
                 if command -v gdb >/dev/null; then
                     for p in $tp; do
-                        timeout 90 sudo -n gdb -p "$p" -batch -ex 'set pagination off' -ex 'thread apply all bt 24' \
+                        timeout 90 sudo -n gdb -p "$p" -batch -ex 'set pagination off' -ex 'thread apply all bt 40' \
                             >"$P/gdb-$attempt-$p.txt" 2>&1 </dev/null || true
                     done
                 fi
