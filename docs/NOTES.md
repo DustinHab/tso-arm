@@ -3391,5 +3391,5 @@ On the whole the protocol is not faster for these 32-bit programs, and from run 
 first run falls back to full ordering, and what its profile keeps, changes a 32-bit program's time by a third (pigz
 1.39 or 2.03 s), and zstd's buffers moving between its threads keep it in the protocol, slower than ordered
 throughout. So 32-bit programs keep FEX's full ordering by default; `TSO_ARM_32_VIEWS=1` gives them the protocol (the
-CI runs the 32-bit litmus tests and threads both ways). 64-bit programs keep the two fixes. Open: a choice per
+CI runs the 32-bit litmus tests and threads both ways; `threads32 8` with the protocol ended once there without a word, and not in 300 runs on GitHub's N2 nor 120 on the Pi after). 64-bit programs keep the two fixes. Open: a choice per
 program, as `tso-arm learn` makes it for the fallback of 64-bit ones.
