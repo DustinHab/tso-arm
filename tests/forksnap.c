@@ -37,6 +37,12 @@ int main(int argc, char **argv) {
     memset(m, 1, SPAN);  // every page in memory, so that a copy has all of them to copy
     first = (volatile unsigned long *)m;
     second = (volatile unsigned long *)(m + SPAN - 64);
+    // both words 0, so that the wait below lasts until the thread has written the second one: with memset's pattern
+    // left in it (0x0101010101010101) the first fork could come between the thread's first two stores, and its child
+    // saw the first word 1 and the second still as memset left it, the right snapshot, counted as ahead (3 runs of 60
+    // with 2,000 forks each on GitHub's 22.04 runner, each at fork 0)
+    *first = 0;
+    *second = 0;
     pthread_t t;
     pthread_create(&t, NULL, count, NULL);
     while (*second == 0) __asm__ volatile("pause");

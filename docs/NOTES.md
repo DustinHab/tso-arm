@@ -3324,7 +3324,12 @@ a signal costs under FEX. `sigdefer` is not in the CI. `sigsync` without pauses:
 protocol on GitHub's ubuntu-22.04-arm runner: one child of 100 saw memory written after the fork (section 58). Not
 these changes: 2,000 forks a run, two hours each on that runner, one child saw it in 5 of some 73 runs on the commit
 before them and in 8 of some 73 on this one; on the Pi 200 of 200 runs right on 0.4.13 and on 0.4.12. A rare fault of
-`FreezeForFork` on that runner, a few in a thousand of CI's runs; open.
+`FreezeForFork` on that runner, a few in a thousand of CI's runs; open. Later (after 0.4.14): not FEX's, the test's.
+With each wrong child's words reported, 3 runs of 60 with 2,000 forks each on that runner had one, every time at fork
+0: the first word 1, the second 72340172838076673, which is 0x0101010101010101, what the test's `memset` left there.
+That is the right snapshot of a fork that came between the counting thread's first two stores; the test's wait for
+the thread to have started (`*second == 0`) never waited, the pattern being there. Both words are 0 before the thread
+starts now. `forksnap` also tells such a child apart from one that ended otherwise, with its signal.
 
 ## 70. The page protocol for 32-bit programs (2026-11-27)
 

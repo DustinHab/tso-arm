@@ -12,6 +12,9 @@
   without it.
 - `tests/forksnap.c` counts a child that saw memory from after the fork apart from one that ended otherwise, and
   reports each (the words it saw, or its signal); the fork diagnosis workflow takes the runner and the number of forks.
+  Its rare failure on GitHub's 22.04 runner was the test's own: its first fork could come before the counting thread
+  had written the second word, which still held `memset`'s pattern, and the right snapshot counted as wrong (notes
+  section 69).
 - `bench/mix_compare.sh` runs under any `/bin/sh` (it used bash's process substitution).
 
 ## 0.4.14 (2026-11-27)
