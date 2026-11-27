@@ -93,7 +93,8 @@ tso-arm run ./program args...   # an x86 program, as it would run on an x86 comp
 - **Chromium and programs built on it** (Electron programs, Steam's windows) run as well: Google's headless Chrome
   renders pages under tso-arm in all modes. They reserve more memory than the page protocol's window holds and run
   with FEX's full ordering, which tso-arm switches to by itself at their start (and from the first start on after
-  that). Chromium's sandbox needs user namespaces (see Steam below); `--no-sandbox` runs without it.
+  that). Chromium's sandbox works, seccomp-bpf included (FEX emulates its filters); it needs user namespaces (see
+  Steam below), and `--no-sandbox` runs without it.
 - With the installation for every user (or `sudo tso-arm binfmt register`), x86 programs start directly:
   `./program`, from scripts, from a file manager.
 - **The second start is faster.** FEX keeps the code it translated in a cache on disk (`~/.cache/tso-arm/fex`), and a
@@ -191,9 +192,12 @@ those away again; the package's own install scripts do not run, and it updates b
 update themselves). A root file system installed for every user is not writable for a user: `tso-arm rootfs` fetches
 one of your own.
 
-Chromium and Electron programs (Discord, Slack, Signal, Spotify's player, Edge) start with `--no-sandbox`: unpacked,
-their sandbox helper has no root rights, and their namespace sandbox does not start under FEX yet; they run, without
-the sandbox's protection of their renderers. `TSO_ARM_APP_SANDBOX=1` tries the sandbox. They reserve more address
+Chromium and Electron programs (Discord, Slack, Signal, Spotify's player, Edge) run in their own sandbox, as they do
+natively: their renderers in user, PID and network namespaces of their own, without access to your files, and under
+seccomp-bpf filters, which FEX emulates. That needs user namespaces: on Ubuntu 23.10 and newer, where AppArmor
+restricts them, `sudo tso-arm userns allow` allows them to tso-arm's FEX alone. Where they are not allowed, the
+programs start with `--no-sandbox` and run without that protection (unpacked, their setuid sandbox helper has no root
+rights); `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. They reserve more address
 space than the page protocol's window holds and run with FEX's full ordering from their start. Discord's package
 holds only a starter, which fetches Discord into `~/.config/discord` on its first start (its setup window); from then
 on `tso-arm app run discord` starts Discord itself. What the tests cover: each of the six programs installed and

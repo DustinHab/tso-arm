@@ -50,6 +50,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/lastexit tests/lastexit.c
     $CC -O2 -static -pthread -o $B/singlethread tests/singlethread.c
     $CC -O2 -static -pthread -o $B/userns tests/userns.c
+    $CC -O2 -static -pthread -o $B/chrootfs tests/chrootfs.c
+    $CC -O2 -static -pthread -o $B/seccompbpf tests/seccompbpf.c
     $CC -O2 -static -pthread -o $B/bigmap tests/bigmap.c
     $CC -O2 -static -o $B/faultrip tests/faultrip.c
     $CC -O2 -static -o $B/closeall tests/closeall.c
@@ -175,6 +177,30 @@ done
 for a in "" thread; do
     out=$(timeout 60 $T run $B/userns $a 2>&1) || fail "userns $a: $out"
     ok "$out"
+done
+
+# Chromium's sandbox: its zygote's chroot to an empty directory through clone(CLONE_FS | CLONE_VM | CLONE_VFORK |
+# CLONE_SETTLS), as the first process of a PID namespace, its check through its old /proc that it is alone, then a
+# thread and a fork (a renderer); the fork's child of the page protocol listed the swapped pages through /proc by
+# path, read every page instead, and died of SIGSEGV, and the check counted the disk cache's writer thread.
+# Needs user namespaces (exit status 2 where they are not allowed: AppArmor without 'tso-arm userns allow').
+for m in tso full; do
+    for v in "" vm pidns; do
+        st=0
+        out=$(last timeout 60 $T run --mode $m $B/chrootfs $v) || st=$?
+        case $st in
+        0) ok "$m: $out" ;;
+        2) ok "$m: chrootfs ${v:-plain}: not run, $out" ;;
+        *) fail "chrootfs ${v:-plain}, $m: exit status $st: $out" ;;
+        esac
+    done
+done
+
+# seccomp-bpf as Chromium's renderers use it (FEX emulates the filters): the kernel's answers to Chromium's checks, a
+# filter for all threads (TSYNC) that makes getpid fail with EPERM, in this thread and in one that ran before
+for m in tso full; do
+    out=$(last timeout 60 $T run --mode $m $B/seccompbpf) || fail "seccompbpf, $m: $out"
+    ok "$m: $out"
 done
 
 # mappings larger than the views' window (Chromium reserves 32 GB at its start), made after the fallback outside it:

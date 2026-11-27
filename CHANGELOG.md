@@ -1,5 +1,21 @@
 # Changes
 
+## Unreleased
+
+- **Chromium's and Electron's own sandbox.** `tso-arm app run` starts Discord, Edge, Signal, Slack, Spotify and other
+  Chromium or Electron programs in their sandbox where user namespaces are allowed (on Ubuntu after
+  `sudo tso-arm userns allow`): their renderers in user, PID and network namespaces of their own, without access to
+  files, under seccomp-bpf filters. Before, they ran with `--no-sandbox`. Three things stood in the way: after the
+  zygote's chroot to an empty directory, every fork of it died under the page protocol (the child looked for swapped
+  pages through `/proc` by path, read every page instead, and met one without rights; the views keep `/proc` open
+  now); the zygote's check that it is alone counted the disk cache's writer thread (FEX left it out only of
+  `/proc/self/task` looked up by path, gone after the chroot; now through FEX's own `/proc`); and FEX's seccomp
+  emulation was off (it costs nothing without filters and is on by default now; `FEX_NEEDSSECCOMP=0` turns it off).
+  `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. Notes section 68;
+  `tests/chrootfs.c` (Chromium's chroot, as the first process of a PID namespace, then a fork) and
+  `tests/seccompbpf.c` in the CI, Chromium's sandbox in `tests/chrome_check.sh`.
+- `TSO_ARM_SIGLOG=1` also reports a signal that ends the process, and every `exit_group` with its status.
+
 ## 0.4.12 (2026-11-27)
 
 Slack draws its window: all six desktop programs of `tso-arm app` (Discord, Microsoft Edge, Signal, Slack, Spotify,

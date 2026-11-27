@@ -80,6 +80,11 @@ jobs:
       - name: Root file system as a user fetches it
         run: bin/tso-arm version && bin/tso-arm rootfs >/dev/null
 
+      # Chromium's and Electron's own sandbox, which 'tso-arm app run' uses where user namespaces are allowed: Ubuntu's
+      # AppArmor restricts them, so they are allowed to tso-arm's FEX, as a user does it
+      - name: User namespaces for tso-arm's FEX (sudo tso-arm userns allow)
+        run: sudo bin/tso-arm userns allow && bin/tso-arm userns
+
       # each program up to its first window, then all removed again (the root file system as before)
       - name: Programs up to their first window
         timeout-minutes: 70

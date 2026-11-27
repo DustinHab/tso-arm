@@ -3158,8 +3158,8 @@ sandbox"). FEX's server, whose abstract socket is one per network namespace, can
 `tso-arm run` starts (`TSO_ARM_SERVER_SOCKET=home`, `server_socket` in `bin/tso-arm`; not the default: FEX started
 by itself, as the soak test does, then found that server where it looked for its own and could not start one), which
 bubblewrap with `--unshare-net` needed, but the zygote still does not come up. Its `clone(CLONE_FS)` and `chroot` to
-take away its files work under FEX as natively (`tests/chrootfs.c`); not looked into further yet. `tso-arm app run` starts these programs with
-`--no-sandbox` meanwhile.
+take away its files work under FEX as natively (`tests/chrootfs.c`). Solved in section 68: the sandbox runs, with
+seccomp-bpf, and `tso-arm app run` uses it where user namespaces are allowed.
 **On GitHub's Arm runner** (`tests/apps_check.sh`, Xvfb, no GPU), from the install to a window that draws: Discord
 (its starter fetches Discord on the first start; its window drew after 25 s), Spotify (10 s, its login page), Signal
 (15 s, the code to link a phone), Zoom (151 s, Zoom Workplace with its sign-in), Microsoft Edge (15 s, a new tab).
@@ -3213,3 +3213,51 @@ locks there, which they take all the time.
 the GPU, WebAssembly's trap handler: Slack hung with each turned off. `tests/sigregs.c` (the six kept registers
 across a profiler's SIGPROF every 100 microseconds, in translated code, system calls and translation) finds nothing
 wrong; it stays as a test.
+## 68. Chromium's and Electron's own sandbox (2026-11-27)
+
+**Where it stood.** Chromium and Electron programs ran with `--no-sandbox` (section 66): their zygote, started in
+user, PID and network namespaces of its own, ended before its hello ("Zygote process exited prematurely"), and
+Chromium found no seccomp-bpf ("Lacking support for seccomp-bpf sandbox").
+
+**The zygote.** With 0.4.12 it got further (FEX's report of every clone, `TSO_ARM_SIGLOG=1`): the browser clones it
+with `CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET`, and the zygote, the first process of its PID namespace, takes its
+own access to files away (`sandbox::Credentials::DropFileSystemAccess`): a child made with `clone(CLONE_FS | CLONE_VM
+| CLONE_VFORK | CLONE_SETTLS)` on a stack and a TLS block of its own changes the root they share to its own
+`/proc/self/fdinfo/` and ends. That clone runs as FEX's vfork since 0.4.12 (section 67; `CLONE_FS` is kept), and the
+chroot works. The zygote then forks its renderers, and under the page protocol each fork's child died of SIGSEGV:
+the child copies the guest's private writable memory and reads the pages that may be in swap, which it finds through
+`/proc/meminfo` and `/proc/self/smaps`, opened by their paths, gone after the chroot. It then took every page not in
+memory for one that might be in swap and read them all, and one the views keep without rights ended it, with every
+signal blocked for the fork (no handler ran; `tests/chrootfs.c` with `vm` and `pidns` reproduced it: "a fork failed
+(child status 0xb)"). The views open `/proc` when they are set up now, as a directory FEX keeps for itself
+(`ProtectFD`), and read both through it. `chrootfs` in all three variants and both modes: the chroot done, `/proc`
+gone, a thread and a fork run.
+
+**seccomp-bpf.** FEX emulates seccomp filters (its `SeccompEmulator`, with a BPF compiler of its own), but only with
+`NeedsSeccomp`, which was off: without it `seccomp` and `prctl(PR_SET_SECCOMP)` answered EINVAL and
+`PR_GET_SECCOMP` -1, and Chromium's checks (`PR_SET_SECCOMP` and `SECCOMP_FILTER_FLAG_TSYNC` with a null filter
+have to fail with EFAULT) failed. Its description ("disables inline syscalls") is out of date: this FEX has no inline
+system calls; the filters are checked in the system call handler, which every call goes through, and only once a
+filter exists. A million `read`/`write` pairs (`dd bs=1`) took as long with it as without (650 to 674 ms both ways).
+It is on by default now (`FEX_NEEDSSECCOMP=0` turns it off). `tests/seccompbpf.c`: the kernel's answers to Chromium's
+checks, and a filter for all threads (TSYNC) that makes `getpid` fail with EPERM in this thread and in one that ran
+before it. Google's headless shell then reports "Activated seccomp-bpf sandbox for process type: renderer" and
+renders its page in both modes; its renderer in its own user, PID and network namespaces, its root the dead
+`/proc/<pid>/fdinfo` of the chroot's child.
+
+**Alone after the chroot.** With FEX's disk cache on, as `tso-arm run` has it, the zygote still ended at once,
+without a word (Google's shell, from anywhere; with a FEX built by hand, which `tso-arm` gives no cache, it ran): after
+its chroot Chromium checks through the descriptor of `/proc` it opened before that it is alone
+(`ThreadHelpers::IsSingleThreaded`: `fstatat(proc_fd, "self/task/")`, a link count of 3) and only then sets its
+capabilities. FEX leaves its own threads (the cache's writer) out of that count (section 63) only where the directory
+is `/proc/self/task`, which it looked up by that path: gone after the chroot, so the count kept the writer, and the
+CHECK ended the zygote. FEX looks at `self/task` through its own descriptor of `/proc` now (`StatSelfTask`, also where
+it waits for a thread to leave before `unshare`). `tests/chrootfs.c` checks it as Chromium does: "not alone" before,
+"alone" after, in every variant (except in a PID namespace's first process, a fork's child, which has no writer).
+
+**`tso-arm app run`** starts Chromium and Electron programs in their sandbox where user namespaces are allowed
+(`sandbox_usable` in `tools/app.sh`: not turned off by `kernel.unprivileged_userns_clone` or
+`user.max_user_namespaces`, and where AppArmor restricts them, `tso-arm userns allow` done), else with
+`--no-sandbox` as before; `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. The CI, Compat and Apps workflows allow user
+namespaces to tso-arm's FEX for their runs (`sudo tso-arm userns allow`), so `chrootfs`, Chromium's sandbox in
+`tests/chrome_check.sh` and the six desktop programs run with it there.

@@ -37,8 +37,15 @@ jobs:
       - name: Machine
         run: bin/tso-arm check
 
+      # user namespaces allowed to tso-arm's FEX, as a user of Ubuntu does it, for the tests of Chromium's sandbox
+      # (chrootfs), and taken away again
       - name: Correctness tests
-        run: sh tests/ci.sh
+        run: |
+          s=0
+          sudo bin/tso-arm userns allow
+          sh tests/ci.sh || s=$?
+          sudo bin/tso-arm userns remove
+          exit $s
 
       - name: Started directly (binfmt_misc), and in x86-64 containers
         run: |

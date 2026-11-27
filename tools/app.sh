@@ -12,8 +12,8 @@
 #   tools/app.sh run NAME [ARGS...]                   start one, as its menu entry does
 #   tools/app.sh remove NAME                          remove one, its menu entries and the libraries only it needed
 # TSO_ARM_APPS_DIR: where the lists are kept (default ~/.local/share/tso-arm/apps); TSO_ARM_APPS_MENU: where the menu
-# entries go (default ~/.local/share/applications); TSO_ARM_APP_SANDBOX=1: Chromium's
-# and Electron's sandbox kept (see cmd_run)
+# entries go (default ~/.local/share/applications); TSO_ARM_APP_SANDBOX=1 or 0: Chromium's and Electron's sandbox
+# used or not, whatever the user namespaces here allow (see cmd_run)
 set -e
 R=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 T=$R/bin/tso-arm
@@ -423,7 +423,7 @@ cmd_install() {
         done
     fi
     # a Chromium or Electron program (its files, or Discord's, whose package holds only the starter of the Electron
-    # program it fetches): started with --no-sandbox (cmd_run)
+    # program it fetches): started in its sandbox where user namespaces allow it, else with --no-sandbox (cmd_run)
     if [ "$app" = discord ] || grep -q '/chrome-sandbox$\|/v8_context_snapshot\.bin$\|/snapshot_blob\.bin$\|/libcef\.so$' "$D/$app/files"; then
         : >"$D/$app/chromium"
     fi
@@ -444,10 +444,10 @@ cmd_list() {
     done
 }
 
-# Starts the program. A Chromium or Electron program (Chromium's snapshot or its sandbox helper next to it) runs with
-# --no-sandbox: unpacked, its setuid sandbox helper has no root rights, its namespace sandbox does not start under
-# FEX yet (the zygote it starts in namespaces of its own sends no hello), and without a sandbox it stops; its
-# renderers run without the sandbox's protection then. TSO_ARM_APP_SANDBOX=1 tries the sandbox.
+# Starts the program. A Chromium or Electron program (Chromium's snapshot or its sandbox helper next to it) runs in
+# its own sandbox where user namespaces are allowed (its renderers in user, PID and network namespaces of their own,
+# without the files, under seccomp-bpf filters, which FEX emulates); unpacked, its setuid sandbox helper has no root
+# rights, so elsewhere it runs with --no-sandbox, its renderers without that protection (sandbox_usable below).
 cmd_run() {
     [ $# -ge 1 ] || die "usage: tso-arm app run NAME [ARGS...]"
     app=$1
@@ -461,10 +461,26 @@ cmd_run() {
     if [ "$app" = discord ] && [ -x "${XDG_CONFIG_HOME:-$HOME/.config}/discord/Discord" ]; then
         prog=${XDG_CONFIG_HOME:-$HOME/.config}/discord/Discord
     fi
-    if [ "${TSO_ARM_APP_SANDBOX:-0}" != 1 ] && [ -e "$D/$app/chromium" ]; then
+    if [ -e "$D/$app/chromium" ] && ! sandbox_usable; then
         set -- --no-sandbox "$@"
     fi
     exec "$T" run "$prog" "$@"
+}
+
+# Whether a Chromium or Electron program can use its namespace sandbox here: user namespaces for an unprivileged
+# process (not turned off; where AppArmor restricts them, allowed to tso-arm's FEX by 'tso-arm userns allow').
+# TSO_ARM_APP_SANDBOX=1 or 0 decides instead.
+sandbox_usable() {
+    case ${TSO_ARM_APP_SANDBOX:-} in
+    1) return 0 ;;
+    0) return 1 ;;
+    esac
+    [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)" != 0 ] || return 1
+    [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 1)" != 0 ] || return 1
+    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+        [ -f /etc/apparmor.d/tso-arm-fex ] || return 1
+    fi
+    return 0
 }
 
 cmd_remove() {

@@ -87,11 +87,14 @@ jobs:
           exit $s
       # Chromium: Google's headless shell (Chrome for Testing) renders a page with V8's compilers and WebAssembly,
       # under the page protocol (its first run falls back: Chromium reserves more than the views' window holds) and
-      # under full ordering
+      # under full ordering, then with its own sandbox, which needs user namespaces; Ubuntu's AppArmor restricts them,
+      # so they are allowed to tso-arm's FEX for it, as a user does ('sudo tso-arm userns allow'), and taken away again
       - name: Chromium (Google's headless shell)
         run: |
           s=0
+          sudo bin/tso-arm userns allow
           sh tests/chrome_check.sh >chrome.txt 2>&1 || s=$?
+          sudo bin/tso-arm userns remove
           cat chrome.txt
           { echo; echo '```'; cat chrome.txt; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit $s

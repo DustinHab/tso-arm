@@ -163,8 +163,9 @@ Microsoft Edge, Signal, Slack, Spotify and Zoom from their makers' packages into
 libraries they need from Ubuntu 24.04's archive and a menu entry; the Apps workflow starts each on GitHub's Arm
 runner up to its first window. On the way: Chromium under the page protocol (notes section 64), FEX's descriptors
 and the cache (section 65), a program inside the root file system starting itself through `/proc/self/exe` (section
-66). Open: Chromium's and Electron's own sandbox under FEX (their zygote in namespaces of its own sends no hello; the
-programs run with `--no-sandbox`), and WebAssembly's trap in Chromium (section 64).
+66), the host's limit on a renderer's data counting FEX's memory (0.4.12, section 67), Chromium's and Electron's own
+sandbox with seccomp-bpf (section 68: `tso-arm app` uses it where user namespaces are allowed). Open: WebAssembly's
+trap in Chromium (section 64).
 
 ## 8. The page protocol for 32-bit programs
 

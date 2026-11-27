@@ -3,7 +3,8 @@
 # renders a page whose script runs V8's compilers on a loop, calls WebAssembly and writes the results into the page.
 # Under the page protocol in its first run (no profile: Chromium's allocator reserves 32 GB at once, more than the
 # views' window holds) and in two runs with the profile, and under FEX's full ordering. The browser, its zygote,
-# renderer, GPU and network processes all have to come up for the page to come back. (WebAssembly's trap, an access
+# renderer, GPU and network processes all have to come up for the page to come back. Where user namespaces are
+# allowed, twice more with Chromium's own sandbox (its renderers under seccomp-bpf). (WebAssembly's trap, an access
 # past its memory that V8 catches with its handler of SIGSEGV, stops the renderer under FEX in every mode: notes
 # section 64.)
 #   tests/chrome_check.sh [DIR]     DIR: where the headless shell is kept (default build/chrome)
@@ -53,6 +54,9 @@ want='script ran 42, primes 17984, wasm 0 0'
 
 fail=0
 n=0
+# Chromium's sandbox (SANDBOX=1 for a run): its renderers in user, PID and network namespaces of their own, without
+# the files, under seccomp-bpf filters (which FEX emulates); else --no-sandbox
+SANDBOX=0
 run() {
     what=$1
     shift
@@ -60,11 +64,27 @@ run() {
     rm -rf "$D/profile-$n"
     s=$(date +%s.%N)
     st=0
-    env "$@" timeout 300 "$T" run "$S" --no-sandbox --user-data-dir="$D/profile-$n" --dump-dom "file://$D/page.html" \
+    if [ $SANDBOX = 1 ]; then
+        set -- "$@" -- --enable-logging=stderr --v=1
+    else
+        set -- "$@" -- --no-sandbox
+    fi
+    # the environment before "--", Chromium's options after it
+    envs=""
+    while [ "$1" != -- ]; do
+        envs="$envs $1"
+        shift
+    done
+    shift
+    # shellcheck disable=SC2086 # a list
+    env $envs timeout 300 "$T" run "$S" "$@" --user-data-dir="$D/profile-$n" --dump-dom "file://$D/page.html" \
         >"$D/out-$n.html" 2>"$D/err-$n.txt" || st=$?
     e=$(date +%s.%N)
     secs=$(awk -v s="$s" -v e="$e" 'BEGIN { printf "%.1f", e - s }')
-    if grep -q "$want" "$D/out-$n.html"; then
+    if [ $SANDBOX = 1 ] && ! grep -q 'Activated seccomp-bpf sandbox for process type: renderer' "$D/err-$n.txt"; then
+        echo "  FAIL  $what: no renderer under seccomp-bpf ($(grep -m1 -i 'seccomp\|FATAL' "$D/err-$n.txt" | cut -c1-160))"
+        fail=1
+    elif grep -q "$want" "$D/out-$n.html"; then
         echo "  ok    $what: the page in $secs s"
     else
         echo "  FAIL  $what: exit status $st after $secs s, page: $(grep -o '<p id="out">[^<]*' "$D/out-$n.html" | head -n 1)"
@@ -81,6 +101,18 @@ run "page protocol, profile learned" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE="$p"
 run "page protocol, with the profile" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE="$p"
 run "FEX's full ordering" TSO_ARM_MODE=full
 rm -f "$p"
+
+# with Chromium's own sandbox, where user namespaces are allowed (where AppArmor restricts them, to tso-arm's FEX by
+# 'tso-arm userns allow'): its zygote's chroot to an empty directory, the renderers forked from it, seccomp-bpf
+if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)" != 0 ] &&
+    { [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" != 1 ] || [ -f /etc/apparmor.d/tso-arm-fex ]; }; then
+    SANDBOX=1
+    run "Chromium's sandbox, page protocol" TSO_ARM_MODE=tso TSO_VIEWS_PROFILE=none
+    run "Chromium's sandbox, full ordering" TSO_ARM_MODE=full
+    SANDBOX=0
+else
+    echo "  (user namespaces not allowed here: Chromium's sandbox not run; 'sudo tso-arm userns allow')"
+fi
 
 # from inside the root file system, where 'tso-arm app' installs programs: Chromium starts its zygote, renderers and
 # services through /proc/self/exe, which FEX named there without the root file system's own path, and the execve
