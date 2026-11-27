@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Chromium, Electron and CEF programs start a tenth faster**: their start is mostly FEX translating (77 % of
+  Chrome's time with its disk cache warm), and multiblock units of 50 instead of 150 guest instructions translate
+  less of what is entered at many points. Chrome's headless shell renders a page in 4.0 instead of 4.5 s with its
+  cache warm, 5.1 instead of 5.7 s cold. `tso-arm run` chooses them for a program with V8's snapshot or CEF beside
+  it, `tso-arm app run` for the Chromium and Electron programs it installs; `FEX_MAXINST` set otherwise stays (notes
+  section 72).
 - WebAssembly's trap (an access past a WebAssembly memory, caught as a RuntimeError) was not tso-arm's: Google
   Chrome catches it under tso-arm in every mode, with its sandbox and without, while Google's headless shell does not
   catch it natively either (its handler of SIGSEGV does not ask V8's). The Apps workflow checks it with Chrome and

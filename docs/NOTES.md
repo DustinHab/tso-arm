@@ -3493,3 +3493,41 @@ program's start reads only what it stored itself; what Chrome stores costs only 
 size limit of 1 GB against its 6 s). `TSO_DISKCACHE_SHARED=1` keeps one database for all, as FEX has it. The CI runs
 two programs with an empty cache: two databases, the second runs of both missing 10 of 614 blocks of the first.
 Open: Chromium's misses, a multiblock unit under each of its entries (above).
+
+## 72. Where Chrome's start goes; smaller multiblock units for Chromium's family (2026-11-27)
+
+Chrome's headless shell renders a small page under tso-arm in 3.7 to 4.2 s with its disk cache warm (its profile:
+full ordering from the first run on). `perf record -e cycles:u` over all its processes (one run, 11,504 samples):
+77 % of the time in FEX itself, 13 % in translated code, 3 % in the host's libc, the rest in libstdc++, libgcc and
+the vDSO. FEX's part by function (FEX linked once more without `--strip-all`, perf's addresses being file offsets,
+0x10000 below the text segment's addresses):
+
+| part of FEX | of FEX's samples |
+|---|---|
+| x86 to IR and the passes (register allocation alone 13 %, dead flags 4 %, CSE 2 %) | 41 % |
+| C++ containers in FEX (most of it the relocations kept for the disk cache, 9 %) | 14 % |
+| x86 decoder | 14 % |
+| block lookup and linking (`AddBlockMapping`, the link map) | 7 % |
+| disk cache (lookups, its index) | 5 % |
+| system calls, signals, files | 3 % |
+| Arm64 code emission | 3 % |
+
+So Chrome's start is FEX translating, even with the cache warm: it misses most of Chromium's code (section 71: the
+renderers are forked and do not store theirs, and V8's own code is new in every run). FEX's multiblock compiles from
+each entry what is reachable from it, up to `FEX_MAXINST` guest instructions (tso-arm: 150, section 43), and
+Chromium's code is entered at many points. Six rounds, the configurations taking turns, each with a cache and
+profiles of its own from empty (ms):
+
+| `FEX_MAXINST` | first run | second | third to sixth | median of the warm runs |
+|---|---|---|---|---|
+| 150 | 5674 | 5530 | 4562 4545 4525 4554 | 4550 |
+| 100 | 5503 | 5348 | 4321 4414 4303 4400 | 4361 |
+| 50 | 5128 | 5087 | 3847 4165 4182 3883 | 4024 |
+| 25 | 5155 | 5152 | 3998 4248 4349 4099 | 4174 |
+
+Multiblock off (`FEX_MULTIBLOCK=0`) was slower (5.0 to 5.3 s warm), and `python3 -c 0` took twice as long with it
+(213 against 101 ms). Section 43 found smaller units cost pigz, xz, bzip2 and Python 1 to 3 %, so `tso-arm run`
+gives units of 50 only to Chromium's family: a program with V8's snapshot (`v8_context_snapshot.bin`,
+`snapshot_blob.bin`) or CEF (`libcef.so`) beside it, and `tso-arm app run` to every program it marked as Chromium or
+Electron (Discord's starter, Zoom's launcher). `FEX_MAXINST` set to anything but 150 stays. Chrome's headless shell
+through it: 5.2, 5.0, 4.3, 4.2 s. `tests/ci.sh` checks the choice (`tests/getenv.c`).

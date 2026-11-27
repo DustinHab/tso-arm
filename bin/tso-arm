@@ -462,6 +462,11 @@ key() {
     echo "$(basename "$p")-$id"
 }
 
+# chromium_dir DIR: whether DIR holds a program of Chromium's family (V8's snapshot or CEF beside it)
+chromium_dir() {
+    [ -f "$1/v8_context_snapshot.bin" ] || [ -f "$1/snapshot_blob.bin" ] || [ -f "$1/libcef.so" ]
+}
+
 cmd_run() {
     # TSO_ARM_MODE: the mode for programs started without --mode (started directly through binfmt_misc, by tso-arm wine)
     mode=${TSO_ARM_MODE:-tso}
@@ -525,6 +530,13 @@ cmd_run() {
     case $info in
     *" appimage") export APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-1} ;;
     esac
+    # Chromium and the programs built on it (Electron, CEF) ship V8's snapshot or CEF beside their program. Their start
+    # is mostly FEX translating, and multiblock units of 50 guest instructions make it a tenth faster (Chrome's headless
+    # shell 4.0 instead of 4.5 s with its cache warm, 5.1 instead of 5.7 s cold: notes section 72); FEX_MAXINST set to
+    # another value than tso-arm's 150 stays
+    if [ "$FEX_MAXINST" = 150 ] && chromium_dir "$(dirname "$prog")"; then
+        export FEX_MAXINST=50
+    fi
     if { [ "$k" = dynamic ] || [ "$k" = script ]; } && ! has_rootfs; then
         r=$(shared_rootfs) || {
             [ "$k" = script ] &&

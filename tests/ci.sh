@@ -67,6 +67,7 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/sigsync tests/sigsync.c
     $CC -O2 -static -o $B/x87 tests/x87.c
     $CC -O2 -static -o $B/filemap tests/filemap.c
+    $CC -O2 -static -o $B/getenv tests/getenv.c
     # 32-bit x86 programs (CC_X86_32, default i686-linux-gnu-gcc; skipped without one)
     if command -v $CC32 >/dev/null; then
         $CC32 -O2 -msse2 -static -pthread -o $B/mp32 litmus/mp32.c
@@ -247,6 +248,14 @@ rm -rf "$dc"
 [ "$dbs" = 2 ] && [ "$shared" = 1 ] && [ $((misses * 10)) -lt "$first" ] ||
     fail "disk cache per program: $dbs databases for two programs, $shared shared, misses $first in the first runs, $misses in the second"
 ok "disk cache: a database for each of two programs, misses $first in their first runs, $misses in the second; one shared with TSO_DISKCACHE_SHARED=1"
+
+# a program of Chromium's family (V8's snapshot beside it) gets multiblock units of 50 guest instructions, any other
+# tso-arm's 150, and FEX_MAXINST set otherwise stays (notes section 72)
+rm -rf $B/chromiumlike && mkdir -p $B/chromiumlike
+cp $B/getenv $B/chromiumlike/getenv && : >$B/chromiumlike/v8_context_snapshot.bin
+mi="$(env -u FEX_MAXINST $T run $B/getenv FEX_MAXINST) $(env -u FEX_MAXINST $T run $B/chromiumlike/getenv FEX_MAXINST) $(FEX_MAXINST=300 $T run $B/chromiumlike/getenv FEX_MAXINST)"
+[ "$mi" = "150 50 300" ] || fail "FEX_MAXINST for a program, one of Chromium's family, one with FEX_MAXINST=300: $mi (150 50 300)"
+ok "FEX_MAXINST: 150 for a program, 50 for one of Chromium's family, 300 where it was set so"
 
 # posix_spawn (clone with CLONE_VM | CLONE_VFORK) while other threads translate code: the child as a vfork, FEX's
 # locks and maps in the parent whole (Slack's renderer hung on them)
