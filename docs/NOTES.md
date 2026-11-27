@@ -3092,7 +3092,12 @@ signal). Not the Pi's 39-bit address space, which holds only part of the sandbox
 bits the trap is not caught either (`tests/chrome_check.sh` records it), and FEX reporting the host's 39 bits in
 CPUID (V8 sizes its sandbox by them) made Chromium fail on every page. Only an access past a WebAssembly memory traps
 (V8 relies on guard regions, not on checks, for the accesses within it), which a correct program does not make. Not
-looked into further yet.
+looked into further yet. Later (0.4.13): not the way V8's handler runs in Chromium either. `faultrip v8` does what
+it does there (SA_ONSTACK on an alternate signal stack, which Chromium's crash handling gives every thread, SIGSEGV
+unblocked inside the handler and blocked again before it returns) and lands right in every mode on GitHub's runners.
+V8's handler today takes a fault only if the signal is the kernel's (`si_code` > 0), the address lies in memory
+registered as a WebAssembly memory with its guard regions, and the instruction pointer is exactly a trapping
+instruction of registered code (`src/trap-handler/handler-inside-posix.cc`, `handler-inside.cc`).
 ## 65. FEX's own descriptors, and a program that closes all of its own (2026-11-26)
 
 Steam's check of user namespaces still failed on GitHub's runner with the cache on (the writer ended for `unshare`,
@@ -3238,7 +3243,9 @@ gone, a thread and a fork run.
 `PR_GET_SECCOMP` -1, and Chromium's checks (`PR_SET_SECCOMP` and `SECCOMP_FILTER_FLAG_TSYNC` with a null filter
 have to fail with EFAULT) failed. Its description ("disables inline syscalls") is out of date: this FEX has no inline
 system calls; the filters are checked in the system call handler, which every call goes through, and only once a
-filter exists. A million `read`/`write` pairs (`dd bs=1`) took as long with it as without (650 to 674 ms both ways).
+filter exists. A million `read`/`write` pairs (`dd bs=1`) took as long with it as without (650 to 674 ms both ways);
+the efficiency table's workloads, alternating, two sessions each way: 84 and 87 % with it, 84 and 85 % without (with
+the hot functions translated ahead of time and the profile).
 It is on by default now (`FEX_NEEDSSECCOMP=0` turns it off). `tests/seccompbpf.c`: the kernel's answers to Chromium's
 checks, and a filter for all threads (TSYNC) that makes `getpid` fail with EPERM in this thread and in one that ran
 before it. Google's headless shell then reports "Activated seccomp-bpf sandbox for process type: renderer" and
@@ -3282,6 +3289,15 @@ delivery's `back()` and `pop_back()`, between which a frame queued is taken away
 
 Both change the frames with all signals blocked now (`FramesSection`: two `rt_sigprocmask` calls around a few
 instructions, which fault on nothing; FEX defers a signal only while it translates or is in a section of its own, so
-the cost is that of signals that come in there). `tests/sigdefer.c` makes it likely: three threads send SIGSEGV,
-SIGBUS, SIGILL, SIGTRAP and SIGFPE without pauses to a thread that writes a new function to fresh memory and calls it,
-3,000 times, so that most signals come in while FEX translates and the next ones during its handler for them.
+the cost is that of signals that come in there). Found by reading the code against the signal number, not by a run
+that shows it gone: it is too rare for that (none in 600 runs of `sigsync` without pauses on the N2).
+
+**Open.** `tests/sigdefer.c` was meant to make it likely: three threads send SIGSEGV, SIGBUS, SIGILL, SIGTRAP and
+SIGFPE without pauses to a thread that writes a new function to fresh memory and calls it, 3,000 times, so that most
+signals come in while FEX translates and the next ones during its handler for them. It finds something else, with the
+change above and without it: on GitHub's runners it ends with SIGSEGV in every run, in every mode (450 of 450 on each
+runner), on the Pi it hangs; alone, without the senders, it runs right. `TSO_ARM_SIGLOG` with FEX built with its
+symbols: a fault (SEGV_MAPERR) in `HandleDispatcherGuestSignal`, in `BackupContext`, which saves the host's context
+below the interrupted stack pointer before the guest's frame is built; the fault is FEX's own, but SIGSEGV has a
+handler of the guest's, so it goes to the guest, whose frame is set up the same way, at the same address: thousands
+of times, until the timeout. Not in the CI until that is fixed.

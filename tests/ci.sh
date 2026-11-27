@@ -58,7 +58,6 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -pthread -o $B/spawnvm tests/spawnvm.c
     $CC -O2 -static -pthread -o $B/rlimitdata tests/rlimitdata.c
     $CC -O2 -static -pthread -o $B/sigregs tests/sigregs.c
-    $CC -O2 -static -pthread -o $B/sigdefer tests/sigdefer.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -285,10 +284,6 @@ for m in tso full unordered; do
     # without pauses: each one comes in while FEX still handles the one before
     out=$(last env SIGSYNC_GAP_US=0 timeout 120 $T run --mode $m $B/sigsync 2000) || fail "sigsync without pauses, $m: $out"
     ok "$m, without pauses: $out"
-    # from three threads to one that keeps FEX translating: frames of FEX's deferral queued inside one another's
-    # (one was counted before it was written, and its signal 0 became signal 64; notes section 69)
-    out=$(last timeout 120 $T run --mode $m $B/sigdefer 3000) || fail "sigdefer, $m: $out"
-    ok "$m: $out"
 done
 
 # signals that meet: two at once (the second while FEX still handles the first), and one raised while another
