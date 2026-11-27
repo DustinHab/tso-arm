@@ -3329,7 +3329,8 @@ With each wrong child's words reported, 3 runs of 60 with 2,000 forks each on th
 0: the first word 1, the second 72340172838076673, which is 0x0101010101010101, what the test's `memset` left there.
 That is the right snapshot of a fork that came between the counting thread's first two stores; the test's wait for
 the thread to have started (`*second == 0`) never waited, the pattern being there. Both words are 0 before the thread
-starts now. `forksnap` also tells such a child apart from one that ended otherwise, with its signal.
+starts now. `forksnap` also tells such a child apart from one that ended otherwise, with its signal. With that fix,
+60 of 60 runs of 2,000 forks right on the same runner (fork-diag, 5db8e46).
 
 ## 70. The page protocol for 32-bit programs (2026-11-27)
 
