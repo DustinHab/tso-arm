@@ -15,6 +15,11 @@ release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX pr
 - A thread's own stack pages come back to it after its creator wrote the thread descriptor at the stack's top and so
   shared the page with the stack's first frames (`TSO_VIEWS_OWNSTACK=0`: off).
 - A 64-bit program's `MAP_32BIT` memory goes through the views (it was in none).
+- A thread could die with SIGSEGV in FEX's translator when its first block held an instruction kind the page protocol
+  learns as an exit point during translation: the decoder's buffer went back to the pool before the block's second
+  pass, which read it from there and gave it up again through a null pointer. It is given up after the second pass
+  now. The only kind learned in practice, `mov` with an absolute address (in 32-bit code every access to the thread's
+  area through `%gs`), is an exit point from the start (notes section 70).
 - `study/build_static32.sh`: the efficiency workloads as 32-bit programs; `bench/efficiency.sh` and
   `bench/perf_views.sh` take another build (`X`).
 

@@ -3391,5 +3391,26 @@ On the whole the protocol is not faster for these 32-bit programs, and from run 
 first run falls back to full ordering, and what its profile keeps, changes a 32-bit program's time by a third (pigz
 1.39 or 2.03 s), and zstd's buffers moving between its threads keep it in the protocol, slower than ordered
 throughout. So 32-bit programs keep FEX's full ordering by default; `TSO_ARM_32_VIEWS=1` gives them the protocol (the
-CI runs the 32-bit litmus tests and threads both ways; `threads32 8` with the protocol ended once there without a word, and not in 300 runs on GitHub's N2 nor 120 on the Pi after). 64-bit programs keep the two fixes. Open: a choice per
-program, as `tso-arm learn` makes it for the fallback of 64-bit ones.
+CI runs the 32-bit litmus tests and threads both ways; `threads32 8` with the protocol ended once there without a
+word, and not in 300 runs on GitHub's N2 nor 120 on the Pi after). 64-bit programs keep the two fixes. Open: a choice
+per program, as `tso-arm learn` makes it for the fallback of 64-bit ones.
+
+**The release check's crash.** The first release check of 0.4.14 died in `mp32 mp` with the protocol on GitHub's
+24.04 runner (SIGSEGV after 1.7 s, most of it the kernel writing the core of a process with the views' reservations);
+400 runs on that runner and 1,500 on the Pi with the draft's FEX went right after it. With `TSO_VIEWS_LOG=1` one in
+200 died on the Pi, in FEX itself: `stlr w8, [x9]` with x9 zero, in the pool allocator's `DisownBuffer`, on the
+second thread just after it started. The translation learns an instruction kind that touches guest memory without
+an exit point before it (`IsViewExitPoint` saw no memory operand) and translates the block again (`ViewRetranslate`,
+section 42). Before that second pass `GenerateIR` gave up the decoder's buffer, and a thread's first
+`DelayedDisownBuffer` hands it back to the pool at once (its period starts at zero). The second pass read the decoded instructions from the
+pool, where another thread could have taken them, and gave the buffer up again through its owner pointer, already
+null. Only a thread's first translation, or the first after five seconds, ends so; any other second pass read a
+buffer given up but not yet taken back. The buffer is given up after the second pass now.
+
+Which kinds are learned, in all of the CI's 32-bit programs, the 32-bit and 64-bit builds of pigz, xz and zstd, and
+Python with threads: only `MOV` with an absolute address (opcodes A0 to A3), whose address the decoder keeps as a
+literal, in 32-bit code: `mov %gs:0x14, %eax`, `mov %eax, %gs:0x224` (i386 glibc's thread area), `mov 0x817a184,
+%eax` (a global without PIC). Nothing in 64-bit programs. `IsViewExitPoint` takes them by their table flag
+(`FLAGS_MEM_OFFSET`) now, and none is learned anymore: the second thread's first block, `start_thread` with its
+`%gs` accesses, raced the main thread for learning them, which is why only some runs met it. With both changes 0 of
+1,000 runs on the Pi failed, 0 kinds learned.

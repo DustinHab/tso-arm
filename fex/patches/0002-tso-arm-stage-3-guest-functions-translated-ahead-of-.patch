@@ -1,4 +1,4 @@
-From 743178685dc389fea861d4383dbd492579465385 Mon Sep 17 00:00:00 2001
+From 47347447f4a2cdfb06471b73fe22d63aa885dffe Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -9,7 +9,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Core/ArchHelpers/Arm64Emitter.cpp         |   40 +-
  .../Interface/Core/ArchHelpers/Arm64Emitter.h |   12 +
  FEXCore/Source/Interface/Core/CodeCache.cpp   |   20 +-
- FEXCore/Source/Interface/Core/Core.cpp        |  169 +-
+ FEXCore/Source/Interface/Core/Core.cpp        |  171 +-
  FEXCore/Source/Interface/Core/DiskCache.cpp   |  116 +-
  FEXCore/Source/Interface/Core/DiskCache.h     |   12 +
  .../Interface/Core/Dispatcher/Dispatcher.cpp  |   21 +
@@ -22,7 +22,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Source/Interface/Core/JIT/MemoryOps.cpp   |   53 +-
  FEXCore/Source/Interface/Core/LookupCache.h   |    7 +
  .../Interface/Core/OpcodeDispatcher.cpp       |    6 +-
- .../Source/Interface/Core/OpcodeDispatcher.h  |   29 +
+ .../Source/Interface/Core/OpcodeDispatcher.h  |   31 +
  FEXCore/Source/Interface/IR/IREmitter.h       |   15 +
  FEXCore/Source/Interface/IR/PassManager.cpp   |    2 +-
  .../Interface/IR/Passes/GuestViewPass.cpp     |   49 +-
@@ -66,7 +66,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 62 files changed, 5281 insertions(+), 432 deletions(-)
+ 62 files changed, 5285 insertions(+), 432 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
 index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3256edee0 100644
@@ -285,7 +285,7 @@ index 87a110c845921e3d5bd7dd5f22b0f97d95aa9ba6..e5ff4c712e54e05557a525c86b5be4e5
      }
  
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f40317ae2 100644
+index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..144fad43c5ff3302cf38187dc41bc4b2915d23c7 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -87,6 +87,11 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
@@ -434,19 +434,21 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f
            if (Thread->OpDispatcher->HadDecodeFailure()) {
              HadDispatchError = true;
            } else {
-@@ -781,6 +850,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -779,6 +848,13 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+     Thread->OpDispatcher->Finalize();
+   }
  
-   Thread->FrontendDecoder->DelayedDisownBuffer();
- 
-+  // tso-arm: translated again, with the instruction kinds learned above as exit points
++  // tso-arm: translated again, with the instruction kinds learned above as exit points, from the same decoded blocks:
++  // the decoder's buffer is given up only after that. (Given up before, a thread's first translation handed it back
++  // to the pool at once, and the second pass read it from there and gave it up again through a null pointer.)
 +  if (ViewRetranslate) {
 +    return GenerateIR(Thread, GuestRIP, ExtendedDebugInfo, MaxInst);
 +  }
 +
-   IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
+   Thread->FrontendDecoder->DelayedDisownBuffer();
  
-   auto ShouldDump = Thread->OpDispatcher->ShouldDumpIR();
-@@ -899,9 +973,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   IR::IREmitter* IREmitter = Thread->OpDispatcher.get();
+@@ -899,9 +975,34 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
    std::optional<DiskCache::CodeHitData> Hit;
    std::optional<uint64_t> DiskCacheGuestCodeKey;
@@ -482,7 +484,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
        if (LoadedCode.BlockBegin) {
-@@ -933,15 +1032,32 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -933,15 +1034,32 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
        }
      }
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedDiskCacheMissCount, 1);
@@ -518,7 +520,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f
      // TSO_VIEWS_DUMP=<guest rip in hex>: host code of the block compiled at that entry to /tmp/tso-block-<rip>.bin
      static const uint64_t DumpRIP = getenv("TSO_VIEWS_DUMP") ? strtoull(getenv("TSO_VIEWS_DUMP"), nullptr, 16) : 0;
      if (DumpRIP == GuestRIP && CompiledCode.BlockBegin) {
-@@ -959,9 +1075,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -959,9 +1077,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
          fclose(F);
        }
      }
@@ -530,7 +532,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f
                static_cast<const void*>(CompiledCode.EntryPoints[GuestRIP]), static_cast<const void*>(CompiledCode.BlockBegin),
                (unsigned long)StartAddr, (unsigned long)Length, int(Frame->TSOViewBase / TSOViews::Window));
      }
-@@ -1143,6 +1259,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
+@@ -1143,6 +1261,22 @@ ContextImpl::AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandl
    return std::nullopt;
  }
  
@@ -553,7 +555,7 @@ index a1cddcd14acb3ae7ef0c61c3d9ac7b3c8fa036bd..47a1f3365e0c1497c69cbfbab2c8d05f
  void ContextImpl::AddThunkTrampolineIRHandler(uintptr_t Entrypoint, uintptr_t GuestThunkEntrypoint) {
    LOGMAN_THROW_A_FMT(Entrypoint, "Tried to link null pointer address to guest function");
    LOGMAN_THROW_A_FMT(GuestThunkEntrypoint, "Tried to link address to null pointer guest function");
-@@ -1199,9 +1331,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
+@@ -1199,9 +1333,22 @@ bool ContextImpl::AddTSOEscalation(uint64_t Start, uint64_t End) {
      return false;
    }
    TSOEscalated.Insert({Start, End});
@@ -1272,10 +1274,10 @@ index b1eb827185b1ed5ee652c11bcf728a668149bc4a..af22fd0db2403828fd8cc2d0b8a2ffe2
      } else {
        // If the block isn't a jump target then we need to create an exit block
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 50fdc64b835879ba23eba5aa8be502a65bedd96c..0b31714a698a86b4b0ff22a5ce8ccd8308584306 100644
+index 50fdc64b835879ba23eba5aa8be502a65bedd96c..69c869d9bcf45fce398679b29337795eb3f2b62f 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-@@ -286,6 +286,35 @@ public:
+@@ -286,6 +286,37 @@ public:
      return CanHaveSideEffects;
    }
  
@@ -1287,8 +1289,10 @@ index 50fdc64b835879ba23eba5aa8be502a65bedd96c..0b31714a698a86b4b0ff22a5ce8ccd83
 +    if (!TableInfo || !TableInfo->Name) {
 +      return true;
 +    }
-+    if (TableInfo->Flags &
-+        (X86Tables::InstFlags::FLAGS_DEBUG_MEM_ACCESS | X86Tables::InstFlags::FLAGS_SETS_RIP | X86Tables::InstFlags::FLAGS_BLOCK_END)) {
++    // FLAGS_MEM_OFFSET: MOV with an absolute address (A0 to A3), whose address is a literal operand (in 32-bit code
++    // every access to the thread's area through %gs is one)
++    if (TableInfo->Flags & (X86Tables::InstFlags::FLAGS_DEBUG_MEM_ACCESS | X86Tables::InstFlags::FLAGS_SETS_RIP |
++                            X86Tables::InstFlags::FLAGS_BLOCK_END | X86Tables::InstFlags::FLAGS_MEM_OFFSET)) {
 +      return true;
 +    }
 +    const std::string_view Name {TableInfo->Name};
