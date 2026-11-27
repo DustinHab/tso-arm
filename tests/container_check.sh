@@ -36,7 +36,7 @@ echo "      without ordering, for comparison: $out"
 
 # fork in a program with threads, signals
 out=$(run "$img" /ci/forksnap 30 | tail -n 1)
-echo "$out" | grep -q ', 0 children saw' && ok "$out" || bad "forksnap: $out"
+echo "$out" | grep -q ', 0 children saw memory from after the fork, 0 ended otherwise' && ok "$out" || bad "forksnap: $out"
 out=$(run "$img" /ci/signals | tail -n 1)
 echo "$out" | grep -q 'all handled' && ok "$out" || bad "signals: $out"
 
