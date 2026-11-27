@@ -19,7 +19,10 @@ release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX pr
   `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. Notes section 68;
   `tests/chrootfs.c` (Chromium's chroot, as the first process of a PID namespace, then a fork) and
   `tests/seccompbpf.c` in the CI, Chromium's sandbox in `tests/chrome_check.sh`.
+- `sudo tso-arm userns allow` after `tso-arm install` from a release package allows the FEX in the calling user's
+  home directory, which that user's programs run through; it allowed only the package's own copy under sudo.
 - `TSO_ARM_SIGLOG=1` also reports a signal that ends the process, and every `exit_group` with its status.
+- `tests/faultrip.c v8`: a fault's landing pad as V8's handler in Chromium sets it, on an alternate signal stack.
 
 ## 0.4.12 (2026-11-27)
 

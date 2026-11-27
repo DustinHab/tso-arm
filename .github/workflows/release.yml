@@ -90,8 +90,16 @@ jobs:
           tso-arm version
           tso-arm check
 
+      # user namespaces allowed to tso-arm's FEX for the tests of Chromium's sandbox (chrootfs), as a user of Ubuntu
+      # does it, and taken away again
       - name: Correctness tests
-        run: cd tso-arm-[0-9]*/ && sh tests/ci.sh
+        run: |
+          cd tso-arm-[0-9]*/
+          s=0
+          sudo bin/tso-arm userns allow
+          sh tests/ci.sh || s=$?
+          sudo bin/tso-arm userns remove
+          exit $s
 
       - name: x86-64 containers through the package's statically linked FEX
         run: |

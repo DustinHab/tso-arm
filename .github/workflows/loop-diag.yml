@@ -1,0 +1,66 @@
+name: Loop diagnosis
+
+# By hand: one test program of tests/ many times in each mode on GitHub's Arm runner, as tso-arm runs it; how many
+# runs went right, and the exit status, last lines and FEX's report (TSO_ARM_SIGLOG=1 in env) of each that did not.
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: the program, tests/NAME.c
+        default: sigsync
+      args:
+        description: its arguments
+        default: '2000'
+      env:
+        description: environment of each run
+        default: SIGSYNC_GAP_US=0
+      modes:
+        description: modes
+        default: tso full unordered
+      runs:
+        description: runs per mode
+        default: '100'
+      runner:
+        description: runner
+        default: ubuntu-22.04-arm
+
+jobs:
+  diag:
+    name: ${{ github.event.inputs.test }}, many times
+    runs-on: ${{ github.event.inputs.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+      - name: FEX with the tso-arm patches (cached)
+        id: fex
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/tso-arm
+          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+      - name: Build FEX
+        if: steps.fex.outputs.cache-hit != 'true'
+        run: bin/tso-arm install --generic
+      - name: Runs
+        run: |
+          set +e
+          x86_64-linux-gnu-gcc -O2 -static -pthread -o prog tests/${{ github.event.inputs.test }}.c
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          for m in ${{ github.event.inputs.modes }}; do
+            ok=0
+            for i in $(seq ${{ github.event.inputs.runs }}); do
+              env ${{ github.event.inputs.env }} timeout 120 bin/tso-arm run --mode $m ./prog ${{ github.event.inputs.args }} \
+                >/tmp/out.txt 2>/tmp/err.txt
+              st=$?
+              if [ $st = 0 ]; then
+                ok=$((ok + 1))
+              else
+                echo "$m run $i: exit status $st: $(tail -n 1 /tmp/out.txt | cut -c1-160)"
+                grep 'siglog' /tmp/err.txt | grep -v 'clone\|exit_group' | tail -n 12 | cut -c1-240
+              fi
+            done
+            echo "== $m: $ok of ${{ github.event.inputs.runs }} runs right"
+          done

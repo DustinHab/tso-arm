@@ -6,7 +6,7 @@
 // own (`vm`), in its zygote, which is the first process of a PID namespace of its own (`pidns`); the process goes on
 // working after it (a thread, a fork), as the zygote does for its renderers.
 //   chrootfs [vm|pidns]   prints one line; exit status 1 if /proc or / still showed files or the work after it
-//                         failed, 2 where no user namespace could be made (not permitted here)
+//                         failed, 2 where no user namespace could be made or no chroot in it (not permitted here)
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -25,9 +25,9 @@ static char tls[65536] __attribute__((aligned(64)));
 
 static int child(void* arg) {
     (void)arg;
-    if (chroot("/proc/self/fdinfo/") != 0 || chdir("/") != 0)
-        _exit(1);
-    _exit(0);
+    if (chroot("/proc/self/fdinfo/") != 0)
+        _exit(errno == EPERM ? 2 : 1);
+    _exit(chdir("/") != 0);
 }
 
 static void* thread(void* arg) {
@@ -49,6 +49,11 @@ static int run(int vm) {
     }
     int st = 0;
     waitpid(p, &st, 0);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 2) {
+        // a user namespace without the capabilities in it: AppArmor's restriction of them (Ubuntu 23.10 and later)
+        printf("chrootfs: no chroot in a user namespace here (EPERM: restricted; 'sudo tso-arm userns allow')\n");
+        return 2;
+    }
     struct stat sb;
     const int proc = stat("/proc", &sb) == 0;
     int entries = 0;

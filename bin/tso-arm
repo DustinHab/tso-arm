@@ -301,17 +301,28 @@ cmd_userns() {
             return 0
         fi
         command -v apparmor_parser >/dev/null || die "apparmor_parser not found (package apparmor)"
-        # the FEX of an installation by tools/get.sh in each of its versions, else the one in use (under sudo the
-        # one 'tso-arm install' put into the home directory of the user who called it)
+        # the FEX of an installation by tools/get.sh in each of its versions; else the one 'tso-arm install' put
+        # into the home directory of the user who called sudo, which that user's programs run through, and the one
+        # root would run (a release package's own)
         if inst=$(installed_dir); then
             dir="$inst/*/fex/prebuilt/bin"
         else
-            F=$(fex 2>/dev/null) || {
-                h=$([ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" | cut -d: -f6)
-                F=${h:+$h/.local/opt/tso-arm/bin/FEX}
-            }
-            [ -n "$F" ] && [ -x "$F" ] || die "no FEX to allow them to ('tso-arm install' first)"
-            dir=$(dirname "$(readlink -f "$F")")
+            dirs=""
+            h=$([ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" | cut -d: -f6)
+            for F in "${h:+$h/.local/opt/tso-arm/bin/FEX}" "$(fex 2>/dev/null)"; do
+                [ -n "$F" ] && [ -x "$F" ] || continue
+                d=$(dirname "$(readlink -f "$F")")
+                case ",$dirs," in
+                *",$d,"*) ;;
+                *) dirs=${dirs:+$dirs,}$d ;;
+                esac
+            done
+            [ -n "$dirs" ] || die "no FEX to allow them to ('tso-arm install' first)"
+            # (an attachment starts with /: both as one alternation below it)
+            case $dirs in
+            *,*) dir="/{$(echo "$dirs" | sed 's|^/||; s|,/|,|g')}" ;;
+            *) dir=$dirs ;;
+            esac
         fi
         cat >"$USERNS_PROFILE" <<EOF
 # tso-arm: user namespaces for x86 programs run through FEX ('tso-arm userns allow'; 'tso-arm userns remove' takes

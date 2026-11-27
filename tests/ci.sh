@@ -250,10 +250,13 @@ for m in tso full; do
 done
 
 # a fault's instruction pointer in the guest's handler, changed there to a landing pad (V8's WebAssembly traps,
-# Java's implicit null checks), in every mode
+# Java's implicit null checks), in every mode; and as V8's handler in Chromium does it (on an alternate signal stack,
+# SIGSEGV unblocked in the handler, a thread-local flag)
 for m in tso full unordered; do
-    out=$(last timeout 60 $T run --mode $m $B/faultrip 2000) || fail "faultrip, $m: $out"
-    ok "$m: $out"
+    for v in "" v8; do
+        out=$(last timeout 60 $T run --mode $m $B/faultrip 2000 $v) || fail "faultrip $v, $m: $out"
+        ok "$m: $out"
+    done
 done
 
 # a program's own threads in /proc/self/task and no thread of FEX's (its disk cache's writer, on here as it is by
