@@ -23,6 +23,9 @@ on:
       runner:
         description: runner
         default: ubuntu-22.04-arm
+      cc:
+        description: the compiler (i686-linux-gnu-gcc for a 32-bit program)
+        default: x86_64-linux-gnu-gcc
 
 jobs:
   diag:
@@ -34,7 +37,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          sudo apt-get install -y -q cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross gcc-i686-linux-gnu libc6-dev-i386-cross
       - name: FEX with the tso-arm patches (cached)
         id: fex
         uses: actions/cache@v4
@@ -47,7 +50,7 @@ jobs:
       - name: Runs
         run: |
           set +e
-          x86_64-linux-gnu-gcc -O2 -static -pthread -o prog tests/${{ github.event.inputs.test }}.c
+          ${{ github.event.inputs.cc }} -O2 -static -pthread -o prog tests/${{ github.event.inputs.test }}.c
           lscpu | grep -E 'Model name|^CPU\(s\)'
           for m in ${{ github.event.inputs.modes }}; do
             ok=0
