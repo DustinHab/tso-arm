@@ -8,10 +8,12 @@
 # The aot configurations need the workload's library of functions translated ahead of time (out/aot/WORKLOAD.so,
 # from aot/WORKLOAD.sh); without it they are left out.
 # FEXV: the tso-arm FEX to measure (default the development build; the installed one is ~/.local/opt/tso-arm/bin/FEX)
+# X: the x86 builds (default build/x86; build/x86-32 from study/build_static32.sh: the 32-bit ones), TAG: the table's
+# name out/efficiency$TAG.md
 cd "$(dirname "$0")/.."
 FEX=$HOME/opt/fex/bin/FEX
 FEXV=${FEXV:-$HOME/opt/fex-views/bin/FEX}
-X=$PWD/build/x86
+X=${X:-$PWD/build/x86}
 N=$PWD/build/arm64
 C=$PWD/build
 # Five rounds: under FEX, pigz's wall time falls into two groups about 40 ms apart from run to run (notes section
@@ -159,4 +161,4 @@ LC_ALL=C awk -v s="$stamp" -v cfgs="$CONFIGS" -v khz="$KHZ" -v thr="$throttled" 
     printf "\nEfficiency = native time / time; 100 %% is native speed. Throttling flags after the run: %s.\n", thr;
     if (fexenv != "") printf "Every FEX configuration ran with %s.\n", fexenv;
     if (cfgs ~ /(^| )(protocol|aot)( |$)/) printf "tso-arm with a profile ran with FEX'"'"'s disk cache as tso-arm run keeps it (warm after the first round).\n";
-  }' $raw | tee out/efficiency.md
+  }' $raw | tee out/efficiency${TAG:-}.md

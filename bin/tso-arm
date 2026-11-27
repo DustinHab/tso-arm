@@ -510,12 +510,13 @@ cmd_run() {
     k=${info#* }
     k=${k%% *}
     [ "$m" = other ] || [ "$k" = other ] && die "$prog is not an x86 Linux program (x86-64 or 32-bit x86)"
-    # 32-bit programs: the page protocol works on x86-64 programs; FEX orders every access of a 32-bit one itself
-    # (correct, as fast as --mode full), and 'learn' translates x86-64 code only
-    if [ "$m" = i386 ] && [ "$mode" = tso ]; then
-        mode=full
-        [ -n "$TSO_VIEWS_STATS" ] && echo "tso-arm: $(basename "$prog") is a 32-bit program: FEX orders all of its accesses (the page protocol is for x86-64 programs)" >&2
+    # 32-bit programs: the page protocol as for x86-64 ones, their memory placed below 4 GB; 'learn' translates x86-64
+    # code only. TSO_ARM_32_VIEWS=0: FEX orders every access of a 32-bit program itself, as --mode full
+    if [ "$m" = i386 ]; then
         aot=/dev/null/none
+        if [ "$mode" = tso ] && [ "${TSO_ARM_32_VIEWS:-1}" = 0 ]; then
+            mode=full
+        fi
     fi
     # an AppImage mounts its contents with FUSE, through a fusermount it looks for in the root file system, which has
     # none: it unpacks them into a temporary directory instead and runs from there (a 15 MB one starts in 0.36 s on
