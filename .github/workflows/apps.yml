@@ -91,9 +91,8 @@ jobs:
           APPS_TRACE: ${{ inputs.apps != '' && '1' || '0' }}
         run: |
           s=0
-          # Slack: its window stays black (notes section 66), reported but not counted
           # shellcheck disable=SC2086 # a list
-          APPS_EXPECT=window APPS_KNOWN=slack APPS_REMOVE=1 APPS_MINUTES=6 sh tests/apps_check.sh $APPS || s=$?
+          APPS_EXPECT=window APPS_REMOVE=1 APPS_MINUTES=6 sh tests/apps_check.sh $APPS || s=$?
           cat build/apps/summary.md >>"$GITHUB_STEP_SUMMARY"
           exit $s
 

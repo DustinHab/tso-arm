@@ -3163,7 +3163,53 @@ take away its files work under FEX as natively (`tests/chrootfs.c`); not looked 
 **On GitHub's Arm runner** (`tests/apps_check.sh`, Xvfb, no GPU), from the install to a window that draws: Discord
 (its starter fetches Discord on the first start; its window drew after 25 s), Spotify (10 s, its login page), Signal
 (15 s, the code to link a phone), Zoom (151 s, Zoom Workplace with its sign-in), Microsoft Edge (15 s, a new tab).
-Slack opens its window after 5 s, but it stays black, and Slack writes nothing after its start; a first cause was
-found and fixed (its keyboard module loads libxkbfile, which the root file system lacks and Slack's package does not
-name: now fetched), the black window is open. Installing all six and removing them again leaves the root file system
-with the files it held before (directories it had, empty ones as well, stay).
+Slack made its window after 5 s and never showed it (it shows it once its page has loaded): its renderer hung inside
+FEX, section 67 (its keyboard module also loads libxkbfile, which the root file system lacks and Slack's package does
+not name: fetched now). Installing all six and removing them again leaves the root file system with the files it held
+before (directories it had, empty ones as well, stay).
+## 67. A guest's limit on its data, and posix_spawn (2026-11-27)
+
+**What Slack showed.** Slack's main window is made hidden and shown at `ready-to-show`, when its page has drawn; on
+GitHub's runner the window stayed unmapped (`xwininfo`: IsUnMapped) and the page never loaded. Its renderer, asked
+through Chromium's DevTools (`--remote-debugging-port`, `tests/cdp.py`; Chromium 156 wants `--user-data-dir` for it),
+did not answer `document.readyState`. All of its threads waited on futexes in FEX's own memory (`tests/waits.py`):
+FEX's `WritePriorityMutex` of the lookup cache held by a reader no thread was, the code invalidation lock wanted by
+`mprotect`, every compiling thread behind them (gdb with FEX linked without `--strip-all`, which the Apps workflow
+builds by hand: input `symbols`). The reader was a thread interrupted by a fault inside FEX's own code while it held
+the lock: FEX delivered that SIGSEGV to the guest's handler, which did not come back (`TSO_ARM_SIGLOG=1` reports such
+a signal with the interrupted frames and the guest's registers; `=stop` stops the process there for a debugger).
+
+**The fault.** On the Pi without a screen (`--ozone-platform=headless`), with FEX built with debug information: a
+new thread faulted inside FEX at `0x1000d5d7`, `0x10003f07` and the like, in FEX's reservation of the low 4 GB. The
+guest's registers were right (rdx the `start_thread` glibc's `__clone3` calls); the address was `L1Pointer + ((rip &
+mask) << 4) + 8`, the lookup cache's L1 entry of the block, with `L1Pointer` `0x0fffffff`: -1 plus 256 MB. The
+thread's lookup cache had not been mapped (`VirtualAlloc` failed; `LOGMAN_THROW_A_FMT` checks nothing in a release
+build). The mapping failed because Chromium limits its renderers' and GPU process's data to 8 GB (`RLIMIT_DATA`, by
+`setrlimit` in the process itself), and on the host that limit counts FEX's private writable mappings as well: some
+3.6 GB at a process's start (a zygote with two threads), some 400 MB for each further thread (its lookup cache of
+257 MB, its heap). The renderer stood at 7.9 GB after a few threads.
+
+**The change.** FEX keeps the guest's `RLIMIT_DATA` and `RLIMIT_AS` for its own process (`GuestPrlimit` in
+`Passthrough.cpp`: `prlimit64`, `getrlimit`, `setrlimit`, the 32-bit ones too): set, read back as set, the hard
+limit raised again only by root, as natively; the host's limits stay as they were. Other resources and other
+processes' limits go to the host as before. The guest's limit is not enforced on its memory then (it would have to
+leave FEX's out); a fork's child keeps the guest's values, a program started with execve begins with the host's.
+`tests/rlimitdata.c` (2 GB, 16 threads mapping 32 MB each): before, the program died with SIGSEGV in both modes;
+now every thread works and the limit reads back. Slack on the Pi without a screen: no fault inside FEX in four starts,
+its web app loads.
+
+**posix_spawn.** On the way: glibc's `posix_spawn` starts its child with `clone(CLONE_VM | CLONE_VFORK)` on a stack
+of its own (after a `clone3` with `CLONE_CLEAR_SIGHAND`, which FEX refuses). FEX handed that to its handler for
+flags it cannot take as they are; the child ran FEX on its parent's memory, with its parent's thread state and TLS
+(and so its parent's allocator heap), and its unlocking after the fork released the locks the parent held for it and
+reset FEX's code invalidation lock, while the parent's other threads went on. Such a clone runs as FEX's vfork now
+(`CloneHandler`): the child on a copy of the memory, the parent waiting until it has called execve or exited. What
+the child stores for its parent does not reach it (glibc: the error of an execve that failed); the child's exit
+status 127 does (under the page protocol, whose guest memory is shared, the error reaches it as well).
+`tests/spawnvm.c` spawns while two threads map, write, call and unmap code; each fork waits some seconds for its
+locks there, which they take all the time.
+
+**What did not explain it.** The disk cache, the page protocol, FEX's L2 cache and dynamic L1 size, exact signals,
+the GPU, WebAssembly's trap handler: Slack hung with each turned off. `tests/sigregs.c` (the six kept registers
+across a profiler's SIGPROF every 100 microseconds, in translated code, system calls and translation) finds nothing
+wrong; it stays as a test.

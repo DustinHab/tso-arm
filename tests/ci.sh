@@ -54,6 +54,8 @@ if [ -z "$SKIP_BUILD" ]; then # SKIP_BUILD=1: the programs in build/ci were buil
     $CC -O2 -static -o $B/faultrip tests/faultrip.c
     $CC -O2 -static -o $B/closeall tests/closeall.c
     $CC -O2 -static -pthread -o $B/spawnvm tests/spawnvm.c
+    $CC -O2 -static -pthread -o $B/rlimitdata tests/rlimitdata.c
+    $CC -O2 -static -pthread -o $B/sigregs tests/sigregs.c
     $CC -O2 -static -pthread -o $B/filegrow tests/filegrow.c
     $CC -O2 -static -pthread -o $B/fixedover tests/fixedover.c
     $CC -O2 -static -pthread -o $B/cowmap tests/cowmap.c
@@ -203,6 +205,21 @@ done
 # locks and maps in the parent whole (Slack's renderer hung on them)
 for m in tso full; do
     out=$(last timeout 120 $T run --mode $m $B/spawnvm 3) || fail "spawnvm, $m: $out"
+    ok "$m: $out"
+done
+
+# a program that limits its data (RLIMIT_DATA, Chromium's renderers: 8 GB) below what FEX itself maps, then starts
+# threads: the limit is the guest's, kept by FEX and read back, and every thread works (a thread's lookup cache failed
+# to map under the host's limit, and Slack's renderer jumped into nothing)
+for m in tso full; do
+    out=$(last timeout 60 $T run --mode $m $B/rlimitdata) || fail "rlimitdata, $m: $out"
+    ok "$m: $out"
+done
+
+# the registers a function keeps, across a profiler's signals (SIGPROF every 100 microseconds) that come in during
+# translated code, system calls and translation
+for m in tso full; do
+    out=$(last timeout 60 $T run --mode $m $B/sigregs 4) || fail "sigregs, $m: $out"
     ok "$m: $out"
 done
 

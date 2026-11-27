@@ -198,8 +198,10 @@ space than the page protocol's window holds and run with FEX's full ordering fro
 holds only a starter, which fetches Discord into `~/.config/discord` on its first start (its setup window); from then
 on `tso-arm app run discord` starts Discord itself. What the tests cover: each of the six programs installed and
 started on GitHub's Arm runner until its window draws (`.github/workflows/apps.yml`, weekly, with screenshots):
-Discord, Spotify, Signal, Zoom and Edge draw their windows (Zoom after some two minutes); Slack's window stays black
-so far. Signing in and using them is not tested.
+Discord, Spotify, Signal, Slack, Zoom and Edge draw their windows (Zoom after some two minutes). Signing in and using
+them is not tested. A limit a program sets on its own data or address space (Chromium's renderers: 8 GB of data) is
+kept by FEX for the program and not set on the host, where it would count FEX's own memory as well; it is read back
+as set but not enforced.
 
 ## Steam
 

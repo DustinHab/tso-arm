@@ -1,5 +1,25 @@
 # Changes
 
+## Unreleased
+
+- **Slack draws its window.** Chromium limits its renderers' data to 8 GB (`RLIMIT_DATA`), and on the host that limit
+  counted FEX's own memory as well (some 3.6 GB at a process's start, some 400 MB for each further thread). The
+  mapping of a new thread's lookup cache failed, unchecked, and the thread ran with its L1 cache at -1 plus 256 MB:
+  faults inside FEX, delivered to the guest's handler, every thread then waiting for a lock, Slack's page never
+  loaded. FEX keeps a program's limits on its data and address space for the program now (`prlimit64`, `getrlimit`,
+  `setrlimit`): read back as set, the hard limit raised again only by root, not set on the host (`tests/rlimitdata.c`,
+  which died before). Notes section 67.
+- `posix_spawn` (glibc's `clone(CLONE_VM | CLONE_VFORK)` on a stack of its own) runs as FEX's vfork: its child ran
+  FEX on its parent's memory and released the parent's locks, while the parent's other threads went on
+  (`tests/spawnvm.c`).
+- `TSO_ARM_SIGLOG=1`: FEX reports a signal that reaches the guest from inside FEX's own code, with the interrupted
+  frames, the guest's registers and the thread's L1 cache, and every clone; `=stop` stops the process there.
+- The Apps workflow by hand: which programs, their environment and options, FEX built with its symbol table; the
+  check keeps the processes, threads, log files, a page's state through DevTools (`tests/cdp.py`) and what each thread
+  waits in (`tests/waits.py`, gdb, `tests/stackscan.py`) of a program that draws nothing.
+- `tso-arm app remove` rebuilds the menu's list of file types without the removed program's entries.
+- `tests/sigregs.c`: the registers a function keeps across a profiler's signals.
+
 ## 0.4.11 (2026-11-27)
 
 x86 desktop programs that have no Arm build for Linux: `tso-arm app install spotify` (or discord, edge, signal, slack,

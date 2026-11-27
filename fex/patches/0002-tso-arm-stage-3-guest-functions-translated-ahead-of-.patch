@@ -1,4 +1,4 @@
-From 0514ae1b0652728fb53ae7644b4e718d2ab3aa11 Mon Sep 17 00:00:00 2001
+From 104dcb4d7ab0f43364ff70152c6923635ac0f460 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -43,10 +43,11 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/FileManagement.cpp          |  237 ++-
  .../LinuxSyscalls/FileManagement.h            |    1 +
  .../LinuxSyscalls/LinuxAllocator.cpp          |   14 +-
- .../LinuxSyscalls/SignalDelegator.cpp         |  509 +++++-
+ .../LinuxSyscalls/SignalDelegator.cpp         |  532 ++++++-
  .../LinuxSyscalls/SignalDelegator.h           |   23 +-
- .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  146 +-
- .../LinuxSyscalls/Syscalls/Passthrough.cpp    |   48 +-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  150 +-
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |    4 +
+ .../LinuxSyscalls/Syscalls/Passthrough.cpp    |  123 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  105 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  253 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
@@ -56,12 +57,13 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/ThreadManager.h             |   59 +-
  .../LinuxSyscalls/Utils/Threads.cpp           |   21 +
  .../LinuxSyscalls/Utils/Threads.h             |    6 +
+ .../LinuxEmulation/LinuxSyscalls/x32/Info.cpp |   18 +-
  Source/Tools/LinuxEmulation/Thunks.cpp        |  807 ++++++++++
  Source/Tools/LinuxEmulation/Thunks.h          |   28 +
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 57 files changed, 4821 insertions(+), 376 deletions(-)
+ 59 files changed, 4934 insertions(+), 387 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 18f08b861e4b979c9b12b6317138519dccccb50b..b149b7d319d12dcb3ab872a75de4310f0ad56699 100644
@@ -2492,7 +2494,7 @@ index 60b0ef192be43077c65e9101e78819076fb0d621..fc0f9c2cf09cc6a8d0a329d0fddcc34f
        MappedPages.reset(PageAddr);
      }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914488d1637 100644
+index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..5d27075c47ee3ee530ed929f62b377c7769753a3 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -27,6 +27,10 @@ $end_info$
@@ -2506,7 +2508,15 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  #include <cstddef>
  #include <cstring>
  #include <functional>
-@@ -51,6 +55,45 @@ __attribute__((naked)) static void sigrestore() {
+@@ -34,6 +38,7 @@ $end_info$
+ #include <syscall.h>
+ #include <sys/mman.h>
+ #include <sys/signalfd.h>
++#include <sys/uio.h>
+ #include <unistd.h>
+ #include <utility>
+ 
+@@ -51,6 +56,67 @@ __attribute__((naked)) static void sigrestore() {
  
  constexpr static uint32_t X86_MINSIGSTKSZ = 2048;
  
@@ -2523,7 +2533,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
 +  const auto Off = [Base](uint64_t A) {
 +    return A >= Base && A - Base < (1ULL << 28) ? A - Base : 0;
 +  };
-+  char Buf[1024];
++  char Buf[2048];
 +  const uint64_t PC = ArchHelpers::Context::GetPc(UContext);
 +  const uint64_t LR = ArchHelpers::Context::GetArmReg(UContext, 30);
 +  int n = snprintf(Buf, sizeof(Buf), "tso-arm siglog: tid %d signal %d code %d addr %#lx deferral %u pc %#lx +%#lx lr +%#lx frames",
@@ -2538,21 +2548,43 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
 +      n += snprintf(Buf + n, sizeof(Buf) - n, " +%#lx", O);
 +    }
 +  }
++  // the guest's state as FEX last stored it, and the top of its stack (read without faulting)
++  {
++    const auto& S = Thread->CurrentFrame->State;
++    const uint64_t RSP = S.gregs[FEXCore::X86State::REG_RSP];
++    n += snprintf(Buf + n, sizeof(Buf) - n, " guest rip %#lx rsp %#lx rbp %#lx stack", static_cast<unsigned long>(S.rip),
++                  static_cast<unsigned long>(RSP), static_cast<unsigned long>(S.gregs[FEXCore::X86State::REG_RBP]));
++    for (int r = 0; r < 16 && n > 0 && n < static_cast<int>(sizeof(Buf)) - 40; ++r) {
++      n += snprintf(Buf + n, sizeof(Buf) - n, " r%d %#lx", r, static_cast<unsigned long>(S.gregs[r]));
++    }
++    n += snprintf(Buf + n, sizeof(Buf) - n, " l1 %#lx mask %#lx callret %#lx", static_cast<unsigned long>(S.L1Pointer),
++                  static_cast<unsigned long>(S.L1Mask), static_cast<unsigned long>(S.callret_sp));
++    n += snprintf(Buf + n, sizeof(Buf) - n, " top");
++    uint64_t Top[8] {};
++    iovec Local {Top, sizeof(Top)}, Remote {reinterpret_cast<void*>(RSP), sizeof(Top)};
++    const auto Read = ::process_vm_readv(::getpid(), &Local, 1, &Remote, 1, 0);
++    for (int i = 0; i < Read / 8 && n > 0 && n < static_cast<int>(sizeof(Buf)) - 24; ++i) {
++      n += snprintf(Buf + n, sizeof(Buf) - n, " %#lx", static_cast<unsigned long>(Top[i]));
++    }
++  }
 +  if (n > 0 && n < static_cast<int>(sizeof(Buf)) - 1) {
 +    Buf[n++] = '\n';
 +    (void)::write(STDERR_FILENO, Buf, n);
 +  }
-+  // TSO_ARM_SIGLOG=stop: the process stops here, every thread as it is, for a debugger
++  // TSO_ARM_SIGLOG=stop: the process stops here, every thread as it is, for a debugger; this one stays here
 +  static const bool Stop = getenv("TSO_ARM_SIGLOG") && !strcmp(getenv("TSO_ARM_SIGLOG"), "stop");
 +  if (Stop && Signal == SIGSEGV) {
 +    (void)::kill(::getpid(), SIGSTOP);
++    for (;;) {
++      ::sleep(100);
++    }
 +  }
 +}
 +
  static FEX::HLE::ThreadStateObject* GetThreadFromAltStack(const stack_t& alt_stack) {
    // The thread object lives just before the alt-stack begin.
    FEX::HLE::ThreadStateObject* ThreadObject {};
-@@ -84,10 +127,11 @@ void SynchronousExceptionHandler(FEXCore::Context::Context* CTX, FEXCore::Core::
+@@ -84,10 +150,11 @@ void SynchronousExceptionHandler(FEXCore::Context::Context* CTX, FEXCore::Core::
    ERROR_AND_DIE_FMT("This should always noreturn");
  }
  
@@ -2568,7 +2600,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  }
  
  /**
-@@ -100,6 +144,42 @@ void SignalDelegator::HandleSignal(FEX::HLE::ThreadStateObject* Thread, int Sign
+@@ -100,6 +167,42 @@ void SignalDelegator::HandleSignal(FEX::HLE::ThreadStateObject* Thread, int Sign
      LogMan::Msg::AFmt("Thread {} has received a signal and hasn't registered itself with the delegate! Programming error!",
                        FHU::Syscalls::gettid());
    } else {
@@ -2611,7 +2643,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      SignalHandler& Handler = HostHandlers[Signal];
      for (auto& HandlerFunc : Handler.Handlers) {
        if (HandlerFunc(Thread->Thread, Signal, Info, UContext)) {
-@@ -192,6 +272,12 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+@@ -192,6 +295,12 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
    Context->SigInfoLocation = 0;
    Context->InSyscallInfo = 0;
  
@@ -2624,7 +2656,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    // Store fault to top status and then reset it
    Context->FaultToTopAndGeneratedException = Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
    Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
-@@ -276,12 +362,35 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+@@ -276,12 +385,35 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
  
    // Restore host state
    ArchHelpers::Context::RestoreContext(ucontext, Context);
@@ -2660,7 +2692,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  
      if (Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_INJIT) {
        // XXX: Unsupported since it needs state reconstruction
-@@ -305,6 +414,18 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -305,6 +437,18 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
                                                    GuestSigAction* GuestAction, stack_t* GuestStack) {
    auto ContextBackup = StoreThreadState(Thread, Signal, ucontext);
  
@@ -2679,7 +2711,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    auto Frame = Thread->CurrentFrame;
  
    // Ref count our faults
-@@ -341,6 +462,12 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -341,6 +485,12 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
      ContextBackup->InSyscallInfo = Thread->CurrentFrame->InSyscallInfo;
      Thread->CurrentFrame->InSyscallInfo = 0;
    } else {
@@ -2692,7 +2724,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      if (!IsAddressInDispatcher(OldPC)) {
        // This is likely to cause issues but in some cases it isn't fatal
        // This can also happen if we have put a signal on hold, then we just reenabled the signal
-@@ -425,7 +552,9 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+@@ -425,7 +575,9 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
      {
        // If SA_RESETHAND is set, then the signal handler is immediately reset to SIG_DFL.
        std::lock_guard lk(GuestDelegatorMutex);
@@ -2703,7 +2735,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      }
  
      // If this signal is not required by FEX then we can fully uninstall the host handler as well.
-@@ -454,6 +583,7 @@ bool SignalDelegator::HandleSIGILL(FEXCore::Core::InternalThreadState* Thread, i
+@@ -454,6 +606,7 @@ bool SignalDelegator::HandleSIGILL(FEXCore::Core::InternalThreadState* Thread, i
        // It will have been RW coming in to this sigreturn and now we need to remove permissions
        // to ensure FEX trampolines back to the SIGSEGV deferred handler.
        mprotect(reinterpret_cast<void*>(&Thread->InterruptFaultPage), sizeof(Thread->InterruptFaultPage), PROT_NONE);
@@ -2711,7 +2743,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      }
      return true;
    }
-@@ -475,6 +605,20 @@ bool SignalDelegator::HandleSignalPause(FEXCore::Core::InternalThreadState* Thre
+@@ -475,6 +628,20 @@ bool SignalDelegator::HandleSignalPause(FEXCore::Core::InternalThreadState* Thre
    SignalEvent SignalReason = ThreadObject->SignalReason.load();
    auto Frame = Thread->CurrentFrame;
  
@@ -2732,7 +2764,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    if (SignalReason == SignalEvent::Pause) {
      // Store our thread state so we can come back to this
      StoreThreadState(Thread, Signal, ucontext);
-@@ -581,13 +725,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
+@@ -581,13 +748,12 @@ static bool IsAsyncSignal(const siginfo_t* Info, int Signal) {
    return true;
  }
  
@@ -2749,7 +2781,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      NewMask |= (1ULL << (Signal - 1));
    }
  
-@@ -602,6 +745,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
+@@ -602,6 +768,34 @@ uint64_t SignalDelegator::GetNewSigMask(int Signal) const {
    return NewMask;
  }
  
@@ -2784,7 +2816,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext) {
    auto SigInfo = *static_cast<siginfo_t*>(Info);
  
-@@ -628,18 +799,190 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
+@@ -628,18 +822,190 @@ bool SignalDelegator::HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState*
    return false;
  }
  
@@ -2975,7 +3007,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  
        if (ThreadObject->SignalInfo.DeferredSignalFrames.empty()) {
          // No signals to defer. Just set the fault page back to RW and continue execution.
-@@ -650,8 +993,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -650,8 +1016,11 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
        const auto& Top = ThreadObject->SignalInfo.DeferredSignalFrames.back();
        Signal = Top.Signal;
        SigInfo = Top.Info;
@@ -2989,7 +3021,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
        ThreadObject->SignalInfo.DeferredSignalFrames.pop_back();
  
        // Until we re-protect the page to PROT_NONE, FEX will now *permanently* defer signals and /not/ check them.
-@@ -678,27 +1024,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -678,27 +1047,17 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
    } else if (IsAsyncSignal(&SigInfo, Signal) && MustDeferSignal) {
      // If the signal is asynchronous (as determined by si_code) and FEX is in a state of needing
      // to defer the signal, then add the signal to the thread's signal queue.
@@ -3024,7 +3056,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  
      // Postpone the remainder of signal handling logic until we process the SIGSEGV triggered by writing to InterruptFaultPage.
      return;
-@@ -709,27 +1045,60 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -709,27 +1068,60 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      // This signal is masked, must defer until the guest updates the signal mask.
      // Add it to the pending signal list
      ThreadObject->SignalInfo.PendingSignals |= 1ULL << (Signal - 1);
@@ -3090,7 +3122,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  
        // Update our host signal mask so we don't hit race conditions with signals
        // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
-@@ -747,6 +1116,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+@@ -747,6 +1139,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
      Handler.OldAction.sigaction(Signal, &SigInfo, UContext);
    } else if (Handler.OldAction.handler == SIG_IGN || (Handler.OldAction.handler == SIG_DFL && Handler.DefaultBehaviour == DEFAULT_IGNORE)) {
      // Do nothing
@@ -3098,7 +3130,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    } else if (Handler.OldAction.handler == SIG_DFL && (Handler.DefaultBehaviour == DEFAULT_COREDUMP || Handler.DefaultBehaviour == DEFAULT_TERM)) {
      CTX->FlushAndCloseCodeMap();
  
-@@ -826,6 +1196,21 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -826,6 +1219,21 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // SA_RESTORER : We always need our host side restorer on x86-64, Couldn't use guest restorer anyway
    SignalHandler.HostAction.sa_flags = CheckAndAddFlags(SignalHandler.HostAction.sa_flags, SignalHandler.GuestAction.sa_flags,
                                                         SA_NOCLDSTOP | SA_NOCLDWAIT | SA_NODEFER | SA_RESTART);
@@ -3120,7 +3152,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  
  #ifdef ARCHITECTURE_x86_64
  #define SA_RESTORER 0x04000000
-@@ -836,11 +1221,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
+@@ -836,11 +1244,20 @@ bool SignalDelegator::UpdateHostThunk(int Signal) {
    // Walk the signals we have that are required and make sure to remove it from the mask
    // This'll likely be SIGILL, SIGBUS, SIG63
  
@@ -3144,7 +3176,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
        SignalHandler.HostAction.sa_mask |= (1ULL << (i - 1));
      }
    }
-@@ -1000,16 +1394,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1000,16 +1417,24 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
  #ifdef ARCHITECTURE_arm64
    // Register SIGBUS signal handler.
    const auto SigbusHandler = [](FEXCore::Core::InternalThreadState* Thread, int Signal, void* _info, void* ucontext) -> bool {
@@ -3172,7 +3204,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      }
  
      FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSIGBUSCount, 1);
-@@ -1026,7 +1428,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1026,7 +1451,7 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
        return true;
      }
      ArchHelpers::Context::SetPc(ucontext, PC + Result.value_or(0));
@@ -3181,7 +3213,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    };
  
    RegisterHostSignalHandler(SIGBUS, SigbusHandler, true);
-@@ -1038,6 +1440,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+@@ -1038,6 +1463,21 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
    for (uint32_t Signal = 0; Signal <= SignalDelegator::MAX_SIGNALS; ++Signal) {
      RegisterHostSignalHandlerForGuest(Signal, GuestSignalHandler);
    }
@@ -3203,7 +3235,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
  }
  
  SignalDelegator::~SignalDelegator() {
-@@ -1083,7 +1500,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1083,7 +1523,9 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    if (Thread->Thread) {
      // Reserve a small amount of deferred signal frames. Usually the stack won't be utilized beyond
      // 1 or 2 signals but add a few more just in case.
@@ -3214,7 +3246,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
    }
  }
  
-@@ -1151,6 +1570,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
+@@ -1151,6 +1593,7 @@ uint64_t SignalDelegator::RegisterGuestSignalHandler(int Signal, const GuestSigA
      }
  
      HostHandlers[Signal].GuestAction = *Action;
@@ -3222,7 +3254,7 @@ index ec240a554428f7b2a9d9cfe1d6920a217fe553b3..074b0e7eceba7de4fe31763bf9cd4914
      // Only attempt to install a new thunk handler if we were installing a new guest action
      if (!InstallHostThunk(Signal)) {
        UpdateHostThunk(Signal);
-@@ -1286,6 +1706,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+@@ -1286,6 +1729,13 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
      }
  
      ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);
@@ -3292,7 +3324,7 @@ index 9e6820bf6f22ed030fcf53b53ecc437f4ee14da1..61843152c020a96fdebee84af84706cb
  
  fextl::unique_ptr<FEX::HLE::SignalDelegator>
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d5059682330 100644
+index a7a432bbd650081e4a8ed1af18a3b0650357af94..6dd0bd5c102adaf52bb24f5884eb626bad49923b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -3364,21 +3396,25 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
          ++OldArgv;
        }
        while (*OldArgv) {
-@@ -608,6 +627,13 @@ static uint64_t Clone3Handler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clo
+@@ -608,6 +627,17 @@ static uint64_t Clone3Handler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clo
  
  uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
    uint64_t flags = args->args.flags;
 +  {
 +    static const bool SigLog = getenv("TSO_ARM_SIGLOG") != nullptr;
 +    if (SigLog) {
-+      fprintf(stderr, "tso-arm siglog: pid %d: clone %#lx type %d stack %d tls %d\n", ::getpid(), static_cast<unsigned long>(flags),
-+              static_cast<int>(args->Type), args->args.stack != 0, args->args.tls != 0);
++      const auto& G = Frame->State.gregs;
++      fprintf(stderr, "tso-arm siglog: pid %d tid %d: clone %#lx type %d stack %d tls %d rip %#lx rdi %#lx rsi %#lx rdx %#lx rcx %#lx\n", ::getpid(),
++              static_cast<int>(::syscall(SYS_gettid)), static_cast<unsigned long>(flags), static_cast<int>(args->Type), args->args.stack != 0,
++              args->args.tls != 0, static_cast<unsigned long>(Frame->State.rip), static_cast<unsigned long>(G[FEXCore::X86State::REG_RDI]),
++              static_cast<unsigned long>(G[FEXCore::X86State::REG_RSI]), static_cast<unsigned long>(G[FEXCore::X86State::REG_RDX]),
++              static_cast<unsigned long>(G[FEXCore::X86State::REG_RCX]));
 +    }
 +  }
  
    if (flags & CLONE_CLEAR_SIGHAND) {
      // CLONE_CLEAR_SIGHAND was added in kernel 5.5. FEX doesn't properly support this.
-@@ -658,6 +684,28 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -658,6 +688,28 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
      return false;
    };
  
@@ -3407,7 +3443,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
    // If there are flags that can't be handled regularly then we need to hand off to the true clone handler
    if (HasUnhandledFlags(args)) {
      if (!AnyFlagsSet(flags, CLONE_THREAD)) {
-@@ -673,6 +721,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -673,6 +725,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
        args->NewStack = FEX::LinuxEmulation::Threads::AllocateStackObject();
  
        FEX::HLE::_SyscallHandler->LockBeforeFork(Frame->Thread);
@@ -3418,7 +3454,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
  
        uint64_t Result {};
        if (args->Type == TYPE_CLONE2) {
-@@ -683,6 +735,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -683,6 +739,10 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
  
        if (Result != 0) {
          // Parent
@@ -3429,7 +3465,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
          // Unlock the mutexes on both sides of the fork
          FEX::HLE::_SyscallHandler->UnlockAfterFork(Frame->Thread, false);
  
-@@ -711,6 +767,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
+@@ -711,6 +771,24 @@ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args
      // CLONE_PARENT is ignored (Implied by CLONE_THREAD)
      return FEX::HLE::ForkGuest(Thread, Frame, args);
    } else {
@@ -3454,7 +3490,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
      auto NewThread = FEX::HLE::CreateNewThread(Thread->CTX, Frame, args);
  
      // Return the new threads TID
-@@ -899,11 +973,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -899,11 +977,59 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
@@ -3519,7 +3555,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
    }
  
    // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
-@@ -962,6 +1084,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
+@@ -962,6 +1088,11 @@ void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread)
      TM.UnlockAfterFork(Thread, false);
      std::this_thread::sleep_for(std::chrono::milliseconds {10});
    };
@@ -3531,7 +3567,7 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
  }
  
  void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
-@@ -974,6 +1101,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+@@ -974,6 +1105,9 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
    } else {
      VMATracking.Mutex.unlock();
      CodeCachePatchingMutex.unlock();
@@ -3541,14 +3577,38 @@ index a7a432bbd650081e4a8ed1af18a3b0650357af94..11dba052c99b76ba4d61a17973fe6d50
    }
  
    CTX->UnlockAfterFork(LiveThread, Child);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+index d720866674c199efd0f4c170d530522f1ea4c47c..09b7678d70a5a97a838446a30b48d5d07c696947 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+@@ -36,6 +36,7 @@ $end_info$
+ 
+ #include <errno.h>
+ #include <fcntl.h>
++#include <sys/resource.h>
+ #include <stdint.h>
+ #include <type_traits>
+ #include <list>
+@@ -492,6 +493,9 @@ struct clone3_args {
+ 
+ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args);
+ 
++// tso-arm: prlimit64 with the guest's own limits on its data and address space (Passthrough.cpp); 0 or -errno
++uint64_t GuestPrlimit(pid_t Pid, int Resource, const struct rlimit* New, struct rlimit* Old);
++
+ inline static int RemapFromX86Flags(int flags) {
+ #ifdef ARCHITECTURE_x86_64
+   // Nothing to change here
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
-index 11ff1635f96b69cd1f73229300645a88623831bc..8c78465ee765aeb48591d6654915eacfd65d7702 100644
+index 11ff1635f96b69cd1f73229300645a88623831bc..ae19b72bd661f8ee3255089df8a5d13896163d33 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
-@@ -11,9 +11,35 @@ $end_info$
+@@ -11,9 +11,99 @@ $end_info$
  #include "LinuxSyscalls/x32/Syscalls.h"
  
  #include <stdint.h>
++#include <sys/resource.h>
++#include <atomic>
 +#include <linux/nsfs.h>
 +#include <sched.h>
  #include <sys/epoll.h>
@@ -3559,6 +3619,68 @@ index 11ff1635f96b69cd1f73229300645a88623831bc..8c78465ee765aeb48591d6654915eacf
 +#include <unistd.h>
  
  namespace FEX::HLE {
++// tso-arm: the guest's limits on its data and its address space (RLIMIT_DATA, RLIMIT_AS) for its own process are its
++// own: kept here and given back by getrlimit and prlimit64, not set on the host, where they would count FEX's memory
++// as well. A thread's lookup cache and heap are some 400 MB of private writable mappings, a process starts with some
++// 3.6 GB of them. Chromium limits its renderers' and GPU process's data to 8 GB: Slack's renderer reached that after a
++// few threads, the mapping of the next thread's lookup cache failed (unchecked in a release build), and that thread
++// ran with its L1 cache at -1 plus 256 MB: jumps to 0x10003f07 and the like, faults inside FEX, every thread then
++// waiting for a lock. Other resources, and other processes' limits, go to the host as they are. A fork's child keeps
++// the guest's values (they live in its memory); the program an execve starts begins with the host's.
++namespace {
++  struct GuestLimit {
++    std::atomic<bool> Set {};
++    std::atomic<uint64_t> Cur {}, Max {};
++  };
++  GuestLimit GuestLimits[2];
++
++  GuestLimit* GuestLimitFor(pid_t Pid, int Resource) {
++    if (Pid != 0 && Pid != ::getpid()) {
++      return nullptr;
++    }
++    return Resource == RLIMIT_DATA ? &GuestLimits[0] : Resource == RLIMIT_AS ? &GuestLimits[1] : nullptr;
++  }
++} // namespace
++
++uint64_t GuestPrlimit(pid_t Pid, int Resource, const struct rlimit* New, struct rlimit* Old) {
++  auto* L = GuestLimitFor(Pid, Resource);
++  if (!L) {
++    uint64_t Result = ::syscall(SYSCALL_DEF(prlimit_64), Pid, Resource, New, Old);
++    SYSCALL_ERRNO();
++  }
++  FaultSafeUserMemAccess::VerifyIsReadableOrNull(New, sizeof(*New));
++  FaultSafeUserMemAccess::VerifyIsWritableOrNull(Old, sizeof(*Old));
++  struct rlimit Current {};
++  if (L->Set.load(std::memory_order_acquire)) {
++    Current.rlim_cur = L->Cur.load(std::memory_order_relaxed);
++    Current.rlim_max = L->Max.load(std::memory_order_relaxed);
++  } else if (::getrlimit(Resource, &Current) != 0) {
++    return -errno;
++  }
++  struct rlimit Want {};
++  if (New) {
++    Want = *New;
++    if (Want.rlim_cur > Want.rlim_max) {
++      return -EINVAL;
++    }
++    // a hard limit goes up only with CAP_SYS_RESOURCE (root, as far as this can tell)
++    if (Want.rlim_max > Current.rlim_max && ::geteuid() != 0) {
++      return -EPERM;
++    }
++  }
++  if (Old) {
++    *Old = Current;
++  }
++  if (New) {
++    L->Cur.store(Want.rlim_cur, std::memory_order_relaxed);
++    L->Max.store(Want.rlim_max, std::memory_order_relaxed);
++    L->Set.store(true, std::memory_order_release);
++  }
++  return 0;
++}
++} // namespace FEX::HLE
++
++namespace FEX::HLE {
 +// tso-arm: before a system call that needs the process to have one thread (unshare and setns into a user namespace):
 +// where the guest has one, the disk cache's writer ends (CTX->PauseDiskCache) and the call waits until the kernel has
 +// let it go from the thread group (its exit goes on after the join: /proc/self/task, read on the host, lists the
@@ -3581,7 +3703,7 @@ index 11ff1635f96b69cd1f73229300645a88623831bc..8c78465ee765aeb48591d6654915eacf
  #ifdef ARCHITECTURE_arm64
  template<int syscall_num>
  requires (syscall_num != -1)
-@@ -323,7 +349,6 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+@@ -323,7 +413,6 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
    REGISTER_SYSCALL_IMPL(linkat, SyscallPassthrough5<SYSCALL_DEF(linkat)>);
    REGISTER_SYSCALL_IMPL(symlinkat, SyscallPassthrough3<SYSCALL_DEF(symlinkat)>);
    REGISTER_SYSCALL_IMPL(fchmodat, SyscallPassthrough3<SYSCALL_DEF(fchmodat)>);
@@ -3589,7 +3711,13 @@ index 11ff1635f96b69cd1f73229300645a88623831bc..8c78465ee765aeb48591d6654915eacf
    REGISTER_SYSCALL_IMPL(splice, SyscallPassthrough6<SYSCALL_DEF(splice)>);
    REGISTER_SYSCALL_IMPL(tee, SyscallPassthrough4<SYSCALL_DEF(tee)>);
    REGISTER_SYSCALL_IMPL(move_pages, SyscallPassthrough6<SYSCALL_DEF(move_pages)>);
-@@ -338,7 +363,26 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+@@ -334,11 +423,31 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL(inotify_init1, SyscallPassthrough1<SYSCALL_DEF(inotify_init1)>);
+   REGISTER_SYSCALL_IMPL(fanotify_init, SyscallPassthrough2<SYSCALL_DEF(fanotify_init)>);
+   REGISTER_SYSCALL_IMPL(fanotify_mark, SyscallPassthrough5<SYSCALL_DEF(fanotify_mark)>);
+-  REGISTER_SYSCALL_IMPL(prlimit_64, SyscallPassthrough4<SYSCALL_DEF(prlimit_64)>);
++  REGISTER_SYSCALL_IMPL(prlimit_64, [](FEXCore::Core::CpuStateFrame* Frame, pid_t pid, int resource, const struct rlimit* new_limit,
++                                       struct rlimit* old_limit) -> uint64_t { return GuestPrlimit(pid, resource, new_limit, old_limit); });
    REGISTER_SYSCALL_IMPL(name_to_handle_at, SyscallPassthrough5<SYSCALL_DEF(name_to_handle_at)>);
    REGISTER_SYSCALL_IMPL(open_by_handle_at, SyscallPassthrough3<SYSCALL_DEF(open_by_handle_at)>);
    REGISTER_SYSCALL_IMPL(syncfs, SyscallPassthrough1<SYSCALL_DEF(syncfs)>);
@@ -3617,6 +3745,28 @@ index 11ff1635f96b69cd1f73229300645a88623831bc..8c78465ee765aeb48591d6654915eacf
    REGISTER_SYSCALL_IMPL(getcpu, SyscallPassthrough3<SYSCALL_DEF(getcpu)>);
    REGISTER_SYSCALL_IMPL(kcmp, SyscallPassthrough5<SYSCALL_DEF(kcmp)>);
    REGISTER_SYSCALL_IMPL(sched_setattr, SyscallPassthrough3<SYSCALL_DEF(sched_setattr)>);
+@@ -433,7 +542,9 @@ namespace x64 {
+     REGISTER_SYSCALL_IMPL_X64(getsockopt, SyscallPassthrough5<SYSCALL_DEF(getsockopt)>);
+     REGISTER_SYSCALL_IMPL_X64(wait4, SyscallPassthrough4<SYSCALL_DEF(wait4)>);
+     REGISTER_SYSCALL_IMPL_X64(semop, SyscallPassthrough3<SYSCALL_DEF(semop)>);
+-    REGISTER_SYSCALL_IMPL_X64(getrlimit, SyscallPassthrough2<SYSCALL_DEF(getrlimit)>);
++    REGISTER_SYSCALL_IMPL_X64(getrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, struct rlimit* rlim) -> uint64_t {
++      return GuestPrlimit(0, resource, nullptr, rlim);
++    });
+     REGISTER_SYSCALL_IMPL_X64(getrusage, SyscallPassthrough2<SYSCALL_DEF(getrusage)>);
+     REGISTER_SYSCALL_IMPL_X64(sysinfo, SyscallPassthrough1<SYSCALL_DEF(sysinfo)>);
+     REGISTER_SYSCALL_IMPL_X64(times, SyscallPassthrough1<SYSCALL_DEF(times)>);
+@@ -443,7 +554,9 @@ namespace x64 {
+     REGISTER_SYSCALL_IMPL_X64(mlockall, SyscallPassthrough1<SYSCALL_DEF(mlockall)>);
+     REGISTER_SYSCALL_IMPL_X64(munlockall, SyscallPassthrough0<SYSCALL_DEF(munlockall)>);
+     REGISTER_SYSCALL_IMPL_X64(adjtimex, SyscallPassthrough1<SYSCALL_DEF(adjtimex)>);
+-    REGISTER_SYSCALL_IMPL_X64(setrlimit, SyscallPassthrough2<SYSCALL_DEF(setrlimit)>);
++    REGISTER_SYSCALL_IMPL_X64(setrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, const struct rlimit* rlim) -> uint64_t {
++      return GuestPrlimit(0, resource, rlim, nullptr);
++    });
+     REGISTER_SYSCALL_IMPL_X64(settimeofday, SyscallPassthrough2<SYSCALL_DEF(settimeofday)>);
+     REGISTER_SYSCALL_IMPL_X64(readahead, SyscallPassthrough3<SYSCALL_DEF(readahead)>);
+     REGISTER_SYSCALL_IMPL_X64(futex, SyscallPassthrough6<SYSCALL_DEF(futex)>);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
 index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..1d039129e298ac61f025baf5b81a187cc792fd9f 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
@@ -6836,6 +6986,53 @@ index 0f6ce00296dcbe12f4ecf34da7235b36f3e311ee..edfce6491023f6bd872f9c531b256a7b
  /**
   * @brief Registers thread creation handlers with FEXCore.
   */
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Info.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Info.cpp
+index 899de9b62067494922d7c91f1ba9a5e1b7c26220..6e73c1828295242cee459032fbf26b9bc52c4526 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Info.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Info.cpp
+@@ -98,23 +98,25 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL_X32(
+     getrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, compat_ptr<FEX::HLE::x32::rlimit32<true>> rlim) -> uint64_t {
+       struct rlimit rlim64 {};
+-      uint64_t Result = ::getrlimit(resource, &rlim64);
+-      if (Result != -1) {
++      // tso-arm: the guest's own limits on its data and address space (GuestPrlimit)
++      uint64_t Result = FEX::HLE::GuestPrlimit(0, resource, nullptr, &rlim64);
++      if (Result == 0) {
+         FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
+         *rlim = rlim64;
+       }
+-      SYSCALL_ERRNO();
++      return Result;
+     });
+ 
+   REGISTER_SYSCALL_IMPL_X32(
+     ugetrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, compat_ptr<FEX::HLE::x32::rlimit32<false>> rlim) -> uint64_t {
+       struct rlimit rlim64 {};
+-      uint64_t Result = ::getrlimit(resource, &rlim64);
+-      if (Result != -1) {
++      // tso-arm: the guest's own limits on its data and address space (GuestPrlimit)
++      uint64_t Result = FEX::HLE::GuestPrlimit(0, resource, nullptr, &rlim64);
++      if (Result == 0) {
+         FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
+         *rlim = rlim64;
+       }
+-      SYSCALL_ERRNO();
++      return Result;
+     });
+ 
+   REGISTER_SYSCALL_IMPL_X32(
+@@ -122,8 +124,8 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
+       struct rlimit rlim64 {};
+       FaultSafeUserMemAccess::VerifyIsReadable(rlim, sizeof(*rlim));
+       rlim64 = *rlim;
+-      uint64_t Result = ::setrlimit(resource, &rlim64);
+-      SYSCALL_ERRNO();
++      // tso-arm: the guest's own limits on its data and address space (GuestPrlimit)
++      return FEX::HLE::GuestPrlimit(0, resource, &rlim64, nullptr);
+     });
+ 
+   REGISTER_SYSCALL_IMPL_X32(sysinfo, [](FEXCore::Core::CpuStateFrame* Frame, struct sysinfo32* info) -> uint64_t {
 diff --git a/Source/Tools/LinuxEmulation/Thunks.cpp b/Source/Tools/LinuxEmulation/Thunks.cpp
 index 9c018bc46143c93f1083300592ac64be7de67478..0273f3d17dcbf8ba18c8ac2c721ef168b5a51262 100644
 --- a/Source/Tools/LinuxEmulation/Thunks.cpp
