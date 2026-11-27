@@ -1,5 +1,13 @@
 # Changes
 
+## Unreleased
+
+- **FEX's disk cache keeps a database for each program.** Every start read the whole index of the one database all
+  programs shared, and what one program stored made every other's start slower: after two runs of Chrome's headless
+  shell `python3 -c 0` took 125 instead of 90 ms, and with the cache a release check left (1 GB) about as long as
+  without any cache. Each program has its own now, with the libraries it maps; `TSO_DISKCACHE_SHARED=1` keeps one for
+  all (notes section 71).
+
 ## 0.4.14 (2026-11-27)
 
 32-bit programs can run under the page protocol (`TSO_ARM_32_VIEWS=1`), and 64-bit programs are faster with string

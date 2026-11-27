@@ -3414,3 +3414,33 @@ literal, in 32-bit code: `mov %gs:0x14, %eax`, `mov %eax, %gs:0x224` (i386 glibc
 (`FLAGS_MEM_OFFSET`) now, and none is learned anymore: the second thread's first block, `start_thread` with its
 `%gs` accesses, raced the main thread for learning them, which is why only some runs met it. With both changes 0 of
 1,000 runs on the Pi failed, 0 kinds learned.
+
+## 71. A disk cache database for each program (2026-11-27)
+
+After the release check of 0.4.14 on the Pi (Chrome's headless shell, Slack, vulkaninfo, the tests) `python3 -c 0`
+took 250 to 305 ms with the disk cache, 105 ms right after the check had begun, 325 ms without the cache: the cache
+had grown to 1 GB and cost a start more than it saved. FEX keeps one database for each configuration
+(`RWCacheDB_<hash of the configuration>`, beside it its index), shared by every program, and each start reads the
+whole index into a map (`PopulateIndex`). An empty cache of its own, the development FEX, best and worst of three:
+
+| | `python3 -c 0` | cache |
+|---|---|---|
+| without the cache | 316 to 326 ms | |
+| cache from python3 alone | 88 to 103 ms | 9 MB |
+| shared, after two runs of Chrome's headless shell | 120 to 130 ms | 198 MB |
+| shared, as the release check left it | 284 to 307 ms | 1 GB |
+| one database for each program, after the same two runs of Chrome | 88 to 102 ms | 9 MB + 190 MB |
+
+About 0.18 ms a start for each MB, whatever program stored it. Chrome alone stores some 100 MB a run, and its second
+run misses as often as its first: 116,508 lookups of code from its file, 101,893 misses. A child after `fork` reads
+the cache but does not write it (section 62: it shares its parent's descriptors and their file locks), and Chrome's
+renderers are forks of its zygote; and the misses of consecutive runs are other entry addresses each time (none of
+the fourth run's 31,741 missed in the third), which fits a multiblock unit being stored under the address it was
+entered by, not looked into further yet. Chrome renders the page in 5.9 instead of 6.1 s with its cache warm.
+
+FEX names the database by the program's path as well now (`CONFIG_APP_FILENAME`, which FEX sets for every program it
+starts, also after `execve`): `RWCacheDB_<configuration>_<program>`, the libraries a program maps in its own. A
+program's start reads only what it stored itself; what Chrome stores costs only Chrome's start (some 180 ms at the
+size limit of 1 GB against its 6 s). `TSO_DISKCACHE_SHARED=1` keeps one database for all, as FEX has it. The CI runs
+two programs with an empty cache: two databases, the second runs of both missing 10 of 614 blocks of the first.
+Open: Chromium's renderers, which never store their code.

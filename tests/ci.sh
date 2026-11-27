@@ -227,6 +227,27 @@ for m in tso full; do
     ok "$m: $(echo "$out" | tail -n 1)"
 done
 
+# FEX's disk cache has a database for each program: two programs, two databases (one shared by every program made
+# each start slower by what all the others had stored, Chromium's hundred MB a run), and a second run of each finds
+# its code there; TSO_DISKCACHE_SHARED=1 keeps one for all
+dc=$(mktemp -d)
+for r in first second; do
+    for p in x87 filemap; do
+        out=$(FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$dc/ FEX_DISKCACHEFILEMAPPING=0 TSO_DISKCACHE_LOG=1 timeout 60 $T run $B/$p 2>>$dc/$r) ||
+            fail "disk cache per program, $p, $r run: $out"
+    done
+done
+dbs=$(find $dc -name 'RWCacheDB_*_*.foz' ! -name '*_idx.foz' | wc -l)
+first=$(grep -c '^dc miss' $dc/first)
+misses=$(grep -c '^dc miss' $dc/second)
+FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$dc/shared/ TSO_DISKCACHE_SHARED=1 $T run $B/x87 >/dev/null 2>&1
+FEX_DISKCACHE=1 FEX_DISKCACHEPATH=$dc/shared/ TSO_DISKCACHE_SHARED=1 $T run $B/filemap >/dev/null 2>&1
+shared=$(find $dc/shared -name 'RWCacheDB_*.foz' ! -name '*_idx.foz' | wc -l)
+rm -rf "$dc"
+[ "$dbs" = 2 ] && [ "$shared" = 1 ] && [ $((misses * 10)) -lt "$first" ] ||
+    fail "disk cache per program: $dbs databases for two programs, $shared shared, misses $first in the first runs, $misses in the second"
+ok "disk cache: a database for each of two programs, misses $first in their first runs, $misses in the second; one shared with TSO_DISKCACHE_SHARED=1"
+
 # posix_spawn (clone with CLONE_VM | CLONE_VFORK) while other threads translate code: the child as a vfork, FEX's
 # locks and maps in the parent whole (Slack's renderer hung on them)
 for m in tso full; do

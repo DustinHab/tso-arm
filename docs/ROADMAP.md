@@ -289,3 +289,9 @@ before `exit_group` and `execve` (at nice 19 it starved beside busy programs and
 relocation filter knows a program's image extent with the disk cache too (it dropped every block that addressed its own
 data). A static program that ends at once starts in 6.5 ms instead of 16, zstd on a small input in 19 instead of 59,
 `python3 -c 0` in 0.095 s. The Debian package and `tools/get.sh` set it up as `tso-arm run` does.
+
+Since (notes section 71): a database for each program. Each start reads its database's whole index, and in the one
+FEX shares between all programs of a configuration Chromium's code (some 100 MB a run, its forked renderers never
+write theirs and miss again) made every other program start slower: `python3 -c 0` 125 instead of 90 ms after two
+runs of Chrome's headless shell, about as slow as without the cache after a release check (1 GB). Open: Chromium's
+own misses.
