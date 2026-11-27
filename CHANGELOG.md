@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.13 (2026-11-27)
+
+Chromium and Electron programs run in their own sandbox: `tso-arm app run` drops `--no-sandbox` where user
+namespaces are allowed. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **Chromium's and Electron's own sandbox.** `tso-arm app run` starts Discord, Edge, Signal, Slack, Spotify and other
   Chromium or Electron programs in their sandbox where user namespaces are allowed (on Ubuntu after
