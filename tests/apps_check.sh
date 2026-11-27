@@ -24,7 +24,7 @@ O=$R/build/apps
 rm -rf "$O"
 mkdir -p "$O"
 min=${APPS_MINUTES:-5}
-[ $# -gt 0 ] || set -- discord spotify slack signal zoom edge
+[ $# -gt 0 ] || set -- discord spotify slack signal zoom edge chrome
 say() { echo "apps_check: $*"; }
 
 D=:${APPS_DISPLAY:-98}

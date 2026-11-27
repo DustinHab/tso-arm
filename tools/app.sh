@@ -1,13 +1,13 @@
 #!/bin/sh
-# x86 programs from their makers' Debian packages (what 'tso-arm app' runs): Discord, Spotify, Slack, Signal, Zoom,
-# Microsoft Edge and others that have no Arm build for Linux. The package's files go into the root file system of
+# x86 programs from their makers' Debian packages (what 'tso-arm app' runs): Google Chrome, Discord, Spotify, Slack,
+# Signal, Zoom, Microsoft Edge and others that have no Arm build for Linux. The package's files go into the root file system of
 # 'tso-arm rootfs', where FEX lays them over / for x86 programs, so the absolute paths a program uses (/opt/zoom,
 # /usr/lib/slack) are there; files the root file system has already are never replaced, and every file added is
 # listed for 'remove'. The libraries the package depends on that the root file system lacks come from Ubuntu 24.04's
 # archive (the root file system's distribution), checked against its index and that against its signed InRelease. A
 # menu entry starts the program through tso-arm. The package's own install scripts do not run.
-#   tools/app.sh install NAME | PACKAGE.deb | https://URL   install (again): one it knows by name (discord, edge,
-#                                         signal, slack, spotify, zoom: from their makers), a package file or an address
+#   tools/app.sh install NAME | PACKAGE.deb | https://URL   install (again): one it knows by name (chrome, discord,
+#                                         edge, signal, slack, spotify, zoom: from their makers), a package file or an address
 #   tools/app.sh list                                 what is installed so
 #   tools/app.sh run NAME [ARGS...]                   start one, as its menu entry does
 #   tools/app.sh remove NAME                          remove one, its menu entries and the libraries only it needed
@@ -231,6 +231,7 @@ catalog() {
     slack) echo "index https://packagecloud.io/slacktechnologies/slack/debian jessie/main slack-desktop" ;;
     signal) echo "index https://updates.signal.org/desktop/apt xenial/main signal-desktop" ;;
     edge | microsoft-edge) echo "index https://packages.microsoft.com/repos/edge stable/main microsoft-edge-stable" ;;
+    chrome | google-chrome) echo "index https://dl.google.com/linux/chrome/deb stable/main google-chrome-stable" ;;
     *) return 1 ;;
     esac
 }
@@ -281,7 +282,7 @@ fetch_libraries() { # DEPENDS
 }
 
 cmd_install() {
-    [ $# -ge 1 ] || die "usage: tso-arm app install NAME | PACKAGE.deb | https://URL (names: discord, edge, signal, slack, spotify, zoom)"
+    [ $# -ge 1 ] || die "usage: tso-arm app install NAME | PACKAGE.deb | https://URL (names: chrome, discord, edge, signal, slack, spotify, zoom)"
     rfs=$(rootfs_dir)
     [ -w "$rfs/usr" ] || die "the root file system $rfs is not writable for you (installed for every user?): 'tso-arm rootfs' fetches one of your own"
     mkdir -p "$D"

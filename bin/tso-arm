@@ -63,7 +63,7 @@ usage: tso-arm COMMAND [...]
         ~/.local/share/tso-arm/steam on first use, started with the settings it needs under FEX; needs the root
         file system ('tso-arm rootfs') and user namespaces ('tso-arm userns')
   app [install NAME | install PACKAGE.deb | install https://URL | list | run NAME [ARGS...] | remove NAME]
-        an x86 program from its maker's Debian package (by name: discord, edge, signal, slack, spotify, zoom):
+        an x86 program from its maker's Debian package (by name: chrome, discord, edge, signal, slack, spotify, zoom):
         its files into the root file system ('tso-arm rootfs'), the libraries it needs that the root file system
         lacks from Ubuntu 24.04's archive, and a menu entry that starts it through tso-arm
   version               this version and the FEX it uses

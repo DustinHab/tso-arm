@@ -175,7 +175,7 @@ report it if that helps.
 
 ```sh
 tso-arm rootfs                  # once, if not done yet
-tso-arm app install spotify     # by name: discord, edge, signal, slack, spotify, zoom
+tso-arm app install spotify     # by name: chrome, discord, edge, signal, slack, spotify, zoom
 tso-arm app install ./some-program_amd64.deb    # or any x86 Debian package, a file or an https address
 tso-arm app list                # what is installed so
 tso-arm app run spotify         # or its entry in the desktop's menu
