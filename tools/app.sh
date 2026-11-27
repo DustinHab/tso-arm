@@ -415,7 +415,7 @@ cmd_install() {
                     : >"$LIB/$lp.new"
                     fetch_ubuntu "$lp" "$idx" "$rfs" "$LIB/$lp.new"
                     mv "$LIB/$lp.new" "$LIB/$lp"
-        [ -f "$LIB/$lp.new.dirs" ] && mv "$LIB/$lp.new.dirs" "$LIB/$lp.dirs"
+                    [ -f "$LIB/$lp.new.dirs" ] && mv "$LIB/$lp.new.dirs" "$LIB/$lp.dirs"
                 fi
                 ld=$(awk -v p="$lp" '$1 == p { print $4; exit }' "$idx")
                 [ -n "$ld" ] && fetch_libraries "$ld"
@@ -493,6 +493,11 @@ cmd_remove() {
         fi
     fi
     while read -r de; do rm -f "$de"; done <"$D/$app/desktop" 2>/dev/null || true
+    # the menu's list of which entry opens which kind of file, without the removed ones
+    apps=${TSO_ARM_APPS_MENU:-$DATA/applications}
+    if [ -s "$D/$app/desktop" ] && [ -d "$apps" ] && command -v update-desktop-database >/dev/null; then
+        update-desktop-database "$apps" 2>/dev/null || true
+    fi
     rm -rf "${D:?}/$app"
     say "removed $app ($rn files)"
 }

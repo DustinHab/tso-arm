@@ -13,7 +13,8 @@
 # Into build/apps: summary.md (each program: its version, the install's seconds, the second of its first window and
 # its title), and per program NAME/: install.txt, console.txt, windows-SSSS.txt and shot-SSSS.png every 20 seconds,
 # window.png at the first window, ps-N.txt (its processes at the end of start N), logs/ (the log files it wrote under
-# ~/.config while it ran).
+# ~/.config while it ran); for one that drew nothing threads-N.txt (each thread's state and CPU time) and, started with
+# APPS_ARGS=--remote-debugging-port=PORT, cdp-N/ (its pages: address, how far loaded, text, screenshot; tests/cdp.py).
 set -e
 cd "$(dirname "$0")/.."
 R=$PWD
@@ -126,8 +127,23 @@ for n in "$@"; do
             }
             sleep 5
         done
-        # which of its processes still run (a renderer or GPU process gone shows here)
-        ps -eo pid,ppid,sid,stat,etime,rss,args 2>/dev/null | awk -v s=$pid 'NR == 1 || $3 == s' | cut -c1-400 >"$P/ps-$attempt.txt" || true
+        # which of its processes still run (a renderer or GPU process gone shows here), and each one's threads: name,
+        # state, where in the kernel it waits, its CPU time (ticks); one that spins shows a large and growing time
+        ps -eo pid,ppid,sid,stat,etime,time,rss,args 2>/dev/null | awk -v s=$pid 'NR == 1 || $3 == s' | cut -c1-400 >"$P/ps-$attempt.txt" || true
+        if [ -z "$drawn" ]; then
+            for p in $(ps -eo pid,sid 2>/dev/null | awk -v s=$pid '$2 == s { print $1 }'); do
+                echo "== $p $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-200)"
+                for t in /proc/"$p"/task/*; do
+                    ts=$(sed 's/^.*) //' "$t/stat" 2>/dev/null) || continue
+                    echo "$(basename "$t") $(cat "$t/comm" 2>/dev/null) $(echo "$ts" | awk '{ print $1, $12 + $13 }') $(cat "$t/wchan" 2>/dev/null)"
+                done
+            done >"$P/threads-$attempt.txt" 2>&1 || true
+            # a Chromium or Electron program started with --remote-debugging-port=N: what its pages show (tests/cdp.py)
+            cport=$(echo " ${APPS_ARGS:-} " | sed -n 's/.* --remote-debugging-port=\([0-9]*\) .*/\1/p')
+            if [ -n "$cport" ]; then
+                timeout 120 python3 "$R/tests/cdp.py" "$cport" "$P/cdp-$attempt" >>"$P/console.txt" 2>&1 || true
+            fi
+        fi
         kill -TERM -- -$pid 2>/dev/null || true
         pkill -TERM -s $pid 2>/dev/null || true
         sleep 3
