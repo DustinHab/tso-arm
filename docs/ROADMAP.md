@@ -15,7 +15,7 @@ done.
 | 5 | Installing for every user, in one line, and updating | done (0.4.4) |
 | 6 | Containers: `docker run --platform linux/amd64` | done (0.4.5), 64-bit and 32-bit programs |
 | 7 | Windows programs through Wine, AppImages, programs with a window: tested | done (0.4.4): `tso-arm wine`, three faults fixed |
-| 8 | The page protocol for 32-bit programs | open |
+| 8 | The page protocol for 32-bit programs | done, not on by default: no faster on the whole (`TSO_ARM_32_VIEWS=1`) |
 | 9 | A guide for users: what runs, what to do when something does not | done (0.4.4): `docs/GUIDE.md`, `tso-arm report` |
 | 10 | Rebase onto FEX's newest commit (the stage 3 patch conflicts in `SignalDelegator.cpp` there) | done (0.4.5): FEX 8e980598 |
 | 11 | The page protocol for Wine: explorer.exe children left waiting on a `pthread_once` of Wine's win32u | done (0.4.5): `tso-arm wine` under the page protocol |
@@ -171,6 +171,16 @@ trap in Chromium (section 64).
 
 32-bit programs run with FEX's full ordering (item 1). The views would need 4 GB windows per thread instead of 16 GB
 and the translated code's 32-bit addresses based on them.
+
+Done (notes section 70): no windows of 4 GB were needed, a 32-bit address space is the window's first 4 GB. A 32-bit
+guest's memory goes through the views, placed below 4 GB, with the views set up before FEX takes the address space
+above 4 GB for itself; the translation's parts that were for 64-bit guests only are for both. Correct (litmus,
+threads, Ubuntu 22.04's 32-bit programs, the Steam client and Wine on GitHub's runners), and on the whole no faster
+than FEX's full ordering for the efficiency table's workloads built as 32-bit programs (53 to 61 % against 58 %), nor
+steady from run to run: `TSO_ARM_32_VIEWS=1` gives a 32-bit program the protocol, the default stays full ordering.
+Two causes found on the way are fixed for 64-bit programs too: string operations through the ordered view (a copy to
+shared memory faulted at every 32 bytes) and a thread's own stack pages coming back to it (the thread descriptor its
+creator writes shared the stack's top page).
 
 ## 9. A guide for users
 

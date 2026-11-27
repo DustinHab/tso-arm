@@ -1,9 +1,9 @@
 #!/bin/sh
 # Where the base cost of the views goes: instructions and cycles (user mode) of one workload, everything plain
 # (TSO off), from upstream FEX to the full view machinery, one piece added at a time.
-#   bench/perf_views.sh [xz|zstd|pigz]
+#   bench/perf_views.sh [xz|zstd|pigz]      (X: the x86 builds, default build/x86; FEXV: the tso-arm FEX)
 cd "$(dirname "$0")/.."
-X=$PWD/build/x86
+X=${X:-$PWD/build/x86}
 C=$PWD/build
 w=${1:-xz}
 case $w in
@@ -16,7 +16,7 @@ sh tools/freq.sh fix 1800000 >/dev/null
 EV=instructions:u,cycles:u,L1-dcache-load-misses:u,dTLB-load-misses:u
 V="TSO_VIEWS=1 TSO_VIEWS_STAGE1=1 FEX_TSOENABLED=0"
 for cfg in off shared shared+exact arith arith+exact views+exact; do
-    bin=$HOME/opt/fex-views/bin/FEX
+    bin=${FEXV:-$HOME/opt/fex-views/bin/FEX}
     case $cfg in
     off) vars="FEX_TSOENABLED=0" bin=$HOME/opt/fex/bin/FEX ;;
     # shared memory and x24 taken from the register allocator, no rewriting

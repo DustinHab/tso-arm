@@ -89,7 +89,8 @@ tso-arm run ./program args...   # an x86 program, as it would run on an x86 comp
   libraries of Ubuntu 24.04, among them X11, Wayland, OpenGL, Vulkan, SDL, GTK and Qt libraries. Installed for every
   user, `sudo tso-arm rootfs` fetches one for all of them.
 - **AppImages** run as they are: `tso-arm run ./App.AppImage`.
-- **32-bit programs** run too, a little slower than 64-bit ones (every memory access is ordered for them).
+- **32-bit programs** run too, a little slower than 64-bit ones (every memory access is ordered for them;
+  `TSO_ARM_32_VIEWS=1` tries the page protocol on one, which is no faster on the whole yet).
 - **Chromium and programs built on it** (Electron programs, Steam's windows) run as well: Google's headless Chrome
   renders pages under tso-arm in all modes. They reserve more memory than the page protocol's window holds and run
   with FEX's full ordering, which tso-arm switches to by itself at their start (and from the first start on after

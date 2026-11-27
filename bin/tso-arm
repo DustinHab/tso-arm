@@ -510,11 +510,12 @@ cmd_run() {
     k=${info#* }
     k=${k%% *}
     [ "$m" = other ] || [ "$k" = other ] && die "$prog is not an x86 Linux program (x86-64 or 32-bit x86)"
-    # 32-bit programs: the page protocol as for x86-64 ones, their memory placed below 4 GB; 'learn' translates x86-64
-    # code only. TSO_ARM_32_VIEWS=0: FEX orders every access of a 32-bit program itself, as --mode full
+    # 32-bit programs: FEX orders every access of a 32-bit program itself (correct, as --mode full); 'learn' translates
+    # x86-64 code only. TSO_ARM_32_VIEWS=1: the page protocol as for x86-64 programs, their memory placed below 4 GB
+    # (correct, not faster yet on the whole: notes section 70)
     if [ "$m" = i386 ]; then
         aot=/dev/null/none
-        if [ "$mode" = tso ] && [ "${TSO_ARM_32_VIEWS:-1}" = 0 ]; then
+        if [ "$mode" = tso ] && [ "${TSO_ARM_32_VIEWS:-0}" != 1 ]; then
             mode=full
         fi
     fi

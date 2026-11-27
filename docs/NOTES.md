@@ -3319,3 +3319,71 @@ flood of synchronous signals' numbers that never stops, the thread spends nearly
 (the frames, the interrupt page, the guest's frame and its sigreturn); where that time goes is not measured yet.
 No program is known to send so; profilers use SIGPROF, which is blocked on the host as any other signal and costs what
 a signal costs under FEX. `sigdefer` is not in the CI. `sigsync` without pauses: 90 of 90 on the Pi in the three modes.
+
+## 70. The page protocol for 32-bit programs (2026-11-27)
+
+32-bit programs ran with FEX's full ordering (ROADMAP item 8). The views' layout holds them as it is: guest memory
+lies in [0, 16 GB) and a thread's view at its slot's base plus the guest address, so a 32-bit address space is the
+window's first 4 GB; no windows of 4 GB were needed. What was missing:
+
+- **Memory.** A 32-bit guest's mappings went to FEX's allocator for them, in no view, and `munmap`, `mremap` and
+  `shmat` left the views out for 32-bit guests. They go through the views now, placed in [64 KB, 0xFFFFE000)
+  (`SetGuest32`; `ChooseAddress` with a floor and a ceiling), and nothing is made outside the window for them. A
+  64-bit guest's `MAP_32BIT` memory (LuaJIT, older Mono) goes through the views as well, below 2 GB; before, it was
+  in no view either.
+- **Order of the start.** FEX takes the address space above 4 GB for its own memory in 32-bit mode
+  (`InitMemoryRegions`, `SetupHooks`: what is free there becomes its allocator's), which left no room for the views'
+  reservations. A 32-bit guest's views are set up before that now (FEXInterpreter), and their reservations stay
+  theirs.
+- **The host's memory below 4 GB.** What the kernel places for the host after that (a jemalloc arena) lands at the
+  top of the 4 GB, where the views place guest memory too. They learned it one failed attempt at a time and gave up
+  after 64: the loader's vsyscall page came back as ENOMEM, and FEX wrote through the error as a pointer. At the
+  first collision the views read `/proc/self/maps` now and keep every mapping they do not know as taken
+  (`LearnHostMappings`).
+- **Translation.** The pass, the backend's stack and string operations, the escalation decisions and exact starts
+  were for 64-bit guests only, and r24 (the view base) was in the 32-bit register allocation; all of them now for
+  both. In 32-bit mode FEX computes every address into a register (Arm's register-plus-register addressing does
+  not wrap at 4 GB), so the view base rides on the access for nothing (`[x20, x24, sxtx]`): plain, the views cost
+  nothing measurable there (`bench/perf_views.sh` with the 32-bit builds: 18.91 against 18.92 G instructions for
+  pigz with the address arithmetic and without; 64-bit: 16.70 against 14.65 G).
+
+Correct from the start: the 32-bit litmus tests with no forbidden outcome, threads, Ubuntu 22.04's 32-bit programs,
+`vsyscall32`; on GitHub's runners the CI, Compat, Steam (its client is a 32-bit program) and Wine workflows. Not
+faster: the efficiency table's workloads built as static 32-bit programs (`study/build_static32.sh`, SSE2) ran at
+58 % with the protocol and its profile, as under FEX's full ordering (58 %; without any ordering 73 %). Two causes,
+both fixed for 64-bit programs as well:
+
+**String operations.** i386's C library copies and fills with `rep movs` and `rep stos`, every `memcpy`. Through the
+plain view one to shared memory faulted at every 32 bytes and was completed in the handler: the translation can
+only be left at an instruction start, so the rest of the copy went on faulting (xz: one `rep movsl` escalated 2,982
+times in one run). Escalated, it went element by element with acquire loads and release stores. With the views on, a
+string operation goes through the thread's ordered view now, where its own private pages and the shared ones are
+accessible, plain, with a full barrier on either side: x86 lets the accesses of one string operation pass each other
+(fast strings, Intel SDM 8.2.4), not those of other instructions.
+
+**The top of a thread's stack.** glibc puts a thread's descriptor at the top of its stack, beside the stack's first
+frames, and the thread's creator writes it after the clone: the page became shared, and every access of the frames
+on it was escalated. In xz's 32-bit encoder those are its locals: a stack access of `add`, `add`, `orr`, `ldapr`
+instead of one `ldr`, 34.9 G instructions instead of 21.0 G under full ordering. A thread's own stack (the mapping
+that held its stack pointer at the clone, `HandOffStack`) now comes back to it at its plain access, migrations on or
+not, unless a page changes hands quickly (`MayMigrate`); `TSO_VIEWS_OWNSTACK=0` turns it off.
+
+Results (Pi 5 at 1.8 GHz, the protocol with its profile, best of 3 rounds, `bench/efficiency.sh` with
+`X=build/x86-32`; alternating sessions, the ranges are the spread between them):
+
+| | pigz | xz | zstd | mean |
+|---|---|---|---|---|
+| 32-bit, FEX without ordering | 81 % | 68 % | 72 % | 74 % |
+| 32-bit, FEX full TSO | 58 % | 63 % | 54 % | 58 % |
+| 32-bit, protocol, before both fixes | 56 % | 62 % | 56 % | 58 % |
+| 32-bit, protocol, own stacks back | 49 to 73 % | 61 to 62 % | 50 to 52 % | 53 to 61 % |
+| 32-bit, protocol, own stacks off | 57 % | 49 % | 55 to 56 % | 53 to 54 % |
+| 64-bit, protocol, own stacks back | 79 % | 72 to 76 % | 73 to 74 % | 75 to 76 % |
+| 64-bit, protocol, own stacks off | 76 to 79 % | 73 to 74 % | 67 to 73 % | 73 to 74 % |
+
+On the whole the protocol is not faster for these 32-bit programs, and from run to run it is not steady: whether a
+first run falls back to full ordering, and what its profile keeps, changes a 32-bit program's time by a third (pigz
+1.39 or 2.03 s), and zstd's buffers moving between its threads keep it in the protocol, slower than ordered
+throughout. So 32-bit programs keep FEX's full ordering by default; `TSO_ARM_32_VIEWS=1` gives them the protocol (the
+CI runs the 32-bit litmus tests and threads both ways). 64-bit programs keep the two fixes. Open: a choice per
+program, as `tso-arm learn` makes it for the fallback of 64-bit ones.

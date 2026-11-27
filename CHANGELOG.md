@@ -1,5 +1,18 @@
 # Changes
 
+## Unreleased
+
+- **The page protocol for 32-bit programs**, with `TSO_ARM_32_VIEWS=1`: their memory through the views below 4 GB,
+  set up before FEX takes the address space above for itself, the translation's parts that were for 64-bit programs
+  only for both. Correct, and on the whole no faster than FEX's full ordering, so not on by default (notes section 70).
+- String operations (`rep movs`, `rep stos`) go through the ordered view with a barrier on either side: one to shared
+  memory faulted at every 32 bytes through the plain view, and went element by element once escalated.
+- A thread's own stack pages come back to it after its creator wrote the thread descriptor at the stack's top and so
+  shared the page with the stack's first frames (`TSO_VIEWS_OWNSTACK=0`: off).
+- A 64-bit program's `MAP_32BIT` memory goes through the views (it was in none).
+- `study/build_static32.sh`: the efficiency workloads as 32-bit programs; `bench/efficiency.sh` and
+  `bench/perf_views.sh` take another build (`X`).
+
 ## 0.4.13 (2026-11-27)
 
 Chromium and Electron programs run in their own sandbox: `tso-arm app run` drops `--no-sandbox` where user

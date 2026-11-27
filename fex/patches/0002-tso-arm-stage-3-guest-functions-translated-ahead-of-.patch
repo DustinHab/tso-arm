@@ -1,4 +1,4 @@
-From 10d390b1109e7ed6af2a9dac841995fcd77939e4 Mon Sep 17 00:00:00 2001
+From 64dfeec47532f92b220d78fc5400abaea55b3cea Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -19,7 +19,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../Source/Interface/Core/JIT/BranchOps.cpp   |   28 +
  FEXCore/Source/Interface/Core/JIT/JIT.cpp     |   26 +-
  FEXCore/Source/Interface/Core/JIT/JITClass.h  |    9 +
- .../Source/Interface/Core/JIT/MemoryOps.cpp   |    6 +-
+ .../Source/Interface/Core/JIT/MemoryOps.cpp   |   53 +-
  FEXCore/Source/Interface/Core/LookupCache.h   |    7 +
  .../Interface/Core/OpcodeDispatcher.cpp       |    6 +-
  .../Source/Interface/Core/OpcodeDispatcher.h  |   29 +
@@ -54,8 +54,8 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  107 +-
  .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  270 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
- .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1519 +++++++++++++++--
- .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  213 ++-
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1536 +++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  220 ++-
  .../LinuxSyscalls/ThreadManager.cpp           |  100 +-
  .../LinuxSyscalls/ThreadManager.h             |   67 +-
  .../LinuxSyscalls/Utils/Threads.cpp           |   21 +
@@ -66,7 +66,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 62 files changed, 5223 insertions(+), 419 deletions(-)
+ 62 files changed, 5281 insertions(+), 432 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
 index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3256edee0 100644
@@ -1121,7 +1121,7 @@ index 3a754ae2d90b8772e949c1b3c49be4188ad127eb..0b5ced69b68f65ec4573397e086d88f5
    ARMEmitter::BiDirectionalLabel* JumpTarget(IR::OrderedNodeWrapper Node) {
      auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
 diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
-index 7c1260756b33e35465f5256e8a87b309d5c29d88..8c8a567ccf5c6e2dba4d7f953874ed1863366a9f 100644
+index 7c1260756b33e35465f5256e8a87b309d5c29d88..63ca656313ff6c4bff5940b6ee2b44ed43cc3549 100644
 --- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 @@ -1520,9 +1520,9 @@ void Arm64JITCore::EmitOrderedViewAddress(ARMEmitter::Register Dst, ARMEmitter::
@@ -1137,6 +1137,105 @@ index 7c1260756b33e35465f5256e8a87b309d5c29d88..8c8a567ccf5c6e2dba4d7f953874ed18
  }
  
  DEF_OP(Push) {
+@@ -1982,8 +1982,15 @@ DEF_OP(StoreMemTSO) {
+ DEF_OP(MemSet) {
+   const auto Op = IROp->C<IR::IROp_MemSet>();
+ 
+-  // tso-arm: with views the per-instruction decision travels in the op
+-  const bool IsAtomic = ViewsOn(CTX) ? Op->IsAtomic : CTX->IsMemcpyAtomicTSOEnabled();
++  // tso-arm: with views a string operation (rep movs, rep stos) goes through the thread's ordered view, where its own
++  // private pages and the shared ones are accessible, with plain loads and stores and a full barrier on either side,
++  // escalated or not. x86 lets the accesses of one string operation pass each other (fast strings, Intel SDM 8.2.4),
++  // not those of other instructions. Through the plain view one to shared memory faulted at every 32 bytes and was
++  // completed in the handler, its translation unchanged until it ended (an instruction is not left in its middle);
++  // escalated, it went element by element with acquire loads and release stores. i386's C library copies and
++  // fills with rep movs and rep stos (notes section 70).
++  const bool Views = ViewsOn(CTX);
++  const bool IsAtomic = Views ? false : CTX->IsMemcpyAtomicTSOEnabled();
+   const auto Size = IR::OpSizeToSize(Op->Size);
+   const auto MemReg = GetReg(Op->Addr);
+   const auto Value = GetZeroableReg(Op->Value);
+@@ -2014,11 +2021,10 @@ DEF_OP(MemSet) {
+     const auto Prefix = GetReg(Op->Prefix);
+     add(TMP2, Prefix.X(), MemReg.X());
+   }
+-  if (ViewsOn(CTX)) {
++  if (Views) {
+     add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
+-    if (IsAtomic) {
+-      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
+-    }
++    orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ 
+   if (!DirectionIsInline) {
+@@ -2133,6 +2139,9 @@ DEF_OP(MemSet) {
+           setm(TMP2, TMP1, Value.X());
+           sete(TMP2, TMP1, Value.X());
+           msr(ARMEmitter::SystemRegister::NZCV, TMP3);
++          if (Views) {
++            dmb(ARMEmitter::BarrierScope::ISH);
++          }
+ 
+           MakeFinalAddress();
+           (void)Bind(&DoneInternal);
+@@ -2198,6 +2207,9 @@ DEF_OP(MemSet) {
+     (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &AgainInternal);
+ 
+     (void)Bind(&DoneInternal);
++    if (Views) {
++      dmb(ARMEmitter::BarrierScope::ISH);
++    }
+ 
+     MakeFinalAddress();
+   };
+@@ -2224,8 +2236,15 @@ DEF_OP(MemSet) {
+ DEF_OP(MemCpy) {
+   const auto Op = IROp->C<IR::IROp_MemCpy>();
+ 
+-  // tso-arm: with views the per-instruction decision travels in the op
+-  const bool IsAtomic = ViewsOn(CTX) ? Op->IsAtomic : CTX->IsMemcpyAtomicTSOEnabled();
++  // tso-arm: with views a string operation (rep movs, rep stos) goes through the thread's ordered view, where its own
++  // private pages and the shared ones are accessible, with plain loads and stores and a full barrier on either side,
++  // escalated or not. x86 lets the accesses of one string operation pass each other (fast strings, Intel SDM 8.2.4),
++  // not those of other instructions. Through the plain view one to shared memory faulted at every 32 bytes and was
++  // completed in the handler, its translation unchanged until it ended (an instruction is not left in its middle);
++  // escalated, it went element by element with acquire loads and release stores. i386's C library copies and
++  // fills with rep movs and rep stos (notes section 70).
++  const bool Views = ViewsOn(CTX);
++  const bool IsAtomic = Views ? false : CTX->IsMemcpyAtomicTSOEnabled();
+   const auto Size = IR::OpSizeToSize(Op->Size);
+   const auto MemRegDest = GetReg(Op->Dest);
+   const auto MemRegSrc = GetReg(Op->Src);
+@@ -2255,13 +2274,12 @@ DEF_OP(MemCpy) {
+   mov(TMP1, Length.X());
+   mov(TMP2, MemRegDest.X());
+   mov(TMP3, MemRegSrc.X());
+-  if (ViewsOn(CTX)) {
++  if (Views) {
+     add(ARMEmitter::Size::i64Bit, TMP2, TMP2, REG_VIEW.R());
+     add(ARMEmitter::Size::i64Bit, TMP3, TMP3, REG_VIEW.R());
+-    if (IsAtomic) {
+-      orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
+-      orr(ARMEmitter::Size::i64Bit, TMP3, TMP3, FEXCore::TSOViews::OrderedBit);
+-    }
++    orr(ARMEmitter::Size::i64Bit, TMP2, TMP2, FEXCore::TSOViews::OrderedBit);
++    orr(ARMEmitter::Size::i64Bit, TMP3, TMP3, FEXCore::TSOViews::OrderedBit);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ 
+   // TMP1 = Length
+@@ -2509,6 +2527,9 @@ DEF_OP(MemCpy) {
+     (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &AgainInternal);
+ 
+     (void)Bind(&DoneInternal);
++    if (Views) {
++      dmb(ARMEmitter::BarrierScope::ISH);
++    }
+ 
+     // Needs to use temporaries just in case of overwrite
+     mov(TMP1, MemRegDest.X());
 diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
 index 391d48560dfd7dce7ab5c92307f83c27860376c5..1ba432d5e84d25e6dba9f7c1fe748b4cfa771e47 100644
 --- a/FEXCore/Source/Interface/Core/LookupCache.h
@@ -4724,7 +4823,7 @@ index 277cd3fe299c4948f0c7ede56dabe06210fa4177..3c03f91142a26e542d60825b1950bba5
    if (!Done) {
      fprintf(stderr, "tso-arm: cannot complete the access of %#010x at pc %#lx\n", Insn, (unsigned long)PC);
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
-index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695cadc49a5 100644
+index 76be33d737559e72474c8c50006170f43d983c57..51ce8eae1d34cce06869358685b5c3594649d0f7 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.cpp
 @@ -19,6 +19,7 @@ $end_info$
@@ -6042,8 +6141,24 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
      }
    }
  
-@@ -844,17 +1530,439 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+@@ -833,6 +1519,10 @@ void TSOViewMemory::HandOffStack(uint64_t Base, uint64_t StackPointer) {
+       ROMask[P] = 0;
+     }
+   }
++  if (S > 0 && S < Slots) {
++    StackStart[S] = Start;
++    StackEnd[S] = E;
++  }
+   Apply(Start, E);
+ }
+ 
+@@ -842,19 +1532,444 @@ void TSOViewMemory::DetachThread(uint64_t Base) {
+   }
+   std::lock_guard lk(Mutex);
    const int S = Base / Window;
++  if (S > 0 && S < Slots) {
++    StackStart[S] = StackEnd[S] = 0;
++  }
    const uint16_t Bit = uint16_t(1U << S);
    VLOG("tso-arm: detach slot %d\n", S);
 -  for (uint64_t P = 0; P < Pages; ++P) {
@@ -6486,7 +6601,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
  // ---------------------------------------------------------------------------------------------------------------
  // Faults
  
-@@ -862,7 +1970,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -862,7 +1977,7 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    // Every page shared read-write: plain views lose everything, ordered views get everything. Old translations
    // keep working (their plain accesses fault and are completed in the handler); new ones address guest memory
    // directly. The caller's fault handler throws the translated code away (TakeFallbackRequest).
@@ -6495,7 +6610,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    FallbackAt = Elapsed;
    for (auto& [Start, R] : Ranges) {
      if (Start >= Window) {
-@@ -873,11 +1981,60 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
+@@ -873,11 +1988,60 @@ void TSOViewMemory::EnterFallback(uint64_t Elapsed, bool DropCode) {
    for (auto& [Start, R] : Ranges) {
      Apply(Start, R.End);
    }
@@ -6556,7 +6671,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
  bool TSOViewMemory::TakeFallbackRequest() {
    return FallbackRequest.load(std::memory_order_relaxed) && FallbackRequest.exchange(false);
  }
-@@ -900,6 +2057,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
+@@ -900,6 +2064,15 @@ bool TSOViewMemory::MayMigrate(uint64_t Page) {
  }
  
  void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint16_t ToMask) {
@@ -6572,7 +6687,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    const uint64_t First = Chunk << (ChunkShift - PageShift);
    const uint64_t Last = std::min<uint64_t>(First + (uint64_t(1) << (ChunkShift - PageShift)), Pages);
    const uint32_t Now = uint32_t((Nanos() - StartNs) / 1000);
-@@ -908,11 +2074,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -908,11 +2081,24 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
      if (Owner[P] == From) {
        Owner[P] = To;
        ROMask[P] = ToMask;
@@ -6598,7 +6713,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    Apply(First << PageShift, Last << PageShift);
    ChunkShares[Chunk] = 0;
    Count.Collapsed += Moved;
-@@ -920,22 +2099,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
+@@ -920,22 +2106,62 @@ void TSOViewMemory::CollapseChunk(uint64_t Chunk, uint8_t From, uint8_t To, uint
  }
  
  TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Write, int Slot) {
@@ -6663,7 +6778,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    const uint64_t G = FaultAddress & (Window - 1);
    const Range* R = Find(G);
    if (!R) {
-@@ -946,8 +2165,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -946,8 +2172,44 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
      return NotOurs("guest protection"); // the guest itself may not do this
    }
  
@@ -6708,7 +6823,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    if (LastFault == FaultAddress) {
      if (++LastFaultCount > 64) {
        LogMan::Msg::EFmt("tso-arm: access at {:#x} keeps faulting (state {:#x})", FaultAddress, Owner[G >> PageShift]);
-@@ -963,6 +2218,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -963,6 +2225,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    const uint16_t Mask = ROMask[Page];
    Fault Result = Fault::Retry;
  
@@ -6725,7 +6840,31 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    // Migratory ownership: a page written by a thread other than its owner (or a shared one) moves to the writer
    // instead of becoming shared, unless it went back and forth quickly (MayMigrate). The old owner's views lose it
    // through mprotect, which also completes its earlier plain stores, so both threads keep plain accesses: the case
-@@ -1050,7 +2315,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -974,6 +2246,14 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+     ROMask[Page] = 0;
+     ++Count.Migrations;
+   };
++  // A page of this thread's own stack that another thread wrote (glibc's thread descriptor at the top of a stack,
++  // which the thread's creator writes after the clone, beside the stack's first frames) goes back to this thread at
++  // its plain access, migrations on or not, unless it changes hands quickly (MayMigrate): shared, every instruction
++  // of the frames on it was escalated, and a 32-bit program's hot functions keep their locals there (xz's encoder:
++  // a stack access of four instructions and an acquire load instead of one load; notes section 70)
++  // (TSO_VIEWS_OWNSTACK=0: off, for measuring)
++  static const bool OwnStackOn = !(getenv("TSO_VIEWS_OWNSTACK") && getenv("TSO_VIEWS_OWNSTACK")[0] == '0');
++  const bool OwnStack = OwnStackOn && !FallbackActive.load(std::memory_order_relaxed) && St != Slot && InOwnStack(G, Slot);
+ 
+   if (Ordered) {
+     // An ordered access (or an atomic) through this thread's ordered view. Its own pages are accessible there,
+@@ -1011,6 +2291,8 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+     ++Count.Claims;
+   } else if (St == Slot) {
+     // stale protection; re-applied below
++  } else if (OwnStack && MayMigrate(Page)) {
++    MoveHere();
+   } else if (IsOwnerSlot(St)) {
+     if (Write && Migrating && MayMigrate(Page)) {
+       MoveHere();
+@@ -1050,7 +2332,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    }
  
    if (Log) {
@@ -6734,7 +6873,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
              (unsigned long)G, St, Mask, Owner[Page], ROMask[Page],
              Result == Fault::Escalate ? "escalate" : "retry");
    }
-@@ -1058,17 +2323,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1058,17 +2340,34 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    // Budget: a program that keeps the protocol busy (more than TSO_VIEWS_BUDGET faults per second over the last
    // 1000 faults, after the first 300 ms) is better off with plain full ordering. The window ignores the burst of
    // faults while a program starts up and its threads first touch their data.
@@ -6770,7 +6909,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
        }
        return Result;
      }
-@@ -1088,6 +2370,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1088,6 +2387,7 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
        CollapseChunk(Chunk, St, Owner[Page], ROMask[Page]);
        if (Result == Fault::Escalate) {
          ++Count.Escalations;
@@ -6778,7 +6917,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
        }
        return Result;
      }
-@@ -1096,12 +2379,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
+@@ -1096,12 +2396,16 @@ TSOViewMemory::Fault TSOViewMemory::HandleFault(uint64_t FaultAddress, bool Writ
    if (Owner[Page] == St && ROMask[Page] == Mask) {
      // No state change (stale protection, or a race with another thread's transition): set this view right
      ++Count.Stale;
@@ -6798,7 +6937,7 @@ index 76be33d737559e72474c8c50006170f43d983c57..53986bdd24842c01779973bb0a85b695
    return Result;
  }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
-index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee8b0b9544 100644
+index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..cf8a6edb51ec6ba8105edf524adb62c49d849d6e 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/TSOViews.h
 @@ -5,10 +5,12 @@
@@ -6964,7 +7103,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee
    // Counts an access completed in the handler (true) or an instruction repeated as a single-instruction block
    static void NoteAccess(bool Emulated);
    // Counts a thread sent back to the dispatcher from a trapped instruction start
-@@ -80,41 +172,116 @@ private:
+@@ -80,41 +172,123 @@ private:
      uint64_t End;
      int Prot;
      Kind K;
@@ -7008,6 +7147,13 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee
 +  void ThawAfterFork();
 +  void DropForkDone();
 +  uint64_t ChooseAddress(uint64_t Hint, uint64_t Length, uint64_t Below = 0) const;
++  // Each slot's stack, the mapping that held its stack pointer at the clone (HandOffStack): a page of it another
++  // thread made shared or took goes back to the slot at its own plain access (HandleFault)
++  uint64_t StackStart[FEXCore::TSOViews::Slots] {};
++  uint64_t StackEnd[FEXCore::TSOViews::Slots] {};
++  bool InOwnStack(uint64_t Addr, int Slot) const {
++    return Slot > 0 && Slot < FEXCore::TSOViews::Slots && Addr >= StackStart[Slot] && Addr < StackEnd[Slot];
++  }
 +  // The end of the space guest mappings are placed in: the window, or for a 32-bit guest 0xFFFFE000
 +  uint64_t PlaceTop() const;
 +  // The host's own mappings below Below that no range knows, from /proc/self/maps, remembered as taken (a 32-bit
@@ -7091,7 +7237,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee
    uint8_t QuickAllowed {2}; // TSO_VIEWS_STRIKES: quick changes of hands in a row that still migrate
  
    // Moves the pages of a chunk that are in state From to To (with its read mask), all views at once
-@@ -124,6 +291,12 @@ private:
+@@ -124,6 +298,12 @@ private:
    void SaveProfile();
    std::string ProfilePath;
    std::vector<std::pair<uint64_t, uint64_t>> Escalations; // recorded and loaded, for the profile
@@ -7104,7 +7250,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee
    bool ProfileLoaded {};
    bool ProfileChanged {};
    uint64_t FaultsSeen {};
-@@ -134,6 +307,7 @@ private:
+@@ -134,6 +314,7 @@ private:
    uint64_t WindowSize {1000};         // TSO_VIEWS_WINDOW: faults per rate measurement
    uint64_t Budget {};
    std::atomic<bool> FallbackRequest {false};
@@ -7112,7 +7258,7 @@ index cf5fc2b380353abc14a4f11b6cdd33f6952cfdde..d1cc939d46160e85a949b67bd18efeee
  
  public:
    // True once after the fallback started: the caller then throws away all translated code
-@@ -146,6 +320,11 @@ private:
+@@ -146,6 +327,11 @@ private:
    uint8_t* Owner {};    // page states, one byte per guest page
    uint8_t* ChunkShares {}; // per chunk: private pages shared since the last collapse (nullptr: no chunks)
    uint16_t* ROMask {};  // per page: slots whose plain view maps the shared read-only page

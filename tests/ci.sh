@@ -406,22 +406,27 @@ echo "      ring buffer without ordering, for comparison: $($T run --mode unorde
 out=$($T run $B/wake 20000000) || fail "ring buffer after one thread: $out"
 ok "$out"
 
-# 32-bit x86 programs: FEX orders all of their accesses (the page protocol is for x86-64 programs)
+# 32-bit x86 programs: FEX orders all of their accesses by default, and with TSO_ARM_32_VIEWS=1 the page protocol
+# does, their memory below 4 GB (notes section 70)
 if [ -x $B/mp32 ]; then
-    for v in mp vec rep lb; do
-        out=$(last $T run $B/mp32 $v $N) || fail "32-bit litmus $v: $out"
-        ok "32-bit litmus: $out"
+    for v32 in 0 1; do
+        for v in mp vec rep lb; do
+            out=$(last env TSO_ARM_32_VIEWS=$v32 $T run $B/mp32 $v $N) || fail "32-bit litmus $v, TSO_ARM_32_VIEWS=$v32: $out"
+            ok "32-bit litmus, TSO_ARM_32_VIEWS=$v32: $out"
+        done
+        out=$(env TSO_ARM_32_VIEWS=$v32 $T run $B/threads32 8 | tail -n 1)
+        echo "$out" | grep -q 'wrong 0' || fail "32-bit threads, TSO_ARM_32_VIEWS=$v32: $out"
+        ok "32-bit threads 8, TSO_ARM_32_VIEWS=$v32: $out"
     done
     echo "      32-bit vec without ordering, for comparison: $($T run --mode unordered $B/mp32 vec $N | tail -n 1 || true)"
-    out=$($T run $B/threads32 8 | tail -n 1)
-    echo "$out" | grep -q 'wrong 0' || fail "32-bit threads: $out"
-    ok "32-bit threads 8: $out"
     # a system call through AT_SYSINFO, as i386 C libraries up to glibc 2.35 make every one
     if [ -x $B/vsyscall32 ]; then
         for m in tso full; do
             out=$(last $T run --mode $m $B/vsyscall32) || fail "32-bit vsyscall, $m: $out"
             ok "$m: $out"
         done
+        out=$(last env TSO_ARM_32_VIEWS=1 $T run $B/vsyscall32) || fail "32-bit vsyscall, views: $out"
+        ok "views: $out"
     fi
     # the last thread's exit ends a 32-bit process as well (int 0x80 exit)
     if [ -x $B/lastexit32 ]; then
