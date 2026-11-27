@@ -165,20 +165,20 @@ section 55). FEX's telemetry file, written with an `fsync` at every exit, is off
 section 22). Updated with every change to the mechanism (`tools/readme_efficiency.py`).
 
 <!-- efficiency:begin -->
-Measured 2026-11-27T00:20, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
+Measured 2026-11-27T05:41, Raspberry Pi 5 at 1.8 GHz, 4 threads, best of the rounds, wall time.
 
 | Configuration | x86 memory order kept | pigz | xz | zstd | geometric mean |
 |---|---|---|---|---|---|
-| native Arm | - | 0.99 s, 100 % | 1.08 s, 100 % | 0.49 s, 100 % | 100 % |
-| FEX, TSO off | no | 1.13 s, 88 % | 1.35 s, 80 % | 0.58 s, 84 % | 84 % |
-| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.34 s, 81 % | 0.57 s, 86 % | 85 % |
-| FEX default | no | 1.57 s, 63 % | 1.51 s, 72 % | 0.66 s, 74 % | 69 % |
-| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 60 % | 1.54 s, 70 % | 0.71 s, 69 % | 66 % |
-| tso-arm, first run | yes | 1.37 s, 72 % | 1.55 s, 70 % | 0.86 s, 57 % | 66 % |
-| tso-arm, with profile | yes | 1.26 s, 79 % | 1.45 s, 74 % | 0.66 s, 74 % | 76 % |
-| ahead of time, TSO off | no | 1.06 s, 93 % | 1.17 s, 92 % | 0.54 s, 91 % | 92 % |
+| native Arm | - | 1.00 s, 100 % | 1.08 s, 100 % | 0.49 s, 100 % | 100 % |
+| FEX, TSO off | no | 1.13 s, 88 % | 1.34 s, 81 % | 0.58 s, 84 % | 84 % |
+| tso-arm build, TSO off | no | 1.13 s, 88 % | 1.35 s, 80 % | 0.58 s, 84 % | 84 % |
+| FEX default | no | 1.57 s, 64 % | 1.52 s, 71 % | 0.67 s, 73 % | 69 % |
+| FEX full TSO | yes, except stack accesses through RSP | 1.64 s, 61 % | 1.53 s, 71 % | 0.72 s, 68 % | 66 % |
+| tso-arm, first run | yes | 1.37 s, 73 % | 1.55 s, 70 % | 0.86 s, 57 % | 66 % |
+| tso-arm, with profile | yes | 1.25 s, 80 % | 1.46 s, 74 % | 0.66 s, 74 % | 76 % |
+| ahead of time, TSO off | no | 1.06 s, 94 % | 1.17 s, 92 % | 0.54 s, 91 % | 92 % |
 | ahead of time, all ordered | yes, except stack accesses through RSP | 1.75 s, 57 % | 1.54 s, 70 % | 0.69 s, 71 % | 66 % |
-| ahead of time + tso-arm, with profile | yes | 1.08 s, 92 % | 1.19 s, 91 % | 0.62 s, 79 % | 87 % |
+| ahead of time + tso-arm, with profile | yes | 1.09 s, 92 % | 1.19 s, 91 % | 0.62 s, 79 % | 87 % |
 
 Efficiency = native time / time; 100 % is native speed. Throttling flags after the run: 0xe0000.
 Every FEX configuration ran with FEX_DISABLETELEMETRY=1.
