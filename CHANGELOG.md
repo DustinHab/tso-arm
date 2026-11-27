@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.12 (2026-11-27)
+
+Slack draws its window: all six desktop programs of `tso-arm app` (Discord, Microsoft Edge, Signal, Slack, Spotify,
+Zoom) draw on GitHub's Arm runner now. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **Slack draws its window.** Chromium limits its renderers' data to 8 GB (`RLIMIT_DATA`), and on the host that limit
   counted FEX's own memory as well (some 3.6 GB at a process's start, some 400 MB for each further thread). The
