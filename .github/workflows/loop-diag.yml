@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/opt/tso-arm
-          key: fex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
+          key: fex-${{ github.event.inputs.runner }}-${{ hashFiles('fex/patches/*.patch', 'fex/install.sh') }}
       - name: Build FEX
         if: steps.fex.outputs.cache-hit != 'true'
         run: bin/tso-arm install --generic
@@ -59,6 +59,7 @@ jobs:
                 ok=$((ok + 1))
               else
                 echo "$m run $i: exit status $st: $(tail -n 1 /tmp/out.txt | cut -c1-160)"
+                grep -v 'siglog' /tmp/err.txt | tail -n 3 | cut -c1-240
                 grep 'siglog' /tmp/err.txt | grep -v 'clone\|exit_group' | tail -n 12 | cut -c1-240
               fi
             done
