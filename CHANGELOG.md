@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.17 (2026-11-28)
+
+Chromium, Electron and CEF programs start more than twice as fast with FEX's disk cache warm, and fork-heavy
+programs such as shell scripts faster as well. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **Chromium, Electron and CEF programs start more than twice as fast** with the disk cache warm: Chrome's headless
   shell renders a page in 1.8 instead of 4.0 s, its later runs finding all but a few hundred of its blocks instead of
