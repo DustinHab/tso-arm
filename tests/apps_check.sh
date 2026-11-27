@@ -83,7 +83,7 @@ for n in "$@"; do
         setsid env ${APPS_ENV:-} "$T" app run "$n" ${APPS_ARGS:-} >>"$P/console.txt" 2>&1 </dev/null &
         pid=$!
         start=$(date +%s)
-        win="" title="" drawn=""
+        win="" wid="" title="" drawn=""
         while :; do
             now=$(($(date +%s) - start))
             tag=$(printf '%04d' $now)
@@ -95,8 +95,12 @@ for n in "$@"; do
             if [ -n "$line" ] && [ -z "$win" ]; then
                 win=$now
                 title=$(echo "$line" | sed -n 's/^[^"]*"\([^"]*\)".*/\1/p' | tr '|' '/')
+                wid=$(echo "$line" | grep -o '0x[0-9a-f]*' | head -n 1)
                 say "$n: a window after $win s: $title"
             fi
+            # whether it is shown yet (a program can make its window and show it only once it drew: Electron's
+            # ready-to-show)
+            [ -n "$win" ] && xwininfo -id "$wid" >"$P/window-$tag.txt" 2>&1 || true
             if [ -n "$win" ]; then
                 # drawn: the screen holds more than one colour (a uniform one compresses to some hundred bytes)
                 import -window root "$P/window.png" 2>/dev/null || true
