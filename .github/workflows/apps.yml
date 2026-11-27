@@ -11,6 +11,16 @@ on:
   schedule:
     - cron: '17 4 * * 1'
   workflow_dispatch:
+    inputs:
+      apps:
+        description: 'Programs (empty: all)'
+        default: ''
+      env:
+        description: 'NAME=VALUE ... for each program'
+        default: ''
+      args:
+        description: 'Options given to each program'
+        default: ''
 
 jobs:
   apps:
@@ -48,10 +58,15 @@ jobs:
       # each program up to its first window, then all removed again (the root file system as before)
       - name: Programs up to their first window
         timeout-minutes: 70
+        env:
+          APPS_ENV: ${{ inputs.env }}
+          APPS_ARGS: ${{ inputs.args }}
+          APPS: ${{ inputs.apps }}
         run: |
           s=0
           # Slack: its window stays black (notes section 66), reported but not counted
-          APPS_EXPECT=window APPS_KNOWN=slack APPS_REMOVE=1 APPS_MINUTES=6 sh tests/apps_check.sh || s=$?
+          # shellcheck disable=SC2086 # a list
+          APPS_EXPECT=window APPS_KNOWN=slack APPS_REMOVE=1 APPS_MINUTES=6 sh tests/apps_check.sh $APPS || s=$?
           cat build/apps/summary.md >>"$GITHUB_STEP_SUMMARY"
           exit $s
 

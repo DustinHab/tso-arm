@@ -8,10 +8,12 @@
 #   tests/apps_check.sh [NAME...]     default: every program 'tso-arm app' knows by name
 #   APPS_MINUTES (default 5); APPS_EXPECT=window: exit status 1 unless each program drew in a window; APPS_REMOVE=1:
 #   at the end every program removed again, and the root file system has to hold the files it held before;
-#   APPS_KNOWN: programs known not to draw yet (reported, not counted against APPS_EXPECT)
+#   APPS_KNOWN: programs known not to draw yet (reported, not counted against APPS_EXPECT); for looking into one:
+#   APPS_ENV (NAME=VALUE ... set for each program) and APPS_ARGS (options given to each)
 # Into build/apps: summary.md (each program: its version, the install's seconds, the second of its first window and
 # its title), and per program NAME/: install.txt, console.txt, windows-SSSS.txt and shot-SSSS.png every 20 seconds,
-# window.png at the first window.
+# window.png at the first window, ps-N.txt (its processes at the end of start N), logs/ (the log files it wrote under
+# ~/.config while it ran).
 set -e
 cd "$(dirname "$0")/.."
 R=$PWD
@@ -77,7 +79,8 @@ for n in "$@"; do
     for attempt in 1 2; do
         # the windows there before it (none but the root's own, usually)
         xwininfo -root -tree 2>/dev/null | grep -o '^ *0x[0-9a-f]*' | tr -d ' ' | sort >"$P/before.txt"
-        setsid "$T" app run "$n" >>"$P/console.txt" 2>&1 </dev/null &
+        # shellcheck disable=SC2086 # APPS_ENV and APPS_ARGS are lists
+        setsid env ${APPS_ENV:-} "$T" app run "$n" ${APPS_ARGS:-} >>"$P/console.txt" 2>&1 </dev/null &
         pid=$!
         start=$(date +%s)
         win="" title="" drawn=""
@@ -119,6 +122,8 @@ for n in "$@"; do
             }
             sleep 5
         done
+        # which of its processes still run (a renderer or GPU process gone shows here)
+        ps -eo pid,ppid,sid,stat,etime,rss,args 2>/dev/null | awk -v s=$pid 'NR == 1 || $3 == s' | cut -c1-400 >"$P/ps-$attempt.txt" || true
         kill -TERM -- -$pid 2>/dev/null || true
         pkill -TERM -s $pid 2>/dev/null || true
         sleep 3
@@ -127,6 +132,13 @@ for n in "$@"; do
         wait $pid 2>/dev/null || true
         [ -n "$drawn" ] && break
         [ $attempt = 1 ] && say "$n: started once more"
+    done
+    # the log files it wrote while it ran (Slack's own under ~/.config/Slack/logs)
+    find "$HOME/.config" -newer "$P/install.txt" -type f \( -name '*.log' -o -name '*.txt' -o -name '*.json' \) \
+        -size -2000k 2>/dev/null | head -n 40 | while read -r f; do
+        g=$P/logs/${f#"$HOME"/.config/}
+        mkdir -p "$(dirname "$g")"
+        cp "$f" "$g" 2>/dev/null || true
     done
     # only every fourth screenshot of the way there
     k=0
