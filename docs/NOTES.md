@@ -3268,36 +3268,54 @@ it waits for a thread to leave before `unshare`). `tests/chrootfs.c` checks it a
 `--no-sandbox` as before; `TSO_ARM_APP_SANDBOX=0` or `1` decides instead. The CI, Compat and Apps workflows allow user
 namespaces to tso-arm's FEX for their runs (`sudo tso-arm userns allow`), so `chrootfs`, Chromium's sandbox in
 `tests/chrome_check.sh` and the six desktop programs run with it there.
-## 69. Frames of FEX's deferral queued inside one another (2026-11-27)
+## 69. Frames of FEX's deferral queued inside one another; the guest's mask in its handlers (2026-11-27)
 
 `sigsync` without pauses ended now and then in CI on GitHub's Arm runners (Neoverse N2), in every mode, with no line
 of its own and the shell's "Real-time signal 30": signal 64, which neither the program nor FEX has a handler for. In
 200 runs of each mode in a row on the N2 it did not happen once; twice in CI runs of the day (one of them the
 release check of 0.4.13).
 
-The one place FEX sends a signal number it computed is `CheckForPendingSignals`, which sends each signal marked
-pending for the guest (`PendingSignals`, bit n for signal n + 1) once the guest unblocks it. Bit 63 is signal 64, and
-`PendingSignals |= 1ULL << (Signal - 1)` sets it for a `Signal` of 0 (the shift by -1 is a shift by 63 on Arm).
-Signal 0 comes from a frame of FEX's deferral that was never written. The frames are a vector with room reserved
+**Signal 0.** The one place FEX sends a signal number it computed is `CheckForPendingSignals`, which sends each signal
+marked pending for the guest (`PendingSignals`, bit n for signal n + 1) once the guest unblocks it. Bit 63 is signal
+64, and `PendingSignals |= 1ULL << (Signal - 1)` sets it for a `Signal` of 0 (the shift by -1 is a shift by 63 on
+Arm). Signal 0 comes from a frame of FEX's deferral that was never written. The frames are a vector with room reserved
 (section 54), and `QueueFrame` appends to it with `emplace_back`: the frame written at the end, then the count raised.
 It runs inside FEX's signal handler, where the synchronous signals' numbers stay open (for faults of FEX's own), and a
 SIGBUS sent by another thread that comes in between the two runs `QueueFrame` again: it writes its frame to the same
 place and raises the count, and the outer one raises it once more. The count then holds a frame past the last one
 written, zeros where nothing was queued before; its delivery at the interrupt page took 0 for the signal, found it
-masked for the guest, marked bit 63, and FEX sent signal 64 the next time the guest set its mask. The same holds for the
-delivery's `back()` and `pop_back()`, between which a frame queued is taken away in place of the one delivered.
+masked for the guest, marked bit 63, and FEX sent signal 64 the next time the guest set its mask. The delivery's
+`back()` and `pop_back()` have the same gap: a frame queued between them is taken away in place of the one delivered.
 
-Both change the frames with all signals blocked now (`FramesSection`: two `rt_sigprocmask` calls around a few
-instructions, which fault on nothing; FEX defers a signal only while it translates or is in a section of its own, so
-the cost is that of signals that come in there). Found by reading the code against the signal number, not by a run
-that shows it gone: it is too rare for that (none in 600 runs of `sigsync` without pauses on the N2).
+The first fix blocked all signals around each change of the frames (two `rt_sigprocmask` calls). It made things
+worse: the 0.4.13 draft's `sigsync` without pauses ended with SIGSEGV in 6 of 60 runs on the Pi, 0.4.12's in none.
+Every signal that came in during such a change came in, nested, the moment it ended, and FEX's handler for SIGSEGV
+runs with SIGSEGV open (SA_NODEFER, section 54): under a flood of them each handler took the next one inside it,
+deeper and deeper on the host signal stack, until the kernel could not set up a frame there and ended the process.
+With the calls made empty, 60 of 60. Now a change of the frames marks itself busy (`FramesBusy`); a `QueueFrame` that
+finds them busy leaves its signal in a mask of the thread's (`NestedFrames`, its siginfo beside it), merged as a
+standard signal pending is, and the change queues those before it ends, looking once more after it has cleared the
+mark. Nothing is blocked, and nothing is written twice to one place.
 
-**Open.** `tests/sigdefer.c` was meant to make it likely: three threads send SIGSEGV, SIGBUS, SIGILL, SIGTRAP and
-SIGFPE without pauses to a thread that writes a new function to fresh memory and calls it, 3,000 times, so that most
-signals come in while FEX translates and the next ones during its handler for them. It finds something else, with the
-change above and without it: on GitHub's runners it ends with SIGSEGV in every run, in every mode (450 of 450 on each
-runner), on the Pi it hangs; alone, without the senders, it runs right. `TSO_ARM_SIGLOG` with FEX built with its
-symbols: a fault (SEGV_MAPERR) in `HandleDispatcherGuestSignal`, in `BackupContext`, which saves the host's context
-below the interrupted stack pointer before the guest's frame is built; the fault is FEX's own, but SIGSEGV has a
-handler of the guest's, so it goes to the guest, whose frame is set up the same way, at the same address: thousands
-of times, until the timeout. Not in the CI until that is fixed.
+**The guest's mask in its handler.** `tests/sigdefer.c` was meant to make the race likely: three threads send SIGSEGV,
+SIGBUS, SIGILL, SIGTRAP and SIGFPE without pauses to a thread that writes a new function to fresh memory and calls it,
+3,000 times, so that most signals come in while FEX translates. It found something else: on GitHub's runners it ended
+with SIGSEGV in every run, in every mode (450 of 450 on each runner), on the Pi it hung, with the change above and
+without it; alone, without the senders, it ran right. FEX built with its symbols and a report of each guest frame
+nested deeper than five: the same SIGILL, sent with `tgkill`, delivered again and again inside the guest's handler for
+SIGILL, with the guest's mask (`CurrentSignalMask`) empty, each frame's saved host context 2 KB further down the
+thread's stack, until it ran out (`BackupContext` in `HandleDispatcherGuestSignal`). The kernel blocks a signal in its
+own handler, and the action's `sa_mask` with it, on top of the mask before. FEX keeps that only in the host's mask, and
+the signals FEX needs or never blocks on the host (SIGILL, SIGBUS, SIGSEGV, SIGTRAP, SIGFPE) were open in the guest's
+handlers for them: no limit to the nesting. FEX now keeps the guest's mask during its handler as the kernel does (the
+mask before, `sa_mask`, the signal unless SA_NODEFER) in `CurrentSignalMask`, where a signal that comes in masked waits
+as pending (FEX's check for that was there, only the mask was not), puts the mask before back at sigreturn and sends
+what waits then, as the kernel delivers it on the return. The guest's frame holds that mask in `uc_sigmask` (it was 0).
+A signal blocked by the guest with `sigprocmask` before the handler stays blocked in it as well (it came in there).
+
+**Open.** `sigdefer` no longer ends, but it crawls: on the Pi 1,000 functions with three senders took 51 s (1,526
+signals handled), and with one sender 100 functions did not end in a minute; natively all of it takes 0.06 s. Under a
+flood of synchronous signals' numbers that never stops, the thread spends nearly all of its time in FEX's delivery
+(the frames, the interrupt page, the guest's frame and its sigreturn); where that time goes is not measured yet.
+No program is known to send so; profilers use SIGPROF, which is blocked on the host as any other signal and costs what
+a signal costs under FEX. `sigdefer` is not in the CI. `sigsync` without pauses: 90 of 90 on the Pi in the three modes.

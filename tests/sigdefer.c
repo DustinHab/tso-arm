@@ -3,8 +3,9 @@
 // and again. A signal that comes in while FEX translates waits as a frame of FEX's deferral, and the next ones come in
 // during FEX's handler for that one, each queueing a frame of its own in the middle of the one before. A frame queued
 // so was once counted before it was written: delivered as signal 0, it marked signal 64 pending, and FEX sent that to
-// the thread, which ended the process ("Real-time signal 30"; notes section 69). Not in the CI yet: FEX still ends
-// it with SIGSEGV or hangs, a fault of its own while it sets up the guest's frame (notes section 69).
+// the thread, which ended the process ("Real-time signal 30"; notes section 69). It found that the guest's handler
+// for SIGILL took SIGILL again inside it, without limit (the guest's mask in its handlers, notes section 69). Not in
+// the CI: under FEX it runs right now, but crawls under the flood.
 //   sigdefer [FUNCTIONS [SENDERS]]   exit status 0 when every function returned its number and every signal number
 //                                    reached its handler (default 3000 functions, 3 sending threads; 0: none)
 #define _GNU_SOURCE

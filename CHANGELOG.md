@@ -21,8 +21,12 @@ release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX pr
   `tests/seccompbpf.c` in the CI, Chromium's sandbox in `tests/chrome_check.sh`.
 - A program that gets synchronous signals' numbers from another thread in quick succession (profilers, crash
   reporters) could end with signal 64: a frame of FEX's deferral, queued in FEX's handler while another was being
-  queued, was counted before it was written, and its signal 0 became signal 64. The frames change with all signals
-  blocked now (notes section 69).
+  queued, was counted before it was written, and its signal 0 became signal 64. A change of the frames is marked now,
+  and one nested in it leaves its signal for that change to queue (notes section 69).
+- The guest's signal mask during its handler is the kernel's: the mask before, the action's `sa_mask` and the signal
+  itself. FEX kept it only on the host, where it never blocks SIGILL, SIGBUS, SIGSEGV, SIGTRAP and SIGFPE: such a
+  signal sent by another thread came in again inside the guest's handler for it, without limit, until the stack ran
+  out. It waits until the handler returns now, and the handler's `uc_sigmask` holds the mask before (it was 0).
 - `sudo tso-arm userns allow` after `tso-arm install` from a release package allows the FEX in the calling user's
   home directory, which that user's programs run through; it allowed only the package's own copy under sudo.
 - `TSO_ARM_SIGLOG=1` also reports a signal that ends the process, and every `exit_group` with its status.
