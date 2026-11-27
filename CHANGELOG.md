@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.16 (2026-11-28)
+
+Chromium, Electron and CEF programs start 12 to 14 % faster, and WebAssembly's trap turned out to work in Google
+Chrome under tso-arm. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **Chromium, Electron and CEF programs start 12 to 14 % faster**: their start is mostly FEX translating (77 % of
   Chrome's time with its disk cache warm). Multiblock units of 50 instead of 150 guest instructions translate less of
