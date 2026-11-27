@@ -3531,3 +3531,13 @@ gives units of 50 only to Chromium's family: a program with V8's snapshot (`v8_c
 `snapshot_blob.bin`) or CEF (`libcef.so`) beside it, and `tso-arm app run` to every program it marked as Chromium or
 Electron (Discord's starter, Zoom's launcher). `FEX_MAXINST` set to anything but 150 stays. Chrome's headless shell
 through it: 5.2, 5.0, 4.3, 4.2 s. `tests/ci.sh` checks the choice (`tests/getenv.c`).
+
+The C++ containers' 9 % were one map: FEX reads every executable file a process maps for the disk cache (its build
+ID, its program headers), and on the way read all its relocations into a map of offsets (`PopulateRelocations`),
+which only FEX's older code cache uses; the disk cache's path dropped it at once. Chrome's file has 559,182
+relocations, none of them in its executable segments (all in its data: `R_X86_64_RELATIVE` and the GOT's), and
+each of its processes made the map anew. That path reads no relocations now (`ReadELFHeaders(..., false)`; the
+decoder saw an empty map there before as well). Chrome's headless shell, six runs from an empty cache: 5.0, 4.8,
+then 4.00 to 4.03 s (from 5.7, 5.5, 4.5 s with neither change); `python3 -c 0` unchanged (107 ms warm). FEX's part
+now: the translation 63 % (register allocation 15 %), the decoder 15 %, the disk cache's index read at each
+process's start 3 %, the block link map (a `std::map`) 3 %.

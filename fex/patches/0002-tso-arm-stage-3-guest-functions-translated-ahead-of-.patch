@@ -1,4 +1,4 @@
-From b31089cd566612dea08ab4ca77569e3761b3ac1c Mon Sep 17 00:00:00 2001
+From b5548e3d29fba0f37ca64bee77a60b75485258f3 Mon Sep 17 00:00:00 2001
 From: DustinHab <142697073+DustinHab@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 19:28:14 +0100
 Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
@@ -52,7 +52,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |    4 +
  .../LinuxSyscalls/Syscalls/Passthrough.cpp    |  123 +-
  .../LinuxSyscalls/Syscalls/Thread.cpp         |  107 +-
- .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  270 ++-
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  282 ++-
  .../LinuxSyscalls/TSOAccess.cpp               |   30 +-
  .../LinuxEmulation/LinuxSyscalls/TSOViews.cpp | 1536 +++++++++++++++--
  .../LinuxEmulation/LinuxSyscalls/TSOViews.h   |  220 ++-
@@ -66,7 +66,7 @@ Subject: [PATCH 2/2] tso-arm stage 3: guest functions translated ahead of time
  ThunkLibs/libvulkan/Guest.cpp                 |   11 +-
  ThunkLibs/libvulkan/Host.cpp                  |   69 +-
  ThunkLibs/libwayland-client/Guest.cpp         |   57 +-
- 62 files changed, 5418 insertions(+), 433 deletions(-)
+ 62 files changed, 5427 insertions(+), 436 deletions(-)
 
 diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
 index 602b2a50d0b653bf21ed257455be25f8c57496c6..3f1f4ca42d225fc70b5e393252fb50a3256edee0 100644
@@ -4539,7 +4539,7 @@ index c4a0f7b955dbe9db3c2263d7cb3c18219fabb133..91d954876fe9da03346569713ef58915
  }
  } // namespace FEX::HLE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4761da3b9 100644
+index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..66b548fe6b0e4746c229b4f98a1d3443c3205683 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 @@ -23,6 +23,7 @@ $end_info$
@@ -4847,7 +4847,31 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
  
      auto lk = FEXCore::GuardSignalDeferringSection<std::shared_lock>(VMATracking.Mutex, Thread);
  
-@@ -454,6 +608,7 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -378,7 +532,10 @@ struct ReadELFHeadersResult {
+   bool HasCodeRelocations;
+ };
+ 
+-static ReadELFHeadersResult ReadELFHeaders(int FD, std::span<std::byte> HeaderData = {}) {
++// tso-arm: WithRelocations: whether the file's relocations are read, for the code cache; the disk cache takes the build
++// ID and the program headers alone (the map was made and dropped: Chrome's 559,182 relocations, none of them in its
++// code, went into it in each of its processes, 9 % of FEX's time in Chrome's start)
++static ReadELFHeadersResult ReadELFHeaders(int FD, std::span<std::byte> HeaderData = {}, bool WithRelocations = true) {
+   std::string_view ELFMagic = ELFMAG;
+   if (HeaderData.data()) {
+     if (HeaderData.size_bytes() < ELFMagic.size() || std::memcmp(ELFMagic.data(), HeaderData.data(), ELFMagic.size()) != 0) {
+@@ -398,7 +555,10 @@ static ReadELFHeadersResult ReadELFHeaders(int FD, std::span<std::byte> HeaderDa
+     return {};
+   }
+ 
+-  auto Relocations = Parser.PopulateRelocations();
++  fextl::robin_map<uint32_t, FEXCore::GuestRelocationType> Relocations;
++  if (WithRelocations) {
++    Relocations = Parser.PopulateRelocations();
++  }
+   auto HasCodeRelocations = Parser.HasCodeRelocations();
+   auto buildid = Parser.GetBuildID();
+   return ReadELFHeadersResult {std::move(Parser.phdrs), std::move(Relocations), buildid, HasCodeRelocations};
+@@ -454,6 +614,7 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
  
    std::optional<FEXCore::ExecutableFileSectionInfo> CachedSection;
    bool PendingResourceDeletion;
@@ -4855,7 +4879,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
  
    {
      // NOTE: Frontend calls this with a nullptr Thread during initialization, but
-@@ -462,17 +617,23 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -462,17 +623,23 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
      auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
  
      bool Map32Bit = !Is64Bit || (flags & FEX::HLE::X86_64_MAP_32BIT);
@@ -4884,7 +4908,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
      } else {
        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
        if (Result == ~0ULL) {
-@@ -485,6 +646,30 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+@@ -485,6 +652,30 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Size, PendingResourceDeletion);
@@ -4915,7 +4939,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
  
    if (LateMetadata) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
-@@ -513,7 +698,7 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -513,7 +704,7 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
      // To be more optimal the frontend should provide this code with a valid Thread object earlier.
      auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
  
@@ -4924,7 +4948,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
        Result = TSOViewMemory::Result("munmap", Views->Munmap(reinterpret_cast<uint64_t>(addr), length));
        if (FEX::HLE::HasSyscallError(Result)) {
          return Result;
-@@ -534,6 +719,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -534,6 +725,11 @@ uint64_t SyscallHandler::GuestMunmap(bool Is64Bit, FEXCore::Core::InternalThread
    }
    InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), Size, PendingResourceDeletion);
  
@@ -4936,7 +4960,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
    if (length) {
      auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), Thread);
      CTX->RemoveForceTSOInformation(reinterpret_cast<uint64_t>(addr), length);
-@@ -548,7 +738,7 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -548,7 +744,7 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
  
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
@@ -4945,7 +4969,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
        Result = TSOViewMemory::Result(
          "mremap", Views->Mremap(reinterpret_cast<uint64_t>(old_address), old_size, new_size, flags, reinterpret_cast<uint64_t>(new_address), TSOSlotOf(Thread)));
        if (FEX::HLE::HasSyscallError(Result)) {
-@@ -569,6 +759,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
+@@ -569,6 +765,8 @@ uint64_t SyscallHandler::GuestMremap(bool Is64Bit, FEXCore::Core::InternalThread
    }
  
    InvalidateCodeRangeIfNecessaryOnRemap(Thread, reinterpret_cast<uint64_t>(old_address), Result, old_size, new_size);
@@ -4954,7 +4978,7 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
    return Result;
  }
  
-@@ -713,6 +905,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
+@@ -713,6 +911,11 @@ uint64_t SyscallHandler::GuestShmat(bool Is64Bit, FEXCore::Core::InternalThreadS
    }
  
    InvalidateCodeRangeIfNecessary(Thread, Result, Length, PendingResourceDeletion);
@@ -4966,9 +4990,12 @@ index 41aba2d3dcac93bff51cb75cc47d0cb74715cb62..7738d74f92c499a0f7ed8e8b18e892c4
    return Result;
  }
  
-@@ -856,6 +1053,25 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
+@@ -854,8 +1057,27 @@ SyscallHandler::TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t a
+           LOGMAN_THROW_A_FMT(Resource->ProgramHeaders.empty() || offset == 0, "Expected file offset 0 for the first mapping of an ELF "
+                                                                               "file");
          } else if (CheckForElfFileDiskCache) {
-           auto ELFResult = ReadELFHeaders(fd, std::span {reinterpret_cast<std::byte*>(addr), length});
+-          auto ELFResult = ReadELFHeaders(fd, std::span {reinterpret_cast<std::byte*>(addr), length});
++          auto ELFResult = ReadELFHeaders(fd, std::span {reinterpret_cast<std::byte*>(addr), length}, false);
            Resource->MappedFile->FileId = ComputeCodeMapId(Resource->MappedFile->Filename, &ELFResult.BuildID);
 +          // tso-arm: the image's extent, as for the code cache above: the disk cache's relocation filter lets a block's
 +          // references into the same image (its data, its read-only data) through only with it. Without it every block
