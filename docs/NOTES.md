@@ -3434,13 +3434,17 @@ whole index into a map (`PopulateIndex`). An empty cache of its own, the develop
 About 0.18 ms a start for each MB, whatever program stored it. Chrome alone stores some 100 MB a run, and its second
 run misses as often as its first: 116,508 lookups of code from its file, 101,893 misses. A child after `fork` reads
 the cache but does not write it (section 62: it shares its parent's descriptors and their file locks), and Chrome's
-renderers are forks of its zygote; and the misses of consecutive runs are other entry addresses each time (none of
-the fourth run's 31,741 missed in the third), which fits a multiblock unit being stored under the address it was
-entered by, not looked into further yet. Chrome renders the page in 5.9 instead of 6.1 s with its cache warm.
+renderers are forks of its zygote, so what only they run misses in every run. What it would bring if they stored
+theirs (four runs on an empty cache, the best warm one against the better of two without): Chrome's headless shell
+renders the page in 4.65 instead of 5.45 s with its cache warm as it is, and with `--single-process` (the renderer in
+the browser process, which stores its code) in 3.09 instead of 3.47 s; so perhaps a tenth more, for a child that
+reopens the cache's files after `fork` (their `flock` is per open file description, which a child shares with its
+parent; and Chromium's zygote is in its chroot by then, so only through FEX's own descriptor of `/proc`). Not done
+yet.
 
 FEX names the database by the program's path as well now (`CONFIG_APP_FILENAME`, which FEX sets for every program it
 starts, also after `execve`): `RWCacheDB_<configuration>_<program>`, the libraries a program maps in its own. A
 program's start reads only what it stored itself; what Chrome stores costs only Chrome's start (some 180 ms at the
 size limit of 1 GB against its 6 s). `TSO_DISKCACHE_SHARED=1` keeps one database for all, as FEX has it. The CI runs
 two programs with an empty cache: two databases, the second runs of both missing 10 of 614 blocks of the first.
-Open: Chromium's renderers, which never store their code.
+Open: Chromium's renderers, which never store their code (above).
