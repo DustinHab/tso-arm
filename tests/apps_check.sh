@@ -170,6 +170,18 @@ for n in "$@"; do
         [ -n "$drawn" ] && break
         [ $attempt = 1 ] && say "$n: started once more"
     done
+    # FEX's reports of signals that reached the guest inside FEX's own code (TSO_ARM_SIGLOG=1 in APPS_ENV), with the
+    # names of the functions where FEX has its symbol table
+    if grep -q '^tso-arm siglog:' "$P/console.txt" 2>/dev/null; then
+        fex=${TSO_ARM_PREFIX:-$HOME/.local/opt/tso-arm}/bin/FEX
+        grep '^tso-arm siglog:' "$P/console.txt" | sed 's/ tid [0-9]*//; s/ pc 0x[0-9a-f]*//' | sort | uniq -c | sort -rn | head -n 12 | while read -r cnt line; do
+            echo "== $cnt x $line"
+            for o in $(echo "$line" | grep -o '+0x[0-9a-f]*' | tr -d '+' | awk '!seen[$0]++'); do
+                [ "$o" = 0x0 ] && continue
+                echo "  $o $(gdb -batch -ex "info symbol $o" "$fex" 2>/dev/null | tail -n 1 | cut -c1-200)"
+            done
+        done >"$P/siglog.txt" 2>&1 || true
+    fi
     # the log files it wrote while it ran (Slack's own under ~/.config/Slack/logs)
     find "$HOME/.config" -newer "$P/install.txt" -type f \( -name '*.log' -o -name '*.txt' -o -name '*.json' \) \
         -size -2000k 2>/dev/null | head -n 40 | while read -r f; do
