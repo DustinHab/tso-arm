@@ -33,7 +33,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd gpgv \
+          sudo apt-get install -y -q xvfb x11-utils imagemagick dbus-x11 squashfs-tools zstd gpgv gdb \
             cmake ninja-build clang lld python3 gcc-x86-64-linux-gnu libc6-dev-amd64-cross
           g=$(gcc -dumpversion | cut -d. -f1)
           sudo apt-get install -y -q libclang-dev llvm-dev clang-tools libssl-dev pkg-config \
@@ -62,6 +62,8 @@ jobs:
           APPS_ENV: ${{ inputs.env }}
           APPS_ARGS: ${{ inputs.args }}
           APPS: ${{ inputs.apps }}
+          # by hand for some programs: what a program that draws nothing waits in (tests/waits.py, gdb)
+          APPS_TRACE: ${{ inputs.apps != '' && '1' || '0' }}
         run: |
           s=0
           # Slack: its window stays black (notes section 66), reported but not counted

@@ -14,7 +14,8 @@
 # its title), and per program NAME/: install.txt, console.txt, windows-SSSS.txt and shot-SSSS.png every 20 seconds,
 # window.png at the first window, ps-N.txt (its processes at the end of start N), logs/ (the log files it wrote under
 # ~/.config while it ran); for one that drew nothing threads-N.txt (each thread's state and CPU time) and, started with
-# APPS_ARGS=--remote-debugging-port=PORT, cdp-N/ (its pages: address, how far loaded, text, screenshot; tests/cdp.py).
+# APPS_ARGS=--remote-debugging-port=PORT, cdp-N/ (its pages: address, how far loaded, text, screenshot; tests/cdp.py),
+# with APPS_TRACE=1 waits-N.txt (what each thread waits in; tests/waits.py) and gdb-N-PID.txt (FEX's own stacks).
 set -e
 cd "$(dirname "$0")/.."
 R=$PWD
@@ -138,6 +139,19 @@ for n in "$@"; do
                     echo "$(basename "$t") $(cat "$t/comm" 2>/dev/null) $(echo "$ts" | awk '{ print $1, $12 + $13 }') $(cat "$t/wchan" 2>/dev/null)"
                 done
             done >"$P/threads-$attempt.txt" 2>&1 || true
+            # APPS_TRACE=1 (where sudo asks for no password): what each thread waits in (tests/waits.py: a futex's
+            # address and the mapping that holds it) and where FEX is in each process (gdb)
+            if [ "${APPS_TRACE:-0}" = 1 ] && sudo -n true 2>/dev/null; then
+                tp=$(ps -eo pid,sid 2>/dev/null | awk -v s=$pid '$2 == s { print $1 }')
+                # shellcheck disable=SC2086 # a list
+                sudo -n python3 "$R/tests/waits.py" $tp >"$P/waits-$attempt.txt" 2>&1 || true
+                if command -v gdb >/dev/null; then
+                    for p in $tp; do
+                        timeout 90 sudo -n gdb -p "$p" -batch -ex 'set pagination off' -ex 'thread apply all bt 24' \
+                            >"$P/gdb-$attempt-$p.txt" 2>&1 </dev/null || true
+                    done
+                fi
+            fi
             # a Chromium or Electron program started with --remote-debugging-port=N: what its pages show (tests/cdp.py)
             cport=$(echo " ${APPS_ARGS:-} " | sed -n 's/.* --remote-debugging-port=\([0-9]*\) .*/\1/p')
             if [ -n "$cport" ]; then
