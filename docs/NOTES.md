@@ -3593,3 +3593,7 @@ warm: the subshells' code is found now. `python3 -c 0` as before (101 to 107 ms)
 code its parent never runs: 315 misses, then 3; 91 with 0.4.16's FEX) and `tests/remapcode.c` (a copy of a page of its
 own code below it, at an address that changes from run to run, as V8 does: 326, then 2; 142 with 0.4.16's FEX under
 full ordering, and under the page protocol 0.4.16 died) in `tests/ci.sh`.
+
+Slack (Electron) without a window (`--ozone-platform=headless`), the seconds until its web app writes its first
+console line, four runs from an empty cache: 0.4.16 7.9, then 4.6 s; with these changes 13.7 (once), then 4.6 to 6.0
+s. That start waits on Slack's web app (from the network) rather than on FEX's translation; not a measure of it.

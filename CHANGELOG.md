@@ -2,14 +2,15 @@
 
 ## 0.4.17 (2026-11-28)
 
-Chromium, Electron and CEF programs start more than twice as fast with FEX's disk cache warm, and fork-heavy
-programs such as shell scripts faster as well. Install or update with
+Chrome's headless shell starts more than twice as fast with FEX's disk cache warm, and fork-heavy programs such as
+shell scripts faster as well. Install or update with
 `curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
 release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
-- **Chromium, Electron and CEF programs start more than twice as fast** with the disk cache warm: Chrome's headless
-  shell renders a page in 1.8 instead of 4.0 s, its later runs finding all but a few hundred of its blocks instead of
-  missing some 90,000. Two faults kept them from it: forked children (Chromium's renderers and GPU process are forks
+- **Chromium's processes find their translated code in the disk cache**: Chrome's headless shell renders a page in
+  1.8 instead of 4.0 s with the cache warm, its later runs finding all but a few hundred of its blocks instead of
+  missing some 90,000. Electron and CEF programs run the same code; Slack's start, which waits on its web app, is
+  about as before (4.6 s to its web app's first console line, headless). Two faults kept them from it: forked children (Chromium's renderers and GPU process are forks
   of its zygote) read the cache but did not write it, and V8's copy of its builtins from its program's file (`mremap`
   with `MREMAP_DONTUNMAP`, as Node.js does as well) became the base FEX reckoned the whole file from, so that the
   offsets of the program's code changed from run to run. A forked child now opens the cache's files anew at its first
