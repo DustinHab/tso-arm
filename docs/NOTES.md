@@ -3619,6 +3619,12 @@ Spotify cannot start without a display: GTK ends it first). A program with `libc
 protocol as tso-arm's choice (Steam's steamwebhelper, CEF as well, runs in full ordering through `tso-arm steam`, as
 before).
 
+Open as well: Google Chrome through `tso-arm app` under the page protocol (`TSO_ARM_MODE=tso`, no longer tso-arm's
+choice for it) ended twice in some 47 runs after a second with "The SUID sandbox helper binary was found, but is not
+configured correctly": its check of user namespaces had failed. In full ordering never (some 10 runs); a program
+doing that check 500 times (`clone(CLONE_NEWUSER | SIGCHLD)`, the child ending at once, two other threads running)
+never failed, in either mode, forked children writing the cache or not.
+
 Now and then a run took 5 to 11 s instead of 1.8 s, once in 15 to 30 runs, with the cache on the SD card (not when
 it was in `/tmp`, a tmpfs): the same CPU time as a fast run, and thousands of ticks of I/O wait in the whole system
 (a fast run: under 10). No store of the cache's writer and no drain of its queue at an exit took 50 ms in such a run
