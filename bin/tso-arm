@@ -470,11 +470,14 @@ chromium_dir() {
 cmd_run() {
     # TSO_ARM_MODE: the mode for programs started without --mode (started directly through binfmt_misc, by tso-arm wine)
     mode=${TSO_ARM_MODE:-tso}
+    # whether the mode was chosen (TSO_ARM_MODE, --mode), not tso-arm's default
+    chosen=${TSO_ARM_MODE:+1}
     aot=""
     while [ $# -gt 0 ]; do
         case $1 in
         --mode)
             mode=$2
+            chosen=1
             shift 2
             ;;
         --aot)
@@ -496,6 +499,7 @@ cmd_run() {
             ;;
         --mode=*)
             mode=${1#*=}
+            chosen=1
             shift
             ;;
         --)
@@ -534,8 +538,18 @@ cmd_run() {
     # is mostly FEX translating, and multiblock units of 50 guest instructions make it a tenth faster (Chrome's headless
     # shell 4.0 instead of 4.5 s with its cache warm, 5.1 instead of 5.7 s cold: notes section 72); FEX_MAXINST set to
     # another value than tso-arm's 150 stays
-    if [ "$FEX_MAXINST" = 150 ] && chromium_dir "$(dirname "$prog")"; then
-        export FEX_MAXINST=50
+    if chromium_dir "$(dirname "$prog")"; then
+        if [ "$FEX_MAXINST" = 150 ]; then
+            export FEX_MAXINST=50
+        fi
+        # Their processes fall back to full ordering at their start anyway (they reserve more address space than the
+        # views' window holds, notes section 64), and the first run's code went into the disk cache under the
+        # fallen-back views' state while later runs start without views: their second start translated everything
+        # again (6.2 s for Chrome's headless shell instead of 1.9 s, notes section 72). Full ordering from the start
+        # unless a mode was chosen.
+        if [ "$mode" = tso ] && [ -z "$chosen" ]; then
+            mode=full
+        fi
     fi
     if { [ "$k" = dynamic ] || [ "$k" = script ]; } && ! has_rootfs; then
         r=$(shared_rootfs) || {

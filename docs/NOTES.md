@@ -3597,3 +3597,20 @@ full ordering, and under the page protocol 0.4.16 died) in `tests/ci.sh`.
 Slack (Electron) without a window (`--ozone-platform=headless`), the seconds until its web app writes its first
 console line, four runs from an empty cache: 0.4.16 7.9, then 4.6 s; with these changes 13.7 (once), then 4.6 to 6.0
 s. That start waits on Slack's web app (from the network) rather than on FEX's translation; not a measure of it.
+
+A program that falls back (Chrome) stores its first run's code under the views' state then (fallen back, 13), and
+its profile has the next run start without views (8): the second run translates anew, the third finds it. With the
+views kept after the fallback (`TSO_VIEWS_FALLBACK_VIEWS=1`) Chrome's second run took 2.0 s instead of 6.8 s. Not
+the default: their address arithmetic stays in the code, zstd (its profile says fallback) 701 instead of 605 ms, pigz
+and xz (theirs do not) the same. Instead Chromium's family runs in full ordering from its first run (`tso-arm run`
+where V8's snapshot or CEF lies beside the program, `tso-arm app run` for the programs it marked; a mode chosen with
+`--mode` or `TSO_ARM_MODE` stays): its processes fall back at their start anyway, and the first run's code is then
+stored as the later runs look for it. Chrome's headless shell from an empty cache, with `TSO_DISKCACHE_LOG=1`: 6.1,
+then 1.9 s (6.3, 6.2, then 2.0 s under the page protocol); without the log, as tso-arm now chooses: 4.8, 1.6, 1.6 s
+(5.1, 5.1, 1.8 s before). Chrome's crashpad handler under Slack fell back as well.
+
+Now and then a run took 5 to 11 s instead of 1.8 s, once in 15 to 30 runs, with the cache on the SD card (not when
+it was in `/tmp`, a tmpfs): the same CPU time as a fast run, and thousands of ticks of I/O wait in the whole system
+(a fast run: under 10). No store of the cache's writer and no drain of its queue at an exit took 50 ms in such a run
+(`TSO_DISKCACHE_LOG=1` reports those now), and Chrome's own profile in `/tmp` did not keep it away: the SD card
+stalling for other writers on it (Home Assistant's database is on the same card).

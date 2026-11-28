@@ -93,17 +93,17 @@ tso-arm run ./program args...   # an x86 program, as it would run on an x86 comp
   `TSO_ARM_32_VIEWS=1` tries the page protocol on one, which is no faster on the whole yet).
 - **Chromium and programs built on it** (Electron programs, Steam's windows) run as well: Google's headless Chrome
   renders pages under tso-arm in all modes. They reserve more memory than the page protocol's window holds and run
-  with FEX's full ordering, which tso-arm switches to by itself at their start (and from the first start on after
-  that). Chromium's sandbox works, seccomp-bpf included (FEX emulates its filters); it needs user namespaces (see
+  with FEX's full ordering, from their first start on (tso-arm knows them by V8's snapshot or CEF beside the
+  program; `--mode tso` tries the page protocol, which falls back at once). Chromium's sandbox works, seccomp-bpf included (FEX emulates its filters); it needs user namespaces (see
   Steam below), and `--no-sandbox` runs without it.
 - With the installation for every user (or `sudo tso-arm binfmt register`), x86 programs start directly:
   `./program`, from scripts, from a file manager.
 - **The second start is faster.** FEX keeps the code it translated in a cache on disk (`~/.cache/tso-arm/fex`), and a
   later run of the same program and libraries loads it instead of translating it again: on a Raspberry Pi 5
-  `python3 -c 0` starts in 0.095 instead of 0.32 s, `git --version` in 0.035 instead of 0.09 s. Most of a
-  multi-threaded program's own work is translated anew each time (the page protocol's code depends on what that run
-  shares). `tso-arm status` shows the cache's size, `tso-arm forget --cache` empties it, `TSO_ARM_DISKCACHE=0`
-  runs without it.
+  `python3 -c 0` starts in 0.095 instead of 0.32 s, `git --version` in 0.035 instead of 0.09 s, Chrome's headless
+  shell renders a page in 1.6 instead of 4.8 s. Processes a program forks keep what they translate as well (Chromium's
+  renderers, a shell's subshells). `tso-arm status` shows the cache's size, `tso-arm forget --cache` empties it,
+  `TSO_ARM_DISKCACHE=0` runs without it.
 
 ## Graphics
 

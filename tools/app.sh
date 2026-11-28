@@ -465,10 +465,15 @@ cmd_run() {
     if [ -e "$D/$app/chromium" ] && ! sandbox_usable; then
         set -- --no-sandbox "$@"
     fi
-    # smaller multiblock units for Chromium's family (tso-arm run does the same where V8's snapshot lies beside the
-    # program; Discord's starter and Zoom's launcher have it elsewhere)
-    if [ -e "$D/$app/chromium" ] && [ "${FEX_MAXINST:-150}" = 150 ]; then
-        export FEX_MAXINST=50
+    # smaller multiblock units and full ordering from the start for Chromium's family (tso-arm run does the same where
+    # V8's snapshot lies beside the program; Discord's starter and Zoom's launcher have it elsewhere)
+    if [ -e "$D/$app/chromium" ]; then
+        if [ "${FEX_MAXINST:-150}" = 150 ]; then
+            export FEX_MAXINST=50
+        fi
+        if [ -z "${TSO_ARM_MODE:-}" ]; then
+            export TSO_ARM_MODE=full
+        fi
     fi
     exec "$T" run "$prog" "$@"
 }
