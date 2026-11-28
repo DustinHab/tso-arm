@@ -471,7 +471,8 @@ cmd_run() {
         if [ "${FEX_MAXINST:-150}" = 150 ]; then
             export FEX_MAXINST=50
         fi
-        if [ -z "${TSO_ARM_MODE:-}" ]; then
+        # not for CEF (Spotify drew no window so; tso-arm run's comment)
+        if [ -z "${TSO_ARM_MODE:-}" ] && ! grep -q '/libcef\.so$' "$D/$app/files"; then
             export TSO_ARM_MODE=full
         fi
     fi

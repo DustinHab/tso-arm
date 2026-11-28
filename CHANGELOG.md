@@ -5,9 +5,10 @@
 - **Chromium's family runs in full ordering from its first start**: its processes fell back to it at their start
   anyway, and the first run's code went into the disk cache under the fallen-back views' state while the next runs
   started without views, so the second start translated everything again. Chrome's headless shell from an empty
-  cache: 4.8, then 1.6 s (5.1, 5.1, then 1.8 s before). `tso-arm run` chooses it where V8's snapshot or CEF lies
-  beside the program, `tso-arm app run` for the programs it marks as Chromium or Electron; `--mode` or `TSO_ARM_MODE`
-  chosen stays (notes section 72).
+  cache: 4.8, then 1.6 s (5.1, 5.1, then 1.8 s before). `tso-arm run` chooses it where V8's snapshot lies beside the
+  program, `tso-arm app run` for the programs it marks as Chromium or Electron; `--mode` or `TSO_ARM_MODE` chosen
+  stays. Not for CEF (`libcef.so` beside the program): Spotify started so drew no window on GitHub's runner, its
+  processes crashing, and keeps the page protocol and its fallback, under which it draws (notes section 72).
 - `TSO_DISKCACHE_LOG=1` reports a store of the cache's writer or a drain of its queue that took 50 ms or more.
 
 ## 0.4.17 (2026-11-28)

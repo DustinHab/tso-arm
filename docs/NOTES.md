@@ -3609,6 +3609,16 @@ stored as the later runs look for it. Chrome's headless shell from an empty cach
 then 1.9 s (6.3, 6.2, then 2.0 s under the page protocol); without the log, as tso-arm now chooses: 4.8, 1.6, 1.6 s
 (5.1, 5.1, 1.8 s before). Chrome's crashpad handler under Slack fell back as well.
 
+Not for CEF: in the Apps workflow Spotify (CEF) in full ordering from its start opened its window and drew nothing in
+90 s, twice, children writing the cache or not (`TSO_DISKCACHE_CHILD=0`), while through the page protocol it drew
+after 11 s as before; Discord, Slack, Signal, Zoom, Edge and Chrome drew in full ordering. `TSO_ARM_SIGLOG=1` there:
+SIGTRAPs of the guest's own (failed checks) in some of its processes, and in others a SIGSEGV at address 0 arriving
+in `rt_tgsigqueueinfo` (the guest's crash handler raising the crash's signal again: a passthrough in FEX). Why
+starting in full ordering crashes it where starting under the views and falling back does not is open (on the Pi
+Spotify cannot start without a display: GTK ends it first). A program with `libcef.so` beside it keeps the page
+protocol as tso-arm's choice (Steam's steamwebhelper, CEF as well, runs in full ordering through `tso-arm steam`, as
+before).
+
 Now and then a run took 5 to 11 s instead of 1.8 s, once in 15 to 30 runs, with the cache on the SD card (not when
 it was in `/tmp`, a tmpfs): the same CPU time as a fast run, and thousands of ticks of I/O wait in the whole system
 (a fast run: under 10). No store of the cache's writer and no drain of its queue at an exit took 50 ms in such a run

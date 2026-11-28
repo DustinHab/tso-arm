@@ -274,10 +274,13 @@ cp $B/getenv $B/chromiumlike/getenv && : >$B/chromiumlike/v8_context_snapshot.bi
 mi="$(env -u FEX_MAXINST $T run $B/getenv FEX_MAXINST) $(env -u FEX_MAXINST $T run $B/chromiumlike/getenv FEX_MAXINST) $(FEX_MAXINST=300 $T run $B/chromiumlike/getenv FEX_MAXINST)"
 [ "$mi" = "150 50 300" ] || fail "FEX_MAXINST for a program, one of Chromium's family, one with FEX_MAXINST=300: $mi (150 50 300)"
 ok "FEX_MAXINST: 150 for a program, 50 for one of Chromium's family, 300 where it was set so"
-# and full ordering from the start for Chromium's family (it falls back at once anyway), unless a mode was chosen
-md="$(env -u TSO_ARM_MODE -u FEX_TSOENABLED $T run $B/getenv FEX_TSOENABLED) $(env -u TSO_ARM_MODE -u FEX_TSOENABLED $T run $B/chromiumlike/getenv FEX_TSOENABLED) $(env -u FEX_TSOENABLED TSO_ARM_MODE=tso $T run $B/chromiumlike/getenv FEX_TSOENABLED)"
-[ "$md" = "(unset) 1 (unset)" ] || fail "FEX_TSOENABLED for a program, one of Chromium's family, one with TSO_ARM_MODE=tso: $md ((unset) 1 (unset))"
-ok "modes: the page protocol for a program, full ordering for one of Chromium's family, the page protocol where it was chosen"
+# and full ordering from the start for Chromium's family (it falls back at once anyway), unless a mode was chosen or
+# it is CEF (libcef.so beside it: Spotify drew nothing so)
+rm -rf $B/ceflike && mkdir -p $B/ceflike
+cp $B/getenv $B/ceflike/getenv && : >$B/ceflike/v8_context_snapshot.bin && : >$B/ceflike/libcef.so
+md="$(env -u TSO_ARM_MODE -u FEX_TSOENABLED $T run $B/getenv FEX_TSOENABLED) $(env -u TSO_ARM_MODE -u FEX_TSOENABLED $T run $B/chromiumlike/getenv FEX_TSOENABLED) $(env -u FEX_TSOENABLED TSO_ARM_MODE=tso $T run $B/chromiumlike/getenv FEX_TSOENABLED) $(env -u TSO_ARM_MODE -u FEX_TSOENABLED $T run $B/ceflike/getenv FEX_TSOENABLED)"
+[ "$md" = "(unset) 1 (unset) (unset)" ] || fail "FEX_TSOENABLED for a program, one of Chromium's family, one with TSO_ARM_MODE=tso, a CEF one: $md ((unset) 1 (unset) (unset))"
+ok "modes: the page protocol for a program, full ordering for one of Chromium's family, the page protocol where it was chosen and for CEF"
 
 # posix_spawn (clone with CLONE_VM | CLONE_VFORK) while other threads translate code: the child as a vfork, FEX's
 # locks and maps in the parent whole (Slack's renderer hung on them)

@@ -545,9 +545,10 @@ cmd_run() {
         # Their processes fall back to full ordering at their start anyway (they reserve more address space than the
         # views' window holds, notes section 64), and the first run's code went into the disk cache under the
         # fallen-back views' state while later runs start without views: their second start translated everything
-        # again (6.2 s for Chrome's headless shell instead of 1.9 s, notes section 72). Full ordering from the start
-        # unless a mode was chosen.
-        if [ "$mode" = tso ] && [ -z "$chosen" ]; then
+        # again (5.1 s for Chrome's headless shell instead of 1.6 s, notes section 72). Full ordering from the start
+        # unless a mode was chosen; not for CEF (libcef.so beside the program): Spotify started so drew no window,
+        # its processes crashing, while through the page protocol and its fallback it draws.
+        if [ "$mode" = tso ] && [ -z "$chosen" ] && [ ! -f "$(dirname "$prog")/libcef.so" ]; then
             mode=full
         fi
     fi
