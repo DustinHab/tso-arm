@@ -1,6 +1,11 @@
 # Changes
 
-## Unreleased
+## 0.4.18 (2026-11-28)
+
+Chrome, Edge and Electron programs start in full ordering, which they fell back to at once anyway: their second start
+is as fast as their later ones. Install or update with
+`curl -fsSL https://raw.githubusercontent.com/DustinHab/tso-arm/main/tools/get.sh | sh`, `tso-arm update`, the
+release's `.deb` or `.rpm`; the FEX patch changed, so this release brings FEX prebuilt anew.
 
 - **Chromium's family runs in full ordering from its first start**: its processes fell back to it at their start
   anyway, and the first run's code went into the disk cache under the fallen-back views' state while the next runs
